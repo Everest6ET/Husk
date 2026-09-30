@@ -111,6 +111,23 @@ targets:
           if [ ! -f "$FW" ]; then
             bunzip2 -c "$BIOS/edk2-aarch64-code.fd.bz2" > "$FW"
           fi
+
+          # These two qcow2 files are tiny sparse seeds (64 MiB and 16 GiB
+          # virtual). The app copies them into Documents on first launch; the
+          # pre-booted snapshot later replaces the userdata seed in place.
+          QEMU_IMG="$(command -v qemu-img || true)"
+          if [ -z "$QEMU_IMG" ]; then
+            echo "error: qemu-img is required to generate the firmware and userdata seeds" >&2
+            exit 1
+          fi
+          VARS_SEED="$BUILT_PRODUCTS_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/lineage-efi-vars-seed.fd"
+          VDB_SEED="$BUILT_PRODUCTS_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/lineage-vdb-seed.qcow2"
+          rm -f "$VARS_SEED" "$VDB_SEED"
+          "$QEMU_IMG" create -f qcow2 "$VARS_SEED" 64M
+          "$QEMU_IMG" create -f qcow2 "$VDB_SEED" 16G
         outputFiles:
           - "$(BUILT_PRODUCTS_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/vmlinuz-virt"
           - "$(BUILT_PRODUCTS_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/initramfs-virt"
+          - "$(BUILT_PRODUCTS_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/edk2-aarch64-code.fd"
+          - "$(BUILT_PRODUCTS_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/lineage-efi-vars-seed.fd"
+          - "$(BUILT_PRODUCTS_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/lineage-vdb-seed.qcow2"
