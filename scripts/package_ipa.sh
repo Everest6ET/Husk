@@ -14,6 +14,7 @@ set -euo pipefail
 HUSK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DD="${DD:-/tmp/husk_ipa}"
 OUT="${1:-$HOME/Desktop/Husk.ipa}"
+mkdir -p "$DD"
 
 # The .app is not the only thing that can be stale. The Xcode target links the
 # dylib staged in build/ios-arm64/lib, which is filled in by build_ios.sh's qemu
@@ -113,8 +114,9 @@ for lib in libqemu-aarch64-softmmu.dylib libANGLE-shared.dylib; do
     fi
 done
 
-# Guest images, or QEMU fails with "could not load kernel".
-for f in vmlinuz-virt initramfs-virt husk-jit.js; do
+# Guest images, firmware, and blank disk seeds required by first launch.
+for f in vmlinuz-virt initramfs-virt husk-jit.js \
+         edk2-aarch64-code.fd lineage-efi-vars-seed.fd lineage-vdb-seed.qcow2; do
     if [ ! -f "$APP/$f" ]; then
         echo "  MISSING  $f" >&2
         rc=1

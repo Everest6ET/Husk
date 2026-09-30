@@ -63,6 +63,9 @@ final class GuestImage: ObservableObject {
     /// goes silent about a minute after every boot.
     static let imageVersion = "v12"
 
+    /// Version shared by the blank userdata seed and downloaded snapshots.
+    private static let userdataSeedVersion = "v10"
+
     /// Whether to fetch the pre-booted snapshot rather than boot from cold.
     static var wantsSnapshot: Bool {
         UserDefaults.standard.object(forKey: "husk.downloadSnapshot") as? Bool ?? true
@@ -124,9 +127,8 @@ final class GuestImage: ObservableObject {
     nonisolated var snapshotStampPath: String {
         documents.appendingPathComponent("husk-shipped-snapshot").path
     }
-    /// Whether this install is running on the shipped snapshot, which pins the
-    /// machine's RAM size and resolution to what the snapshot was saved with.
-    /// True only when the installed snapshot belongs to the CURRENT generation.
+    /// Whether a valid pre-booted snapshot is present. Version freshness is
+    /// checked separately against the remote manifest.
     ///
     /// Existence alone was not enough. The stamp survived an image version bump,
     /// so an install that already had the v1 snapshot skipped downloading the v5
@@ -135,6 +137,9 @@ final class GuestImage: ObservableObject {
     /// that could not happen and cold-booted, which looks exactly like the
     /// snapshot feature silently not existing.
     nonisolated var hasShippedSnapshot: Bool {
+        // The stamp files can outlive the disk they describe. A snapshot only
+        // counts as installed while its qcow2 is present and valid.
+        guard Self.validate(path: userdataPath).problem == nil else { return false }
         // A recorded digest is the modern answer. Comparing the stamp to
         // imageVersion, as this used to, quietly tied "do I have a snapshot" to
         // "is the app's generation string current" -- so publishing a new image
@@ -235,7 +240,8 @@ final class GuestImage: ObservableObject {
             update = .image(bytes: m.image.size + m.snapshot.size)
             return
         }
-        if Self.wantsSnapshot, installedSnapshotDigest != m.snapshot.sha256 {
+        if Self.wantsSnapshot,
+           (!hasShippedSnapshot || installedSnapshotDigest != m.snapshot.sha256) {
             HuskLog.log("guest", "snapshot differs: have "
                       + "\(installedSnapshotDigest?.prefix(12) ?? "nothing"), "
                       + "release has \(m.snapshot.sha256.prefix(12))")
@@ -433,12 +439,30 @@ final class GuestImage: ObservableObject {
         let seedStamp = URL(fileURLWithPath: userdataPath + ".seed")
         // v3: the guest image changed, so userdata built against the old /system --
         // including a multi-gigabyte snapshot of it -- has to go.
-        let seedVersion = "v10"
+        let seedVersion = Self.userdataSeedVersion
         let seededWith = try? String(contentsOf: seedStamp, encoding: .utf8)
         if fm.fileExists(atPath: userdataPath), seededWith != seedVersion {
-            HuskLog.log("guest", "userdata seed \(seededWith ?? "unversioned") -> \(seedVersion); "
-                               + "starting from a clean partition")
-            try? fm.removeItem(atPath: userdataPath)
+            if hasShippedSnapshot {
+                // Snapshot installs use the same userdata disk but historically
+                // did not write this seed stamp. Repair the stamp instead of
+                // replacing a valid, downloaded snapshot with an empty disk.
+                try seedVersion.write(to: seedStamp, atomically: true, encoding: .utf8)
+                HuskLog.log("guest", "preserving installed snapshot and repairing its "
+                                   + "userdata seed stamp")
+            } else {
+                // Check for the replacement before deleting existing data. A
+                // missing resource must not turn an upgrade into a missing disk.
+                guard let seed = Bundle.main.path(forResource: "lineage-vdb-seed", ofType: "qcow2") else {
+                    throw NSError(domain: "husk", code: 3, userInfo: [
+                        NSLocalizedDescriptionKey: "lineage-vdb-seed.qcow2 missing from the app bundle"])
+                }
+                HuskLog.log("guest", "userdata seed \(seededWith ?? "unversioned") -> \(seedVersion); "
+                                   + "starting from a clean partition")
+                try? fm.removeItem(atPath: userdataPath)
+                try fm.copyItem(atPath: seed, toPath: userdataPath)
+                try seedVersion.write(to: seedStamp, atomically: true, encoding: .utf8)
+                HuskLog.log("guest", "userdata disk staged to Documents")
+            }
         }
         if !fm.fileExists(atPath: userdataPath) {
             guard let seed = Bundle.main.path(forResource: "lineage-vdb-seed", ofType: "qcow2") else {
@@ -446,7 +470,7 @@ final class GuestImage: ObservableObject {
                     NSLocalizedDescriptionKey: "lineage-vdb-seed.qcow2 missing from the app bundle"])
             }
             try fm.copyItem(atPath: seed, toPath: userdataPath)
-            try? seedVersion.write(to: seedStamp, atomically: true, encoding: .utf8)
+            try seedVersion.write(to: seedStamp, atomically: true, encoding: .utf8)
             HuskLog.log("guest", "userdata disk staged to Documents")
         }
     }
@@ -477,9 +501,18 @@ final class GuestImage: ObservableObject {
 
     func downloadSnapshotNow() {
         if case .downloading = state { return }
-        guard !hasShippedSnapshot else {
-            HuskLog.log("guest", "snapshot already installed")
-            return
+        if hasShippedSnapshot {
+            // A valid but older snapshot may be on disk when the manifest
+            // offers a replacement. Do not let the presence check block that
+            // update; only skip when the installed digest matches the release.
+            guard let expected = manifest?.snapshot.sha256 else {
+                HuskLog.log("guest", "snapshot already installed; release manifest unavailable")
+                return
+            }
+            if installedSnapshotDigest == expected {
+                HuskLog.log("guest", "snapshot already installed")
+                return
+            }
         }
         isFetchingSnapshot = true
         state = .downloading(progress: 0, received: 0, total: 0)
@@ -526,6 +559,8 @@ final class GuestImage: ObservableObject {
                 try? FileManager.default.removeItem(at: dest)
                 try Self.gunzip(from: tempURL, to: dest)
                 try? FileManager.default.removeItem(at: tempURL)
+                try Self.userdataSeedVersion.write(toFile: self.userdataPath + ".seed",
+                                                   atomically: true, encoding: .utf8)
                 try Self.imageVersion.write(toFile: self.snapshotStampPath,
                                             atomically: true, encoding: .utf8)
                 if let digest {
@@ -586,6 +621,8 @@ final class GuestImage: ObservableObject {
                     try? FileManager.default.removeItem(at: fetched.url)
                     try? fetched.digest.write(toFile: self.snapshotDigestPath,
                                               atomically: true, encoding: .utf8)
+                    try Self.userdataSeedVersion.write(toFile: self.userdataPath + ".seed",
+                                                       atomically: true, encoding: .utf8)
                     self.recordSnapshotPins()
                     let size = (try? FileManager.default
                         .attributesOfItem(atPath: dest.path)[.size] as? Int) ?? 0
