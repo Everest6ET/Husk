@@ -211,6 +211,8 @@ struct RunningAppView: View {
                     withAnimation(.easeInOut(duration: 0.15)) { showChrome.toggle() }
                 }
         }
+        // Over the guest, so dark whatever the app's appearance is.
+        .environment(\.colorScheme, .dark)
         .statusBarHidden(true)
     }
 }
