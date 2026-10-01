@@ -13,13 +13,12 @@ struct ContentView: View {
     @StateObject private var bridge = HuskBridgeFS.shared
     @ObservedObject private var host = AndroidHost.shared
 
-    /// How Android was started, which decides what the app shows while it runs.
-    enum StartMode { case fullScreen, library }
-    @State private var mode: StartMode = .fullScreen
     @State private var started = false
     @State private var showLogs = false
     /// True while the guest's own screen is being shown instead of the library.
-    /// Starts true because first boot always needs the Android wizard.
+    /// Starts false: the tab UI is the home screen, and the guest -- including
+    /// first boot's Android wizard, which runs underneath it -- is shown on
+    /// demand from the library.
     @State private var showGuestScreen = false
     @ObservedObject private var router = Router.shared
     @State private var showOnboarding = Onboarding.needed
@@ -102,16 +101,10 @@ struct ContentView: View {
             }
 
             if showSetup {
-                // Before the guest exists there is nothing to cover, so the
+                // Before the runtime exists there is nothing to cover, so the
                 // start screen sits above the tabs rather than inside one.
-                SetupView(showLogs: $showLogs) { chosen in
-                    mode = chosen
-                    HuskLog.log("ui", "start mode: "
-                              + (chosen == .fullScreen ? "full screen" : "library"))
-                    showGuestScreen = (chosen == .fullScreen)
-                    start()
-                }
-                .transition(.opacity)
+                SetupView(showLogs: $showLogs)
+                    .transition(.opacity)
             }
         }
         .tint(Theme.accent)
@@ -182,16 +175,18 @@ struct ContentView: View {
         start()
     }
 
-    /// Whether the start screen has anything to offer that the library does not.
+    /// Whether the start screen should be up at all.
     ///
-    /// On a first run it has everything: the runtime has to be downloaded and
-    /// there is no catalogue, so there is literally nothing else to draw. Once
-    /// apps have been seen once they are on disk, and covering them with a
-    /// black screen holding two buttons throws away the whole point of caching
-    /// them -- the library says Android is not running and offers to start it,
-    /// which is all the start screen was saying.
+    /// Only while there is no runtime to launch: once the guest image is on
+    /// disk the tab UI is the home screen. This used to also stay up whenever
+    /// no third-party packages were installed, which pinned anyone who had
+    /// only ever run Android full-screen to the two start cards on every
+    /// launch -- and with JIT off put a second copy of the JIT message over
+    /// the library's own. The library already says all of it: Start when it
+    /// can, "Husk needs JIT" when it cannot, install an APK when there is
+    /// nothing here.
     private var showSetup: Bool {
-        !started && (guest.state != .ready || host.packages.isEmpty)
+        !started && guest.state != .ready
     }
 
     /// Start the guest from the library, without leaving it.
@@ -421,14 +416,14 @@ struct GuestScreenView: View {
     }
 }
 
-/// Everything before the library: download the runtime, attach the debugger, wait
-/// for Android to come up.
+/// The runtime download screen: what shows while there is no guest image on
+/// disk to launch -- missing, downloading, installing, or failed (see
+/// ContentView.showSetup for when that is).
 struct SetupView: View {
     @ObservedObject private var guest = GuestImage.shared
     @ObservedObject private var runner = QemuRunner.shared
     @Environment(\.colorScheme) private var scheme
     @Binding var showLogs: Bool
-    let onStart: (ContentView.StartMode) -> Void
 
     @State private var profile: QemuRunner.Profile = .phase1Android
     @State private var showSettings = false
@@ -537,52 +532,13 @@ struct SetupView: View {
                         .buttonStyle(.borderedProminent)
                 }
             case .ready:
-                VStack(spacing: 12) {
-                    if JITBootstrap.isDebuggerAttached {
-                        // The library first: it is the thing Husk is for. Full
-                        // screen is the escape hatch for everything the library
-                        // cannot express -- settings, the launcher, a wizard.
-                        VStack(spacing: 10) {
-                            ModeCard(icon: "square.grid.2x2.fill",
-                                     title: "App library",
-                                     subtitle: "Install APKs and open them straight, "
-                                             + "without the Android desktop.",
-                                     tint: .blue) { onStart(.library) }
-
-                            ModeCard(icon: "rectangle.inset.filled",
-                                     title: "Full screen Android",
-                                     subtitle: "The whole desktop, as if it were a "
-                                             + "second phone.",
-                                     tint: .orange) { onStart(.fullScreen) }
-                        }
-                        .padding(.horizontal, 24)
-                        .padding(.top, 4)
-                    } else {
-                        Text("Husk needs executable memory, which on iOS only an attached debugger can grant.")
-                            .font(.callout).foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center).padding(.horizontal, 36)
-                        VStack(spacing: 12) {
-                            Button("Enable JIT with StikDebug") {
-                                _ = JITBootstrap.requestAttach()
-                            }
-                            .buttonStyle(.borderedProminent)
-                            
-                            Button("Enable JIT with TrollStore") {
-                                _ = JITBootstrap.requestTrollStoreAttach()
-                            }
-                            .buttonStyle(.bordered)
-                        }
-                    }
-                    // Attached and still unable to claim memory is a different
-                    // problem from not being attached, and it used to present as
-                    // a crash rather than as anything readable.
-                    if let why = JITBootstrap.lastFailure {
-                        Text(why)
-                            .font(.caption).foregroundStyle(.orange)
-                            .multilineTextAlignment(.center).padding(.horizontal, 30)
-                            .padding(.top, 6)
-                    }
-                }
+                // Unreachable: SetupView is mounted only while there is no
+                // runtime to launch -- ContentView.showSetup is false the
+                // moment the image on disk is valid, and the tab UI takes over
+                // from there. The start cards and the JIT hand-off that used
+                // to live here are covered by the library. An empty arm keeps
+                // the switch exhaustive.
+                EmptyView()
             }
         }
     }
@@ -636,61 +592,6 @@ struct AppIcon: View {
         .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
     }
 }
-
-/// One of the two ways to start Android.
-///
-/// A card rather than a button because the choice needs a sentence to explain
-/// it, and a sentence crammed into a bordered button is what the previous
-/// version looked like.
-private struct ModeCard: View {
-    let icon: String
-    let title: String
-    let subtitle: String
-    let tint: Color
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 14) {
-                Image(systemName: icon)
-                    .font(.system(size: 19, weight: .semibold))
-                    .foregroundStyle(tint)
-                    .frame(width: 44, height: 44)
-                    .background(tint.opacity(0.16),
-                                in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(title)
-                        .font(.callout.weight(.semibold))
-                        .foregroundStyle(Theme.text)
-                    Text(subtitle)
-                        .font(.caption2)
-                        .foregroundStyle(Theme.text.opacity(0.55))
-                        .multilineTextAlignment(.leading)
-                        // Without this the subtitle is truncated to one line
-                        // inside an HStack rather than wrapping.
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                Spacer(minLength: 4)
-
-                Image(systemName: "chevron.right")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(Theme.text.opacity(0.28))
-            }
-            .padding(14)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Theme.text.opacity(0.07),
-                        in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .strokeBorder(Theme.text.opacity(0.09), lineWidth: 1)
-            )
-        }
-        .buttonStyle(.plain)
-    }
-}
-
 /// Live log tail with a share button. The share sheet is the practical way to get
 /// husk.log and the guest's serial console off the device.
 /// Settings, reached from the gear on the start screen.
