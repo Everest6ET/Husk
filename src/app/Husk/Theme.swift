@@ -4,55 +4,131 @@ import UIKit
 
 /// Husk's visual vocabulary, in one place so every screen agrees.
 ///
-/// The app is dark, full stop. Not "dark when the phone is", which is a
-/// different app that happens to share a binary: the depth here comes from a
-/// near-black page with surfaces lifted a few points out of it, and that
-/// arrangement has no light-mode translation that is the same design. The one
-/// thing that still follows the system is the home screen icon, which is the
-/// system's to draw.
+/// Dark is the design: a near-black page with surfaces lifted a few points out
+/// of it. Light is the same arrangement turned over — a pale page with white
+/// cards on it, edged by the same hairline — so depth still reads as "lifted",
+/// not as grey boxes. Every colour here is resolved per appearance, which is
+/// why none of them are plain `Color(red:green:blue:)` any more.
+///
+/// Which appearance is shown is the user's choice (`Theme.Appearance`), and it
+/// defaults to dark, so nobody who already has the app sees it change.
 enum Theme {
     /// The page. Near-black with a trace of blue in it, so surfaces above it
-    /// read as lifted rather than as grey boxes on black.
-    static let bg = Color(red: 0.043, green: 0.051, blue: 0.071)
+    /// read as lifted rather than as grey boxes on black. In light, a cool
+    /// off-white, so the white cards have something to sit above.
+    static let bgUI = UIColor.husk(dark: (0.043, 0.051, 0.071), light: (0.953, 0.957, 0.969))
+    static let bg = Color(uiColor: bgUI)
     /// Cards, rows, anything holding content.
-    static let surface = Color(red: 0.082, green: 0.094, blue: 0.129)
+    static let surface = Color(uiColor: .husk(dark: (0.082, 0.094, 0.129),
+                                              light: (1.000, 1.000, 1.000)))
     /// One step further up: chips, icon wells, the things that sit on a card.
-    static let surfaceHigh = Color(red: 0.118, green: 0.133, blue: 0.180)
+    static let surfaceHigh = Color(uiColor: .husk(dark: (0.118, 0.133, 0.180),
+                                                  light: (0.914, 0.922, 0.941)))
     /// The edge that separates a surface from the page.
-    static let hairline = Color.white.opacity(0.07)
+    static let hairlineUI = UIColor { $0.userInterfaceStyle == .light
+        ? UIColor.black.withAlphaComponent(0.08) : UIColor.white.withAlphaComponent(0.07) }
+    static let hairline = Color(uiColor: hairlineUI)
 
-    static let text = Color(red: 0.949, green: 0.957, blue: 0.976)
-    static let textDim = Color(red: 0.545, green: 0.573, blue: 0.651)
+    static let textUI = UIColor.husk(dark: (0.949, 0.957, 0.976), light: (0.071, 0.078, 0.102))
+    static let text = Color(uiColor: textUI)
+    static let textDim = Color(uiColor: .husk(dark: (0.545, 0.573, 0.651),
+                                              light: (0.400, 0.424, 0.494)))
 
-    /// One accent, taken from the app icon, spent only on what you press.
+    /// One accent, taken from the app icon, spent only on what you press. It
+    /// holds its contrast on both pages, so it is the one colour that does not
+    /// change.
     static let accent = Color(red: 0.353, green: 0.322, blue: 0.945)
     static let accentSoft = Color(red: 0.353, green: 0.322, blue: 0.945).opacity(0.16)
-    static let good = Color(red: 0.204, green: 0.820, blue: 0.478)
+    /// Darker on a light page: the dark-mode green all but vanishes on white.
+    static let good = Color(uiColor: .husk(dark: (0.204, 0.820, 0.478),
+                                           light: (0.122, 0.612, 0.333)))
+    /// What a floating thing casts. A light page wants far less of it.
+    static let shadow = Color(uiColor: UIColor { $0.userInterfaceStyle == .light
+        ? UIColor.black.withAlphaComponent(0.12) : UIColor.black.withAlphaComponent(0.4) })
+
+    /// The appearance the app is drawn in.
+    ///
+    /// Dark is the default and the design the app was drawn for; System follows
+    /// the phone; Light pins the light arrangement.
+    enum Appearance: String, CaseIterable, Identifiable {
+        case dark, light, system
+
+        static let key = "husk.appearance"
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .dark: return "Dark"
+            case .light: return "Light"
+            case .system: return "System"
+            }
+        }
+
+        var style: UIUserInterfaceStyle {
+            switch self {
+            case .dark: return .dark
+            case .light: return .light
+            case .system: return .unspecified
+            }
+        }
+
+        static var current: Appearance {
+            Appearance(rawValue: UserDefaults.standard.string(forKey: key) ?? "") ?? .dark
+        }
+    }
+
+    /// Applies an appearance to every window the app has.
+    ///
+    /// Through UIKit rather than `.preferredColorScheme`: going back to "follow
+    /// the system" means handing the window `nil`, and SwiftUI does not reliably
+    /// let go of a scheme it has once forced. The window's own override does,
+    /// and sheets and covers presented from it inherit it.
+    static func apply(_ appearance: Appearance) {
+        for case let scene as UIWindowScene in UIApplication.shared.connectedScenes {
+            for window in scene.windows {
+                window.overrideUserInterfaceStyle = appearance.style
+            }
+        }
+    }
 
     static let cardCorner: CGFloat = 18
     static let rowCorner: CGFloat = 14
 
     static var backdrop: some View { bg.ignoresSafeArea() }
 
-    /// Dark bars to match the page, applied once at launch. SwiftUI has no
-    /// vocabulary for the tab bar's own material, so this is UIKit's.
+    /// Bars to match the page, applied once at launch. SwiftUI has no
+    /// vocabulary for the tab bar's own material, so this is UIKit's. The
+    /// colours are dynamic, so the bars follow the appearance without being
+    /// set again.
     static func applyBarAppearance() {
         let tab = UITabBarAppearance()
         tab.configureWithOpaqueBackground()
-        tab.backgroundColor = UIColor(bg)
-        tab.shadowColor = UIColor.white.withAlphaComponent(0.08)
+        tab.backgroundColor = bgUI
+        tab.shadowColor = hairlineUI
         UITabBar.appearance().standardAppearance = tab
         UITabBar.appearance().scrollEdgeAppearance = tab
 
         let nav = UINavigationBarAppearance()
         nav.configureWithOpaqueBackground()
-        nav.backgroundColor = UIColor(bg)
+        nav.backgroundColor = bgUI
         nav.shadowColor = .clear
-        nav.titleTextAttributes = [.foregroundColor: UIColor(text)]
-        nav.largeTitleTextAttributes = [.foregroundColor: UIColor(text)]
+        nav.titleTextAttributes = [.foregroundColor: textUI]
+        nav.largeTitleTextAttributes = [.foregroundColor: textUI]
         UINavigationBar.appearance().standardAppearance = nav
         UINavigationBar.appearance().scrollEdgeAppearance = nav
         UINavigationBar.appearance().compactAppearance = nav
+    }
+}
+
+extension UIColor {
+    /// A colour that is one thing on a dark page and another on a light one.
+    static func husk(dark: (CGFloat, CGFloat, CGFloat),
+                     light: (CGFloat, CGFloat, CGFloat)) -> UIColor {
+        UIColor { traits in
+            let c = traits.userInterfaceStyle == .light ? light : dark
+            return UIColor(red: c.0, green: c.1, blue: c.2, alpha: 1)
+        }
     }
 }
 
@@ -76,9 +152,13 @@ extension View {
     /// design language arguing with the app's, and over a dark guest screen it
     /// mostly reads as smeared. A flat panel with a hairline is what the design
     /// asks for, and it looks the same on every iOS.
+    ///
+    /// Always the dark one, whatever the app's appearance: it floats over a
+    /// guest that is mostly black, and the controls on it are drawn in white.
     func huskPanel<S: Shape>(_ shape: S) -> some View {
         self.background(Theme.surface.opacity(0.94), in: shape)
             .overlay(shape.stroke(Color.white.opacity(0.10), lineWidth: 0.5))
+            .environment(\.colorScheme, .dark)
     }
 }
 
@@ -178,10 +258,11 @@ struct CircleButton: View {
 /// Husk's mark, as drawn by whichever app icon is in use.
 struct HuskMark: View {
     var size: CGFloat = 32
+    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
         Group {
-            if let art = HuskAppIcon.current.preview(dark: true) {
+            if let art = HuskAppIcon.current.preview(dark: scheme == .dark) {
                 Image(uiImage: art).resizable().scaledToFit()
             } else {
                 Image(systemName: "cube.fill").font(.system(size: size * 0.6))
@@ -418,7 +499,7 @@ struct ToastView: View {
                     in: RoundedRectangle(cornerRadius: Theme.rowCorner, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: Theme.rowCorner, style: .continuous)
                     .stroke(Theme.hairline, lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.4), radius: 18, y: 8)
+        .shadow(color: Theme.shadow, radius: 18, y: 8)
     }
 }
 

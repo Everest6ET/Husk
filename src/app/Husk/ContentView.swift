@@ -26,6 +26,7 @@ struct ContentView: View {
     /// True while the launch boot screen is up, rather than the library.
     @State private var booting = false
     @Environment(\.scenePhase) private var scenePhase
+    @AppStorage(Theme.Appearance.key) private var appearance = Theme.Appearance.dark
 
     var body: some View {
         ZStack {
@@ -114,10 +115,10 @@ struct ContentView: View {
             }
         }
         .tint(Theme.accent)
-        // One appearance, not the phone's. The design is built on a near-black
-        // page with surfaces lifted out of it; there is no light arrangement of
-        // it that is the same app.
-        .preferredColorScheme(.dark)
+        // The user's appearance, dark unless they chose otherwise. Set on the
+        // window rather than with .preferredColorScheme — see Theme.apply.
+        .onAppear { Theme.apply(appearance) }
+        .onChange(of: appearance) { Theme.apply($0) }
         .animation(.snappy(duration: 0.22), value: showGuestScreen)
         .animation(.snappy(duration: 0.25), value: host.toast)
         .fullScreenCover(isPresented: $showOnboarding) {
@@ -405,6 +406,9 @@ struct GuestScreenView: View {
                 }
             }
         }
+        // The guest's screen is dark in every appearance: it is a picture of
+        // another phone, mostly black, and its chrome is drawn to sit on that.
+        .environment(\.colorScheme, .dark)
         // On the screen rather than the button: the chrome can hide while the
         // document picker is up, and an importer attached to a view that goes
         // away goes away with it.
@@ -461,7 +465,7 @@ struct SetupView: View {
                     Button { showSettings = true } label: {
                         Image(systemName: "gearshape")
                             .font(.title2)
-                            .foregroundStyle(.white.opacity(0.75))
+                            .foregroundStyle(Theme.text.opacity(0.75))
                             .padding(14)
                     }
                 }
@@ -658,10 +662,10 @@ private struct ModeCard: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(title)
                         .font(.callout.weight(.semibold))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(Theme.text)
                     Text(subtitle)
                         .font(.caption2)
-                        .foregroundStyle(.white.opacity(0.55))
+                        .foregroundStyle(Theme.text.opacity(0.55))
                         .multilineTextAlignment(.leading)
                         // Without this the subtitle is truncated to one line
                         // inside an HStack rather than wrapping.
@@ -672,15 +676,15 @@ private struct ModeCard: View {
 
                 Image(systemName: "chevron.right")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(.white.opacity(0.28))
+                    .foregroundStyle(Theme.text.opacity(0.28))
             }
             .padding(14)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.white.opacity(0.07),
+            .background(Theme.text.opacity(0.07),
                         in: RoundedRectangle(cornerRadius: 16, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .strokeBorder(Color.white.opacity(0.09), lineWidth: 1)
+                    .strokeBorder(Theme.text.opacity(0.09), lineWidth: 1)
             )
         }
         .buttonStyle(.plain)

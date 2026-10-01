@@ -29,7 +29,7 @@ struct SettingsTab: View {
                                  "Renderer, sound")
                             RowDivider()
                             link(AppearanceSettings(), "paintbrush", "Appearance",
-                                 "App icon")
+                                 "Light or dark, app icon")
                         }
 
                         group("Emulator") {
@@ -102,7 +102,7 @@ struct SettingsTab: View {
 }
 
 /// A Form, on Husk's page rather than the system's.
-private struct DarkForm: ViewModifier {
+private struct HuskForm: ViewModifier {
     func body(content: Content) -> some View {
         content
             .scrollContentBackground(.hidden)
@@ -113,7 +113,7 @@ private struct DarkForm: ViewModifier {
 }
 
 extension View {
-    func huskForm() -> some View { modifier(DarkForm()) }
+    func huskForm() -> some View { modifier(HuskForm()) }
 }
 
 // MARK: - Library
@@ -577,6 +577,8 @@ struct SavedMachineSettings: View {
 
 struct AppearanceSettings: View {
     @State private var appIcon = HuskAppIcon.current
+    @AppStorage(Theme.Appearance.key) private var appearance = Theme.Appearance.dark
+    @Environment(\.colorScheme) private var scheme
 
     private let columns = [GridItem(.adaptive(minimum: 92), spacing: 14)]
 
@@ -584,6 +586,25 @@ struct AppearanceSettings: View {
         ZStack {
             Theme.backdrop
             ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    Picker("Appearance", selection: $appearance) {
+                        ForEach(Theme.Appearance.allCases) { Text($0.title).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .onChange(of: appearance) { v in
+                        HuskLog.log("ui", "appearance: \(v.rawValue)")
+                    }
+                    Text("System follows the phone. The guest's own screen stays dark "
+                       + "either way — it is a picture of another phone.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.textDim)
+                        .padding(.horizontal, 4)
+                }
+                .padding(.horizontal, 18).padding(.top, 12)
+
+                SectionHeader(title: "App icon")
+                    .padding(.horizontal, 22).padding(.top, 14)
+
                 LazyVGrid(columns: columns, spacing: 14) {
                     ForEach(HuskAppIcon.allCases) { icon in
                         Button {
@@ -591,7 +612,7 @@ struct AppearanceSettings: View {
                             HuskAppIcon.apply(icon)
                         } label: {
                             VStack(spacing: 8) {
-                                if let art = icon.preview(dark: true) {
+                                if let art = icon.preview(dark: scheme == .dark) {
                                     Image(uiImage: art)
                                         .resizable().scaledToFit()
                                         .frame(width: 60, height: 60)
@@ -621,7 +642,7 @@ struct AppearanceSettings: View {
                         .buttonStyle(CardButtonStyle())
                     }
                 }
-                .padding(.horizontal, 18).padding(.top, 12)
+                .padding(.horizontal, 18).padding(.top, 8)
 
                 Text("Automatic follows the system appearance — light, dark and "
                    + "tinted. The others pin one look. iOS shows its own confirmation "
