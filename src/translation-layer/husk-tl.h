@@ -19,6 +19,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -54,6 +55,35 @@ void *husk_tl_read_entry(const char *apk, const char *name, size_t limit,
  * otherwise. Returns a JSON array; free with husk_tl_free().
  */
 char *husk_tl_run_checks(bool may_execute);
+
+/*
+ * The attempt: load the given APKs' arm64 libraries into JIT memory,
+ * relocate them against the shim, run a NativeActivity lifecycle for
+ * `seconds`, and report what happened. Nothing is called from more than
+ * one attempt at a time; husk_tl_attempt_start refuses while one is live.
+ *
+ * Returns 0 when the attempt started, -1 when it could not (already
+ * running, thread failure). Progress: husk_tl_attempt_done() turns true
+ * when the run is over, husk_tl_attempt_frames() counts frames the guest
+ * posted, husk_tl_attempt_log() hands over the run's log (caller frees),
+ * husk_tl_attempt_stop() asks for an early end, and husk_tl_attempt_reset()
+ * frees everything after a finished run.
+ */
+int  husk_tl_attempt_start(const char *const *apks, int count, int seconds);
+bool husk_tl_attempt_done(int *exit_code);
+int  husk_tl_attempt_frames(void);
+char *husk_tl_attempt_log(void);
+void husk_tl_attempt_stop(void);
+void husk_tl_attempt_reset(void);
+
+/* The frame the guest last posted, RGBX. Read between begin/end; the
+ * pointer is stable until end. Width, height and stride are pixels. */
+void husk_tl_frame_begin_read(void);
+void husk_tl_frame_end_read(void);
+const uint8_t *husk_tl_frame_pixels(void);
+int  husk_tl_frame_width(void);
+int  husk_tl_frame_height(void);
+int  husk_tl_frame_stride(void);
 
 void husk_tl_free(void *p);
 

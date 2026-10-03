@@ -6,9 +6,30 @@
 #ifndef HUSK_TL_INTERNAL_H
 #define HUSK_TL_INTERNAL_H
 
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+
+/* ------------------------------------------------------ the window ---
+ *
+ * The software ANativeWindow the guest draws RGBX into, shared by the
+ * loader (which publishes frames) and the shim (which implements the
+ * ANativeWindow calls), so both see one layout.
+ */
+typedef struct tl_window tl_window;
+struct tl_window {
+    int32_t width, height, format;   /* 1 == WINDOW_FORMAT_RGBA_8888 */
+    int stridePixels;
+    uint8_t *bits;                   /* width * height * 4 bytes */
+    pthread_mutex_t lock;            /* held between lock and unlockAndPost */
+    atomic_int refcount;
+};
+
+tl_window *tl_window_create(int width, int height);
+void tl_window_acquire(tl_window *w);
+void tl_window_release(tl_window *w);
 
 /* ------------------------------------------------------------------ JSON */
 
