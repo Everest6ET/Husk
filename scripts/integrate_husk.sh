@@ -23,7 +23,7 @@ else
     # carry paths from the machine the patch was made on (/tmp/region.c.orig).
     # No -p level finds those anywhere else, so a clean tree could never be
     # patched -- only a tree that already had been, which this step skips.
-    patch --silent "$Q/tcg/region.c" < "$HUSK_ROOT/patches/husk-qemu-ios-jit.patch" \
+    patch --batch --forward --silent "$Q/tcg/region.c" < "$HUSK_ROOT/patches/husk-qemu-ios-jit.patch" \
       || { echo "  FAILED to apply region.c patch" >&2; exit 1; }
 fi
 

@@ -17,3 +17,6 @@ DerivedData/
 # stray ar(1) extraction artifact
 __.SYMDEF*
 third_party/gpu/
+.build/
+*.ipa
+.freebuff/

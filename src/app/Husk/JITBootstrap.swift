@@ -72,7 +72,11 @@ enum JITBootstrap {
         HuskLog.log("jit", "claiming \(jitBytes / (1024 * 1024)) MiB of JIT memory now, "
                          + "before the guest download -- StikDebug does not stay attached")
         let ok = husk_ios_jit_prewarm(jitBytes)
-        if ok { prewarmed = true; lastFailure = nil }
+        if ok {
+            prewarmed = true
+            lastFailure = nil
+            detachIfDone()
+        }
         else if mapJITWorks {
             // Not a failure worth reporting: this is the ordinary shape of an
             // iOS that does not need a trap servicer. QEMU maps its own buffer
@@ -92,6 +96,38 @@ enum JITBootstrap {
         return ok
     }
 
+    /// Whether to leave StikDebug attached after the region is held.
+    ///
+    /// While a debugger is attached, every stop event (a `brk`, a signal, a
+    /// Mach exception) halts the whole process until StikDebug answers. iOS
+    /// suspends StikDebug soon after it hands the foreground back, so the next
+    /// stop freezes Husk with nothing in the log. On iOS 26 that looks like
+    /// Android hanging on its boot screen. The RX pages stay valid after detach
+    /// (AetherPS4 runs this way on TXM devices), so detaching once the region is
+    /// held removes the debugger from the picture.
+    static var keepDebuggerAttached: Bool {
+        get { UserDefaults.standard.bool(forKey: "husk.keepDebuggerAttached") }
+        set { UserDefaults.standard.set(newValue, forKey: "husk.keepDebuggerAttached") }
+    }
+
+    /// True once this process has told StikDebug to let go.
+    nonisolated(unsafe) static private(set) var detached = false
+
+    /// Release the debugger once the JIT region is held. It is no longer
+    /// needed for anything, and leaving it attached is what froze the app.
+    private static func detachIfDone() {
+        guard prewarmed, !detached, !keepDebuggerAttached else { return }
+        HuskLog.log("jit", "JIT region held; detaching StikDebug so a suspended "
+                         + "debugger cannot stall the process later")
+        husk_ios_jit_detach()
+        detached = true
+    }
+
+    /// Whether this device enforces TXM, so that only a trap servicer can grant
+    /// executable memory. Uses the same rule as the "TXM expected" line in the
+    /// log banner, so the two can never disagree.
+    static let deviceEnforcesTXM: Bool = HuskLog.expectsTXM(model: HuskLog.deviceModel)
+
     /// Why the last prewarm failed, for the UI to show.
     ///
     /// CS_DEBUGGED being set is not the same as the debugger servicing traps.
@@ -104,15 +140,27 @@ enum JITBootstrap {
 
     /// Whether a plain MAP_JIT mapping executes in this process.
     ///
-    /// The second of the two routes to executable memory, and the one QEMU
-    /// falls back to by itself when no dual mapping is handed to it. Asked of
-    /// the kernel rather than worked out from the device model and the iOS
-    /// version, which is how this went wrong: the old guess said every recent
-    /// phone on iOS 26 must have a trap servicer, so when StikDebug attached
-    /// without servicing traps -- which on iOS 26 it has no reason to do,
-    /// because MAP_JIT works there -- Husk concluded there was no executable
-    /// memory and refused to start. There was; nobody had asked.
-    static var mapJITWorks: Bool { husk_ios_jit_mapjit_works() }
+    /// Not run on a TXM device: MAP_JIT memory cannot execute there, and the
+    /// probe is not harmless. With a debugger attached, its fault goes to the
+    /// debugger as a stop, not to the probe's signal guard. If StikDebug is not
+    /// answering, that stop freezes the app. Views must never trigger this probe
+    /// directly.
+    static var mapJITWorks: Bool {
+        if let known = mapJITResult { return known }
+        let result: Bool
+        if deviceEnforcesTXM {
+            HuskLog.log("jit", "TXM device: MAP_JIT cannot execute here, not probing")
+            result = false
+        } else {
+            result = husk_ios_jit_mapjit_works()
+        }
+        mapJITResult = result
+        return result
+    }
+
+    /// The MAP_JIT answer if it has been worked out, without working it out.
+    /// For display only: views must never trigger the probe.
+    nonisolated(unsafe) static private(set) var mapJITResult: Bool?
 
     /// True only after a JIT region has been allocated AND passed the execute
     /// self-test — which happens inside `qemu_init`. It is therefore always false

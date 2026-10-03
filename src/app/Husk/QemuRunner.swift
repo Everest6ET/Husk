@@ -95,6 +95,11 @@ final class QemuRunner: ObservableObject {
         ("starting service 'vold'",       "Preparing storage",                   42),
         ("starting service 'surfaceflinger'", "Starting the display server",     50),
         ("starting service 'zygote'",     "Starting the Android runtime",        58),
+        // The LineageOS image sets ro.boot.nobootanim=1, so the bootanim milestones
+        // below never fire. Without these, the bar sat at 58% for the whole second half
+        // of a cold boot, which looked like a hang. Both appear on console once system_server is up.
+        ("sid=u:r:system_server:s0",      "Starting Android system services",    66),
+        ("ctl.stop for 'idmap2d'",        "Loading system overlays",             72),
         ("starting service 'bootanim'",   "Boot animation running",              65),
         ("Service 'bootanim' (pid",       "Compiling apps (this is the slow part)", 80),
         ("sys.boot_completed=1",          "Android is up",                       100),
@@ -1220,6 +1225,7 @@ final class QemuRunner: ObservableObject {
         }
         isRunning = true
         startedAt = Date()
+        QemuRunner.bootStarted = Date()
 
         let t = Thread { [weak self] in self?.run() }
         t.name = "husk.qemu"

@@ -435,6 +435,7 @@ struct NetworkSettings: View {
 struct JITSettings: View {
     @ObservedObject private var runner = QemuRunner.shared
     @State private var autoStart = Onboarding.autoStart
+    @State private var keepAttached = JITBootstrap.keepDebuggerAttached
 
     var body: some View {
         Form {
@@ -450,8 +451,15 @@ struct JITSettings: View {
                 DetailRow(label: "Trap servicer",
                           value: JITBootstrap.prewarmed ? "answering" : "not answering",
                           mono: false)
+                // Cached answer only: running the probe from a view body
+                // could freeze the app (see JITBootstrap.mapJITWorks).
                 DetailRow(label: "MAP_JIT",
-                          value: JITBootstrap.mapJITWorks ? "executes" : "refused",
+                          value: JITBootstrap.deviceEnforcesTXM ? "not used (TXM)"
+                               : JITBootstrap.mapJITResult.map { $0 ? "executes" : "refused" }
+                                 ?? "not tested",
+                          mono: false)
+                DetailRow(label: "Debugger after setup",
+                          value: JITBootstrap.detached ? "detached" : "attached",
                           mono: false)
                 if let why = JITBootstrap.lastFailure {
                     Text(why).font(.caption).foregroundStyle(.orange)
@@ -461,6 +469,11 @@ struct JITSettings: View {
                         _ = JITBootstrap.requestAttach()
                     } label: {
                         Label("Enable JIT with StikDebug", systemImage: "bolt.fill")
+                    }
+                    Button {
+                        _ = JITBootstrap.requestTrollStoreAttach()
+                    } label: {
+                        Label("Enable JIT with TrollStore", systemImage: "sparkles")
                     }
                 }
             } header: {
@@ -481,6 +494,16 @@ struct JITSettings: View {
                     }
             } footer: {
                 Text("Boots the guest as soon as Husk opens, when JIT is available.")
+            }
+
+            Section {
+                Toggle("Keep debugger attached", isOn: $keepAttached)
+                    .onChange(of: keepAttached) { v in JITBootstrap.keepDebuggerAttached = v }
+            } footer: {
+                Text("Off by default. Husk detaches StikDebug as soon as the "
+                   + "JIT region is held, because a debugger that iOS has suspended "
+                   + "stops the whole app the next time it is needed. Turn this on "
+                   + "only to collect StikDebug's own logs.")
             }
 
             Section {
