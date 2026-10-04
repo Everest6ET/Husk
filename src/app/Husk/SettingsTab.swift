@@ -692,6 +692,7 @@ struct AppearanceSettings: View {
 struct AboutSettings: View {
     @ObservedObject private var runner = QemuRunner.shared
     @State private var showLogs = false
+    @AppStorage(TranslationLayer.devInfoKey) private var devInfo = false
 
     var body: some View {
         ZStack {
@@ -717,6 +718,21 @@ struct AboutSettings: View {
                                       value: runner.displayKind == .gl ? "GPU"
                                            : runner.displayKind == .software ? "CPU"
                                            : "not started")
+                        }
+                        .padding(14)
+                    }
+
+                    RowGroup {
+                        Toggle(isOn: $devInfo) {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("Developer info")
+                                    .font(.system(size: 15, weight: .medium))
+                                    .foregroundStyle(Theme.text)
+                                Text("Technical detail in the Android Translation Layer screens: "
+                                   + "library reports, device checks and run logs.")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(Theme.textDim)
+                            }
                         }
                         .padding(14)
                     }

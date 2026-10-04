@@ -22,6 +22,10 @@ enum TranslationLayer {
 
     static var isEnabled: Bool { UserDefaults.standard.bool(forKey: enabledKey) }
 
+    /// Whether the technical detail is shown: library reports, device checks, logs. Off, the screens carry
+    /// only what is needed to add an app, switch the layer on and run it. Set in Settings > About.
+    static let devInfoKey = "husk.devInfo"
+
     /// One folder per app. Kept apart from Android's apps: those live on the
     /// guest's disk, and this runtime has no guest.
     static var root: URL {
@@ -309,6 +313,7 @@ struct TranslationLayerSettings: View {
     @ObservedObject private var store = TranslationLayerStore.shared
     @State private var enabled = TranslationLayer.isEnabled
     @State private var importing = false
+    @AppStorage(TranslationLayer.devInfoKey) private var devInfo = false
 
     var body: some View {
         Form {
@@ -321,18 +326,25 @@ struct TranslationLayerSettings: View {
             } header: {
                 Text("Experimental")
             } footer: {
+                if !devInfo {
+                    Text("Runs some Android apps, such as Unity games, straight on your iPhone without starting "
+                       + "Android. Experimental, and it needs JIT turned on.")
+                } else {
                 Text("Runs an app's own code directly, against a rewrite of Android's "
                    + "framework, instead of booting a whole Android system -- the "
                    + "approach of Android Translation Layer on Linux, rebuilt for iOS. "
                    + "It can run Unity games (experimental) and reports what other apps "
                    + "would need, and checks this iPhone for what the design depends on. "
                    + "Android itself is unaffected either way.")
+                }
             }
 
             if enabled {
                 appsSection
-                checksSection
-                progressSection
+                if devInfo {
+                    checksSection
+                    progressSection
+                }
             }
         }
         .huskForm()
@@ -453,18 +465,31 @@ struct TLVerdict {
     }
 }
 
+/// What a person who is not debugging needs to know about an app: can it be run, or is it only an experiment.
+struct TLPlainStatus {
+    let title: String
+    let tint: Color
+
+    init(_ report: TLReport?) {
+        if report?.runsOnNativeRuntime == true { title = "Ready to run"; tint = Theme.good }
+        else { title = "Experimental"; tint = Theme.textDim }
+    }
+}
+
 private struct TLAppRow: View {
     let app: TLApp
+    @AppStorage(TranslationLayer.devInfoKey) private var devInfo = false
 
     var body: some View {
         let verdict = TLVerdict(app.report)
+        let plain = TLPlainStatus(app.report)
         HStack(spacing: 12) {
             AppIcon(path: app.iconPath, size: 36)
             VStack(alignment: .leading, spacing: 3) {
                 Text(app.label).foregroundStyle(Theme.text).lineLimit(1)
-                Text(verdict.title)
+                Text(devInfo ? verdict.title : plain.title)
                     .font(.system(size: 12))
-                    .foregroundStyle(verdict.tint)
+                    .foregroundStyle(devInfo ? verdict.tint : plain.tint)
             }
         }
         .padding(.vertical, 2)
@@ -494,9 +519,11 @@ struct TLAppReportView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var confirmRemove = false
     @State private var showAttempt = false
+    @AppStorage(TranslationLayer.devInfoKey) private var devInfo = false
 
     var body: some View {
         let verdict = TLVerdict(app.report)
+        let plain = TLPlainStatus(app.report)
         Form {
             Section {
                 HStack(spacing: 14) {
@@ -505,13 +532,13 @@ struct TLAppReportView: View {
                         Text(app.label)
                             .font(.system(size: 20, weight: .semibold))
                             .foregroundStyle(Theme.text)
-                        Text(verdict.title)
+                        Text(devInfo ? verdict.title : plain.title)
                             .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(verdict.tint)
+                            .foregroundStyle(devInfo ? verdict.tint : plain.tint)
                     }
                 }
                 .padding(.vertical, 4)
-                if let report = app.report {
+                if devInfo, let report = app.report {
                     Text(report.displaySummary)
                         .font(.system(size: 14))
                         .foregroundStyle(Theme.text)
@@ -534,11 +561,15 @@ struct TLAppReportView: View {
                     }
                 }
             } footer: {
-                Text("Loads arm64 native code into JIT memory on Apple Silicon and drives "
-                   + "a NativeActivity lifecycle. Apps with Java/Dex require ART (milestone 2).")
+                if devInfo {
+                    Text("Loads arm64 native code into JIT memory on Apple Silicon and drives "
+                       + "a NativeActivity lifecycle. Apps with Java/Dex require ART (milestone 2).")
+                } else {
+                    Text("Turn on JIT first. Close the game with Close at the top.")
+                }
             }
 
-            if let report = app.report {
+            if devInfo, let report = app.report {
                 Section {
                     if let engine = report.engine {
                         DetailRow(label: "Made with", value: engine, mono: false)
@@ -807,7 +838,10 @@ struct TLClassicAttemptView: View {
     @Environment(\.dismiss) private var dismiss
     /// Whether the log is open. Remembered, so a game opened again comes back the
     /// way it was left.
-    @AppStorage("husk.tl.showLog") private var showLog = true
+    @AppStorage("husk.tl.showLog") private var showLogSetting = true
+    @AppStorage(TranslationLayer.devInfoKey) private var devInfo = false
+    /// The log is detail: without developer info it stays shut and its bar is not shown at all.
+    private var showLog: Bool { get { showLogSetting && devInfo } nonmutating set { showLogSetting = newValue } }
 
     var body: some View {
         NavigationStack {
@@ -849,6 +883,7 @@ struct TLClassicAttemptView: View {
                     Divider()
                 }
 
+                if devInfo {
                 // The log's bar, always there: it is the way back in once the log
                 // is closed, so it cannot be part of what closes.
                 HStack(spacing: 10) {
@@ -884,6 +919,8 @@ struct TLClassicAttemptView: View {
                 .contentShape(Rectangle())
                 .onTapGesture {
                     if !showLog { withAnimation(.snappy(duration: 0.25)) { showLog = true } }
+                }
+
                 }
 
                 if showLog {

@@ -210,7 +210,10 @@ struct TLUnityAttemptView: View {
     let app: TLApp
     @Environment(\.dismiss) private var dismiss
     @StateObject private var model = TLUnityModel()
-    @AppStorage("husk.tl.unity.showLog") private var showLog = false
+    @AppStorage("husk.tl.unity.showLog") private var showLogSetting = false
+    @AppStorage(TranslationLayer.devInfoKey) private var devInfo = false
+    /// The log is detail: without developer info it stays shut and its bar is not shown.
+    private var showLog: Bool { get { showLogSetting && devInfo } nonmutating set { showLogSetting = newValue } }
 
     private var dataDir: String {
         TranslationLayer.root.appendingPathComponent(app.id, isDirectory: true)
@@ -243,6 +246,7 @@ struct TLUnityAttemptView: View {
                     Divider()
                 }
 
+                if devInfo {
                 HStack(spacing: 10) {
                     Button {
                         withAnimation(.snappy(duration: 0.25)) { showLog.toggle() }
@@ -273,6 +277,8 @@ struct TLUnityAttemptView: View {
                 .contentShape(Rectangle())
                 .onTapGesture {
                     if !showLog { withAnimation(.snappy(duration: 0.25)) { showLog = true } }
+                }
+
                 }
 
                 if showLog {
