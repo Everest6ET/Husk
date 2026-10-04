@@ -137,6 +137,7 @@ tl_dex_context *tl_dex_context_create(const char *apk_path, uint32_t *fb, int wi
 {
     tl_dex_context *ctx = calloc(1, sizeof(*ctx));
     if (!ctx) return NULL;
+    pthread_mutex_init(&ctx->input_lock, NULL);
     ctx->apk_path = apk_path ? strdup(apk_path) : NULL;
     ctx->framebuffer = fb;
     ctx->fb_width = width;
@@ -150,6 +151,12 @@ tl_dex_context *tl_dex_context_create(const char *apk_path, uint32_t *fb, int wi
 void tl_dex_context_destroy(tl_dex_context *ctx)
 {
     if (!ctx) return;
+    pthread_mutex_destroy(&ctx->input_lock);
+    while (ctx->tasks) {
+        tl_dex_task *t = ctx->tasks;
+        ctx->tasks = t->next;
+        free(t);
+    }
     tl_framework_cleanup(ctx);
     for (int i = 0; i < ctx->num_dex_files; i++) {
         if (ctx->dex_files[i]) {
@@ -240,6 +247,63 @@ tl_dex_field *tl_dex_find_field(tl_dex_class *clazz, const char *name, const cha
     return NULL;
 }
 
+/* ---------------------------------------------------------------- Layout */
+
+/*
+ * Instance slots a framework superclass reserves ahead of the app's own.
+ *
+ * Only java.lang.Enum has any: `name` and `ordinal` are real fields that every
+ * enum constant carries, and its constructor writes them. The framework
+ * classes this layer shims keep their state in a native wrapper instead (see
+ * tl_dex_set_native), so they reserve nothing.
+ */
+static int framework_instance_slots(const char *descriptor)
+{
+    if (descriptor && !strcmp(descriptor, "Ljava/lang/Enum;")) return 2;
+    return 0;
+}
+
+/*
+ * Number a class's instance fields after everything it inherits.
+ *
+ * Recursive, because a subclass cannot be numbered until its parent has been,
+ * and memoised through `linked`. That flag is set on entry rather than exit so
+ * that a hierarchy that loops back on itself -- which a malformed DEX can
+ * describe -- ends the recursion instead of overflowing the stack.
+ */
+static void dex_link_class(tl_dex_class *c)
+{
+    if (!c || c->linked) return;
+    c->linked = true;
+
+    int base = 0;
+    if (c->super_class) {
+        dex_link_class(c->super_class);
+        base = c->super_class->instance_size;
+    } else {
+        base = framework_instance_slots(c->super_descriptor);
+    }
+
+    c->instance_base = base;
+    for (int f = 0; f < c->num_instance_fields; f++) {
+        c->fields[c->num_static_fields + f].slot = (uint32_t)(base + f);
+    }
+    c->instance_size = base + c->num_instance_fields;
+}
+
+static void dex_log(const char *fmt, ...);
+
+/* A field read or written that neither the app nor the framework shims could
+ * answer. Said once per field: each line is a piece of the framework still to
+ * write, and a loop would otherwise say it every pass. */
+static void dex_note_unresolved_field(tl_dex_field *f, const char *what)
+{
+    if (!f || f->unresolved_logged) return;
+    f->unresolved_logged = true;
+    dex_log("tl: unresolved field %s %s->%s %s", what, f->owner ? f->owner : "?",
+            f->name, f->type);
+}
+
 /* ------------------------------------------------------------- Resolvers */
 
 static tl_dex_field *dex_resolve_field(tl_dex_context *ctx, tl_dex_file *dex, uint32_t idx)
@@ -256,10 +320,50 @@ static tl_dex_field *dex_resolve_field(tl_dex_context *ctx, tl_dex_file *dex, ui
         f->clazz = c;
         f->name = strdup(fname ? fname : "");
         f->type = strdup(ftype ? ftype : "");
-        f->slot = c ? (uint32_t)c->num_fields++ : 0;
+        /* Not a field this layer knows. An out-of-range slot makes every
+         * access to it read as null and write nowhere, which is what the
+         * bounds checks above are for; a slot taken from num_fields++ pointed
+         * past the end of both the static table and the object. */
+        f->slot = UINT32_MAX;
+        f->owner = class_desc ? strdup(class_desc) : NULL;
     }
     dex->resolved_fields[idx] = f;
     return f;
+}
+
+/*
+ * Find the shim for a method, looking up the class's framework ancestry too.
+ *
+ * A call names the class it was compiled against: `d.ordinal()` for the game's
+ * own enum, `c.getContext()` for its own View subclass. Neither method is
+ * defined there. They belong to java.lang.Enum and android.view.View, which is
+ * where the shims are registered -- so looking only under the name in the call
+ * could never find them, and every inherited framework method silently did
+ * nothing.
+ *
+ * The walk goes up through each class's declared superclass, loaded or not:
+ * the app's own classes have no shim of their own and cost nothing to try, and
+ * the first framework class above them is the one that matters.
+ */
+static tl_dex_native_func dex_lookup_shim(const char *class_desc, tl_dex_class *c,
+                                          const char *mname, const char *shorty)
+{
+    tl_dex_native_func fn = tl_framework_lookup(class_desc, mname, shorty);
+    if (fn) return fn;
+
+    /* Arrays answer clone() themselves; the class in the call is "[L...;". */
+    if (class_desc && class_desc[0] == '[' && !strcmp(mname, "clone")) {
+        return tl_framework_lookup("[", "clone", shorty);
+    }
+
+    int depth = 0;   /* bounded: a malformed hierarchy can loop */
+    for (tl_dex_class *k = c; k && depth < 64; k = k->super_class, depth++) {
+        if (k->super_descriptor) {
+            fn = tl_framework_lookup(k->super_descriptor, mname, shorty);
+            if (fn) return fn;
+        }
+    }
+    return NULL;
 }
 
 static tl_dex_method *dex_resolve_method(tl_dex_context *ctx, tl_dex_file *dex, uint32_t idx)
@@ -274,9 +378,10 @@ static tl_dex_method *dex_resolve_method(tl_dex_context *ctx, tl_dex_file *dex, 
     tl_dex_method *m = c ? tl_dex_find_method(c, mname, shorty) : NULL;
 
     if (!m) {
-        tl_dex_native_func nfunc = tl_framework_lookup(class_desc, mname, shorty);
+        tl_dex_native_func nfunc = dex_lookup_shim(class_desc, c, mname, shorty);
         m = calloc(1, sizeof(*m));
         m->clazz = c;
+        m->owner = class_desc ? strdup(class_desc) : NULL;
         m->name = strdup(mname ? mname : "");
         m->shorty = strdup(shorty ? shorty : "V");
         m->native_func = (void *)nfunc;
@@ -479,6 +584,11 @@ bool tl_dex_load_apk(tl_dex_context *ctx, const char *apk_path)
         }
     }
 
+    /* Then lay out instance fields, which needs every superclass in place. */
+    for (int i = 0; i < ctx->num_classes; i++) {
+        dex_link_class(ctx->classes[i]);
+    }
+
     dex_log("dex: loaded %d DEX file(s), %d class definitions from %s",
             loaded, ctx->num_classes, apk_path);
     return loaded > 0;
@@ -490,9 +600,11 @@ tl_dex_object *tl_dex_alloc_object(tl_dex_class *clazz)
 {
     tl_dex_object *obj = calloc(1, sizeof(*obj));
     obj->clazz = clazz;
-    int nfields = clazz ? clazz->num_instance_fields : 16;
+    /* The whole inherited layout, not just this class's own fields. */
+    int nfields = clazz ? clazz->instance_size : 16;
     if (nfields < 16) nfields = 16;
     obj->fields = calloc(nfields, sizeof(tl_dex_val));
+    obj->nfields = (uint32_t)nfields;
     return obj;
 }
 
@@ -500,6 +612,7 @@ tl_dex_object *tl_dex_alloc_array(tl_dex_class *elem_class, uint32_t length, uin
 {
     tl_dex_object *obj = calloc(1, sizeof(*obj));
     obj->clazz = elem_class;
+    obj->flags = TL_KIND_ARRAY;
     obj->array.length = length;
     obj->array.elem_size = elem_size ? elem_size : 4;
     obj->array.elements = calloc(length ? length : 1, obj->array.elem_size);
@@ -511,15 +624,157 @@ tl_dex_object *tl_dex_alloc_string(tl_dex_context *ctx, const char *utf8)
     tl_dex_class *s_class = tl_dex_find_class(ctx, "Ljava/lang/String;");
     tl_dex_object *obj = calloc(1, sizeof(*obj));
     obj->clazz = s_class;
+    obj->flags = TL_KIND_STRING;
     obj->str_utf8 = utf8 ? strdup(utf8) : strdup("");
     return obj;
 }
 
+/* ----------------------------------------------------- Value arithmetic */
+
+/*
+ * Dalvik's arithmetic is Java's, and Java's differs from C's in exactly the
+ * places a game trips over: integer overflow wraps (in C it is undefined, and
+ * the optimiser is allowed to assume it never happens), shifts take their count
+ * modulo the operand width, and INT_MIN / -1 is INT_MIN rather than a trap.
+ * Everything goes through these helpers so the rules live in one place.
+ *
+ * Division by zero returns 0. Java throws ArithmeticException there; this
+ * interpreter has no exceptions yet, and zero is the least surprising thing to
+ * carry on with.
+ */
+static inline int32_t i_add(int32_t a, int32_t b) { return (int32_t)((uint32_t)a + (uint32_t)b); }
+static inline int32_t i_sub(int32_t a, int32_t b) { return (int32_t)((uint32_t)a - (uint32_t)b); }
+static inline int32_t i_mul(int32_t a, int32_t b) { return (int32_t)((uint32_t)a * (uint32_t)b); }
+static inline int32_t i_div(int32_t a, int32_t b)
+{ if (b == 0) return 0; if (a == INT32_MIN && b == -1) return INT32_MIN; return a / b; }
+static inline int32_t i_rem(int32_t a, int32_t b)
+{ if (b == 0 || b == -1) return 0; return a % b; }
+static inline int32_t i_and(int32_t a, int32_t b) { return a & b; }
+static inline int32_t i_or (int32_t a, int32_t b) { return a | b; }
+static inline int32_t i_xor(int32_t a, int32_t b) { return a ^ b; }
+static inline int32_t i_shl(int32_t a, int32_t b) { return (int32_t)((uint32_t)a << (b & 31)); }
+static inline int32_t i_shr(int32_t a, int32_t b) { return a >> (b & 31); }
+static inline int32_t i_ushr(int32_t a, int32_t b) { return (int32_t)((uint32_t)a >> (b & 31)); }
+static inline int32_t i_rsub(int32_t a, int32_t b) { return i_sub(b, a); }
+
+static inline int64_t l_add(int64_t a, int64_t b) { return (int64_t)((uint64_t)a + (uint64_t)b); }
+static inline int64_t l_sub(int64_t a, int64_t b) { return (int64_t)((uint64_t)a - (uint64_t)b); }
+static inline int64_t l_mul(int64_t a, int64_t b) { return (int64_t)((uint64_t)a * (uint64_t)b); }
+static inline int64_t l_div(int64_t a, int64_t b)
+{ if (b == 0) return 0; if (a == INT64_MIN && b == -1) return INT64_MIN; return a / b; }
+static inline int64_t l_rem(int64_t a, int64_t b)
+{ if (b == 0 || b == -1) return 0; return a % b; }
+static inline int64_t l_and(int64_t a, int64_t b) { return a & b; }
+static inline int64_t l_or (int64_t a, int64_t b) { return a | b; }
+static inline int64_t l_xor(int64_t a, int64_t b) { return a ^ b; }
+/* The shift count of a long shift is an INT register, not a wide one. */
+static inline int64_t l_shl(int64_t a, int32_t b) { return (int64_t)((uint64_t)a << (b & 63)); }
+static inline int64_t l_shr(int64_t a, int32_t b) { return a >> (b & 63); }
+static inline int64_t l_ushr(int64_t a, int32_t b) { return (int64_t)((uint64_t)a >> (b & 63)); }
+
+static inline float  f_add(float a, float b) { return a + b; }
+static inline float  f_sub(float a, float b) { return a - b; }
+static inline float  f_mul(float a, float b) { return a * b; }
+static inline float  f_div(float a, float b) { return a / b; }
+static inline float  f_rem(float a, float b) { return fmodf(a, b); }
+static inline double d_add(double a, double b) { return a + b; }
+static inline double d_sub(double a, double b) { return a - b; }
+static inline double d_mul(double a, double b) { return a * b; }
+static inline double d_div(double a, double b) { return a / b; }
+static inline double d_rem(double a, double b) { return fmod(a, b); }
+
+/*
+ * Register writes replace the whole 64-bit slot.
+ *
+ * Writing only `.i` leaves the slot's upper half as whatever was there before,
+ * and a register is read back through other union members all the time: an int
+ * that was once part of a pointer comes back as part of one. That is how a
+ * perfectly good Bitmap call came to be made on the address 0x800000003. A write
+ * that sets all of the slot cannot leave anything behind.
+ */
+static inline void put_i(tl_dex_val *r, int32_t x)  { r->raw64 = (uint32_t)x; }
+static inline void put_j(tl_dex_val *r, int64_t x)  { r->j = x; }
+static inline void put_f(tl_dex_val *r, float x)    { uint32_t u; memcpy(&u, &x, 4); r->raw64 = u; }
+static inline void put_d(tl_dex_val *r, double x)   { r->d = x; }
+
+/* Bytes per element of an array, from the array's own descriptor ("[I",
+ * "[[Lfoo;", "[Ljava/lang/String;"): the type decides it, not the allocator. */
+static uint32_t dex_array_elem_size(const char *array_desc)
+{
+    if (!array_desc || array_desc[0] != '[') return 8;
+    switch (array_desc[1]) {
+        case 'Z': case 'B': return 1;
+        case 'S': case 'C': return 2;
+        case 'I': case 'F': return 4;
+        default:            return 8;      /* J, D, and every reference */
+    }
+}
+
+/* Say once, not every time: a loop that goes out of range does so every pass. */
+#define TL_LOG_FEW(counter, limit, ...) \
+    do { static int counter; if (counter++ < (limit)) dex_log(__VA_ARGS__); } while (0)
+
 /* ----------------------------------------------------- Dalvik Interpreter */
+
+/*
+ * Run a class's <clinit> the first time anything touches it.
+ *
+ * Dalvik defers a class's static initialiser until the class is first used, and
+ * nothing here was running them at all -- every static field in every class
+ * stayed at its zero value for the whole session.
+ *
+ * In Flappy Bird that reads as a rendering bug. The game's state enum lives in
+ * a static field, so it was null; the physics tick takes null as the default
+ * branch, which is the death case; the death case sets the flash overlay to
+ * full alpha and paints the screen white. One correct title frame, then white,
+ * which is exactly what was reported.
+ *
+ * Lazy rather than eager, deliberately. Initialising all 9,182 classes in the
+ * APK at startup runs hundreds of Play Services and AndroidX initialisers that
+ * the app never asked for, several of which depend on each other or on native
+ * hooks that do not exist here.
+ */
+static void dex_ensure_class_initialized(tl_dex_context *ctx, tl_dex_class *clazz)
+{
+    if (!clazz || clazz->initialized) {
+        return;
+    }
+
+    /*
+     * Marked before running, not after. A static initialiser almost always
+     * writes its own class's fields, and that write comes straight back here;
+     * without the flag already set, the initialiser starts itself again and
+     * does not stop. The JVM's own rule has the same shape: a class being
+     * initialised on this thread already counts as initialised.
+     */
+    clazz->initialized = true;
+
+    /* A superclass is initialised before the class extending it. Enums depend
+     * on the order: the constants are written by the subclass's initialiser
+     * through fields the superclass declares. */
+    if (clazz->super_class) {
+        dex_ensure_class_initialized(ctx, clazz->super_class);
+    }
+
+    /*
+     * This class's own <clinit> only. tl_dex_find_method walks up the super
+     * chain when a class has no method of that name, which for an initialiser
+     * would quietly run the parent's a second time.
+     */
+    for (int i = 0; i < clazz->num_methods; i++) {
+        if (!strcmp(clazz->methods[i].name, "<clinit>")) {
+            tl_dex_invoke(ctx, &clazz->methods[i], NULL, 0, NULL);
+            return;
+        }
+    }
+}
 
 bool tl_dex_invoke(tl_dex_context *ctx, tl_dex_method *method, tl_dex_val *args, int nargs, tl_dex_val *ret)
 {
-    if (!method) return false;
+    if (!method) {
+        if (ret) ret->raw64 = 0;
+        return false;
+    }
 
     /* Native / Framework dispatch */
     if (method->native_func) {
@@ -528,7 +783,34 @@ bool tl_dex_invoke(tl_dex_context *ctx, tl_dex_method *method, tl_dex_val *args,
         return fn(ctx, this_obj, args, nargs, ret);
     }
 
-    if (!method->insns || method->insns_size == 0) return true;
+    if (!method->insns || method->insns_size == 0) {
+        /*
+         * No bytecode and no shim: a framework method this layer does not
+         * implement yet.
+         *
+         * Say so, once. The per-opcode logging that used to live here was the
+         * 10,000x slowdown, but the thing it accidentally also did -- naming
+         * every call that went nowhere -- is the most useful output this layer
+         * has, because each line is a piece of the framework still to write.
+         * Once per method keeps that and costs nothing.
+         *
+         * And hand back zero. Returning with `ret` untouched left the caller's
+         * previous result in place, so the move-result after an unimplemented
+         * call quietly picked up whatever an unrelated call had returned last
+         * -- an int read back as an object pointer, which is a crash in a
+         * shim far from the call that caused it.
+         */
+        if (!method->unshimmed_logged) {
+            method->unshimmed_logged = true;
+            const char *owner = method->clazz ? method->clazz->descriptor
+                                              : (method->owner ? method->owner : "?");
+            dex_log("tl: unshimmed %s->%s%s%s", owner,
+                    method->name, method->shorty ? " " : "",
+                    method->shorty ? method->shorty : "");
+        }
+        if (ret) ret->raw64 = 0;
+        return true;
+    }
 
     tl_dex_file *dex = method->clazz->dex;
     uint16_t reg_count = method->registers_size;
@@ -550,6 +832,42 @@ bool tl_dex_invoke(tl_dex_context *ctx, tl_dex_method *method, tl_dex_val *args,
         uint16_t inst = insns[pc];
         uint8_t opcode = inst & 0xff;
         uint8_t op_b = (inst >> 8) & 0xff;
+#ifdef TL_DEX_TRACE
+        if (ctx->trace) {
+            /* Name what the instruction touches, not just its opcode: a field
+             * or method index is meaningless to read, and which field was read
+             * is nearly always the whole question. */
+            char what[200] = "";
+            if (opcode >= 0x52 && opcode <= 0x6d) {
+                tl_dex_field *tf = dex_resolve_field(ctx, dex, insns[pc + 1]);
+                if (tf) snprintf(what, sizeof(what), " field %s %s slot=%u",
+                                 tf->name, tf->type, tf->slot);
+            } else if ((opcode >= 0x6e && opcode <= 0x72) || (opcode >= 0x74 && opcode <= 0x78)) {
+                tl_dex_method *tm = dex_resolve_method(ctx, dex, insns[pc + 1]);
+                if (tm) snprintf(what, sizeof(what), " call %s->%s%s",
+                                 tm->clazz ? tm->clazz->descriptor : (tm->owner ? tm->owner : "?"),
+                                 tm->name, tm->native_func ? " [shim]" :
+                                 (tm->insns ? "" : " [UNIMPLEMENTED]"));
+            }
+            /* Branches and compares: show what they compared, as raw bits and as
+             * the float those bits would be, because the instruction alone says
+             * only which way it went. */
+            if ((opcode >= 0x32 && opcode <= 0x37) || (opcode >= 0x38 && opcode <= 0x3d) ||
+                (opcode >= 0x2d && opcode <= 0x31)) {
+                uint32_t ra, rb;
+                if (opcode >= 0x38 && opcode <= 0x3d)      { ra = op_b; rb = op_b; }
+                else if (opcode >= 0x32 && opcode <= 0x37) { ra = op_b & 0x0f; rb = (op_b >> 4) & 0x0f; }
+                else { ra = insns[pc + 1] & 0xff; rb = (insns[pc + 1] >> 8) & 0xff; }
+                float fa, fb; memcpy(&fa, &v[ra].raw64, 4); memcpy(&fb, &v[rb].raw64, 4);
+                snprintf(what, sizeof(what), " cmp v%u=0x%llx(%g) v%u=0x%llx(%g)",
+                         ra, (unsigned long long)v[ra].raw64, (double)fa,
+                         rb, (unsigned long long)v[rb].raw64, (double)fb);
+            }
+            fprintf(stderr, "    %s.%s pc=%u op=0x%02x b=0x%02x%s\n",
+                    method->clazz ? method->clazz->descriptor : "?", method->name,
+                    pc, opcode, op_b, what);
+        }
+#endif
 
         switch (opcode) {
             case 0x00: /* nop */
@@ -578,6 +896,12 @@ bool tl_dex_invoke(tl_dex_context *ctx, tl_dex_method *method, tl_dex_val *args,
                 v[op_b & 0x0f] = v[(op_b >> 4) & 0x0f];
                 v[(op_b & 0x0f) + 1] = v[((op_b >> 4) & 0x0f) + 1];
                 pc += 1;
+                break;
+
+            case 0x06: /* move-wide/16 vAAAA, vBBBB */
+                v[insns[pc + 1]] = v[insns[pc + 2]];
+                v[insns[pc + 1] + 1] = v[insns[pc + 2] + 1];
+                pc += 3;
                 break;
 
             case 0x05: /* move-wide/from16 vAA, vBBBB */
@@ -610,25 +934,25 @@ bool tl_dex_invoke(tl_dex_context *ctx, tl_dex_method *method, tl_dex_val *args,
             case 0x12: { /* const/4 vA, #+B */
                 uint8_t a = op_b & 0x0f;
                 int8_t b = (int8_t)(op_b & 0xf0) >> 4;
-                v[a].i = b;
+                put_i(&v[a], b);
                 pc += 1;
                 break;
             }
 
             case 0x13: /* const/16 vAA, #+BBBB */
-                v[op_b].i = (int16_t)insns[pc + 1];
+                put_i(&v[op_b], (int16_t)insns[pc + 1]);
                 pc += 2;
                 break;
 
             case 0x14: { /* const vAA, #+BBBBBBBB */
                 uint32_t val = (uint32_t)insns[pc + 1] | ((uint32_t)insns[pc + 2] << 16);
-                v[op_b].raw32 = val;
+                v[op_b].raw64 = (uint32_t)(val);
                 pc += 3;
                 break;
             }
 
             case 0x15: /* const-high16 vAA, #+BBBB0000 */
-                v[op_b].raw32 = (uint32_t)insns[pc + 1] << 16;
+                v[op_b].raw64 = (uint32_t)((uint32_t)insns[pc + 1] << 16);
                 pc += 2;
                 break;
 
@@ -666,6 +990,16 @@ bool tl_dex_invoke(tl_dex_context *ctx, tl_dex_method *method, tl_dex_val *args,
                 break;
             }
 
+            case 0x1b: { /* const-string/jumbo vAA, string@BBBBBBBB */
+                /* The 32-bit index form, which a dex with more than 65,535 strings
+                 * needs for every string past the first 65,535. Large apps have
+                 * far more than that. */
+                uint32_t sidx = (uint32_t)insns[pc + 1] | ((uint32_t)insns[pc + 2] << 16);
+                v[op_b].l = tl_dex_alloc_string(ctx, dex_get_string(dex, sidx));
+                pc += 3;
+                break;
+            }
+
             case 0x1c: { /* const-class vAA, type@BBBB */
                 const char *tdesc = dex_get_type(dex, insns[pc + 1]);
                 tl_dex_class *cl = tl_dex_find_class(ctx, tdesc);
@@ -683,7 +1017,7 @@ bool tl_dex_invoke(tl_dex_context *ctx, tl_dex_method *method, tl_dex_val *args,
             case 0x20: { /* instance-of vA, vB, type@CCCC */
                 uint8_t a = op_b & 0x0f;
                 uint8_t b = (op_b >> 4) & 0x0f;
-                v[a].i = (v[b].l != NULL) ? 1 : 0;
+                put_i(&v[a], (v[b].l != NULL) ? 1 : 0);
                 pc += 2;
                 break;
             }
@@ -691,7 +1025,8 @@ bool tl_dex_invoke(tl_dex_context *ctx, tl_dex_method *method, tl_dex_val *args,
             case 0x21: { /* array-length vA, vB */
                 uint8_t a = op_b & 0x0f;
                 uint8_t b = (op_b >> 4) & 0x0f;
-                v[a].i = v[b].l ? (int32_t)v[b].l->array.length : 0;
+                { tl_dex_object *arr = tl_dex_array(v[b].l);
+                  put_i(&v[a], arr ? (int32_t)arr->array.length : 0); }
                 pc += 1;
                 break;
             }
@@ -699,6 +1034,7 @@ bool tl_dex_invoke(tl_dex_context *ctx, tl_dex_method *method, tl_dex_val *args,
             case 0x22: { /* new-instance vAA, type@BBBB */
                 const char *tdesc = dex_get_type(dex, insns[pc + 1]);
                 tl_dex_class *cl = tl_dex_find_class(ctx, tdesc);
+                dex_ensure_class_initialized(ctx, cl);
                 v[op_b].l = tl_dex_alloc_object(cl);
                 pc += 2;
                 break;
@@ -709,21 +1045,75 @@ bool tl_dex_invoke(tl_dex_context *ctx, tl_dex_method *method, tl_dex_val *args,
                 uint8_t b = (op_b >> 4) & 0x0f;
                 const char *tdesc = dex_get_type(dex, insns[pc + 1]);
                 tl_dex_class *cl = tl_dex_find_class(ctx, tdesc);
+                /* A negative length is a NegativeArraySizeException in Java; with
+                 * no exceptions yet it is an empty array rather than a huge one. */
                 uint32_t len = (v[b].i > 0) ? (uint32_t)v[b].i : 0;
-                v[a].l = tl_dex_alloc_array(cl, len, sizeof(void *));
+                v[a].raw64 = 0;
+                v[a].l = tl_dex_alloc_array(cl, len, dex_array_elem_size(tdesc));
                 pc += 2;
                 break;
             }
 
             case 0x26: { /* fill-array-data vAA, +BBBBBBBB */
+                /* The table: ident 0x0300, element width, then a 32-bit count
+                 * (low half first) and the bytes. The count's high half is
+                 * shifted by SIXTEEN; this used to shift it by eight. Copied
+                 * only when the table's width is the array's own element size --
+                 * a mismatch means the array was allocated as something else,
+                 * and copying anyway scrambles it. */
                 int32_t rel = (int32_t)((uint32_t)insns[pc + 1] | ((uint32_t)insns[pc + 2] << 16));
-                const uint16_t *payload = insns + pc + rel;
-                if (payload[0] == 0x0300 && v[op_b].l && v[op_b].l->array.elements) {
-                    uint16_t elem_width = payload[1];
-                    uint32_t count = (uint32_t)payload[2] | ((uint32_t)payload[3] << 8);
-                    const uint8_t *src = (const uint8_t *)(payload + 4);
-                    memcpy(v[op_b].l->array.elements, src, count * elem_width);
+                int64_t at = (int64_t)pc + rel;
+                tl_dex_object *arr = tl_dex_array(v[op_b].l);
+                if (arr && at >= 0 && at + 4 <= (int64_t)method->insns_size &&
+                    insns[at] == 0x0300) {
+                    uint32_t width = insns[at + 1];
+                    uint32_t count = (uint32_t)insns[at + 2] | ((uint32_t)insns[at + 3] << 16);
+                    uint64_t bytes = (uint64_t)count * width;
+                    if (width == arr->array.elem_size && count <= arr->array.length &&
+                        (at + 4) * 2 + (int64_t)bytes <= (int64_t)method->insns_size * 2) {
+                        memcpy(arr->array.elements, insns + at + 4, (size_t)bytes);
+                    } else {
+                        TL_LOG_FEW(fill_bad, 12, "tl: fill-array-data refused in %s.%s pc=%u (width %u vs elem %u, count %u vs len %u)",
+                                   method->clazz ? method->clazz->descriptor : "?", method->name, pc,
+                                   width, arr->array.elem_size, count, arr->array.length);
+                    }
                 }
+                pc += 3;
+                break;
+            }
+
+            case 0x24: case 0x25: { /* filled-new-array, filled-new-array/range */
+                /* Builds the array and leaves it for the move-result-object that
+                 * follows, as an invoke does. With no implementation the result
+                 * register kept whatever it held. */
+                const char *tdesc = dex_get_type(dex, insns[pc + 1]);
+                uint32_t count, first = 0;
+                uint8_t reg[5] = {0};
+                if (opcode == 0x24) {
+                    uint16_t arg_regs = insns[pc + 2];
+                    count = (op_b >> 4) & 0x0f;
+                    if (count > 5) count = 5;
+                    reg[0] = arg_regs & 0x0f;         reg[1] = (arg_regs >> 4) & 0x0f;
+                    reg[2] = (arg_regs >> 8) & 0x0f;  reg[3] = (arg_regs >> 12) & 0x0f;
+                    reg[4] = op_b & 0x0f;
+                } else {
+                    count = op_b;
+                    first = insns[pc + 2];
+                }
+                uint32_t es = dex_array_elem_size(tdesc);
+                tl_dex_object *arr = tl_dex_alloc_array(tl_dex_find_class(ctx, tdesc), count, es);
+                if (arr && arr->array.elements) {
+                    for (uint32_t i = 0; i < count; i++) {
+                        const tl_dex_val src = v[opcode == 0x24 ? reg[i] : first + i];
+                        uint8_t *at = (uint8_t *)arr->array.elements + (size_t)i * es;
+                        if (es == 1)      { at[0] = (uint8_t)src.i; }
+                        else if (es == 2) { uint16_t u = (uint16_t)src.i; memcpy(at, &u, 2); }
+                        else if (es == 4) { uint32_t u = src.raw32; memcpy(at, &u, 4); }
+                        else              { memcpy(at, &src.raw64, 8); }
+                    }
+                }
+                last_result.raw64 = 0;
+                last_result.l = arr;
                 pc += 3;
                 break;
             }
@@ -740,6 +1130,62 @@ bool tl_dex_invoke(tl_dex_context *ctx, tl_dex_method *method, tl_dex_val *args,
                 pc += (int32_t)((uint32_t)insns[pc + 1] | ((uint32_t)insns[pc + 2] << 16));
                 break;
 
+            /*
+             * packed-switch and sparse-switch.
+             *
+             * Neither of these existed, and the default case stepped over them
+             * one code unit at a time -- so a switch did not fall through to its
+             * default, it fell into its own payload table and ran the offsets as
+             * if they were instructions. Every `switch` in every app, the game's
+             * whole state machine included.
+             *
+             * The instruction holds a signed offset, from itself, to a table the
+             * compiler placed after the method body. A packed table is one
+             * first key and a run of targets; a sparse one is sorted keys and
+             * then targets. Targets are offsets from the switch instruction,
+             * and no match means falling through to the next instruction.
+             */
+            case 0x2b: { /* packed-switch vAA, +BBBBBBBB */
+                int32_t rel = (int32_t)((uint32_t)insns[pc + 1] | ((uint32_t)insns[pc + 2] << 16));
+                int64_t at = (int64_t)pc + rel;
+                int32_t step = 3;
+                if (at >= 0 && at + 4 <= (int64_t)method->insns_size && insns[at] == 0x0100) {
+                    uint32_t size = insns[at + 1];
+                    int32_t first = (int32_t)((uint32_t)insns[at + 2] | ((uint32_t)insns[at + 3] << 16));
+                    int64_t k = (int64_t)v[op_b].i - first;
+                    if (k >= 0 && k < (int64_t)size &&
+                        at + 4 + (k + 1) * 2 <= (int64_t)method->insns_size) {
+                        const uint16_t *t = insns + at + 4 + k * 2;
+                        step = (int32_t)((uint32_t)t[0] | ((uint32_t)t[1] << 16));
+                    }
+                }
+                pc += (uint32_t)step;
+                break;
+            }
+
+            case 0x2c: { /* sparse-switch vAA, +BBBBBBBB */
+                int32_t rel = (int32_t)((uint32_t)insns[pc + 1] | ((uint32_t)insns[pc + 2] << 16));
+                int64_t at = (int64_t)pc + rel;
+                int32_t step = 3;
+                if (at >= 0 && at + 2 <= (int64_t)method->insns_size && insns[at] == 0x0200) {
+                    uint32_t size = insns[at + 1];
+                    if (at + 2 + (int64_t)size * 4 <= (int64_t)method->insns_size) {
+                        const uint16_t *keys = insns + at + 2;
+                        const uint16_t *tgts = keys + size * 2;
+                        int32_t key = v[op_b].i;
+                        for (uint32_t i = 0; i < size; i++) {
+                            int32_t kv = (int32_t)((uint32_t)keys[i * 2] | ((uint32_t)keys[i * 2 + 1] << 16));
+                            if (kv == key) {
+                                step = (int32_t)((uint32_t)tgts[i * 2] | ((uint32_t)tgts[i * 2 + 1] << 16));
+                                break;
+                            }
+                        }
+                    }
+                }
+                pc += (uint32_t)step;
+                break;
+            }
+
             case 0x2d: /* cmpl-float vAA, vBB, vCC */
             case 0x2e: { /* cmpg-float vAA, vBB, vCC */
                 uint16_t regs = insns[pc + 1];
@@ -747,10 +1193,10 @@ bool tl_dex_invoke(tl_dex_context *ctx, tl_dex_method *method, tl_dex_val *args,
                 uint8_t c = (regs >> 8) & 0xff;
                 float fb = v[b].f;
                 float fc = v[c].f;
-                if (isnan(fb) || isnan(fc)) v[op_b].i = (opcode == 0x2d) ? -1 : 1;
-                else if (fb > fc) v[op_b].i = 1;
-                else if (fb < fc) v[op_b].i = -1;
-                else v[op_b].i = 0;
+                if (isnan(fb) || isnan(fc)) put_i(&v[op_b], (opcode == 0x2d) ? -1 : 1);
+                else if (fb > fc) put_i(&v[op_b], 1);
+                else if (fb < fc) put_i(&v[op_b], -1);
+                else put_i(&v[op_b], 0);
                 pc += 2;
                 break;
             }
@@ -762,10 +1208,10 @@ bool tl_dex_invoke(tl_dex_context *ctx, tl_dex_method *method, tl_dex_val *args,
                 uint8_t c = (regs >> 8) & 0xff;
                 double db = v[b].d;
                 double dc = v[c].d;
-                if (isnan(db) || isnan(dc)) v[op_b].i = (opcode == 0x2f) ? -1 : 1;
-                else if (db > dc) v[op_b].i = 1;
-                else if (db < dc) v[op_b].i = -1;
-                else v[op_b].i = 0;
+                if (isnan(db) || isnan(dc)) put_i(&v[op_b], (opcode == 0x2f) ? -1 : 1);
+                else if (db > dc) put_i(&v[op_b], 1);
+                else if (db < dc) put_i(&v[op_b], -1);
+                else put_i(&v[op_b], 0);
                 pc += 2;
                 break;
             }
@@ -776,9 +1222,9 @@ bool tl_dex_invoke(tl_dex_context *ctx, tl_dex_method *method, tl_dex_val *args,
                 uint8_t c = (regs >> 8) & 0xff;
                 int64_t jb = v[b].j;
                 int64_t jc = v[c].j;
-                if (jb > jc) v[op_b].i = 1;
-                else if (jb < jc) v[op_b].i = -1;
-                else v[op_b].i = 0;
+                if (jb > jc) put_i(&v[op_b], 1);
+                else if (jb < jc) put_i(&v[op_b], -1);
+                else put_i(&v[op_b], 0);
                 pc += 2;
                 break;
             }
@@ -823,51 +1269,70 @@ bool tl_dex_invoke(tl_dex_context *ctx, tl_dex_method *method, tl_dex_val *args,
                 break;
             }
 
-            case 0x44: /* aget */
-            case 0x45: /* aget-wide */
-            case 0x46: /* aget-object */
-            case 0x47: /* aget-boolean */
-            case 0x48: /* aget-byte */
-            case 0x49: /* aget-char */
-            case 0x4a: { /* aget-short */
+            /*
+             * Array reads and writes.
+             *
+             * Each opcode names the width it moves -- a boolean or byte is one
+             * byte, a char or short two, an int or float four, a long, double or
+             * reference eight -- and an array knows its own element size, so the
+             * two are checked against each other before anything is touched.
+             *
+             * A read that cannot happen leaves ZERO in the destination. It used
+             * to leave the destination alone, and compilers routinely load an
+             * element into the very register that held the array: when the index
+             * was out of range, the "element" was the array, and getWidth() was
+             * then called on it.
+             */
+            case 0x44: case 0x45: case 0x46: case 0x47: case 0x48: case 0x49: case 0x4a: {
+                static const uint8_t stride[7] = { 4, 8, 8, 1, 1, 2, 2 };
                 uint16_t regs = insns[pc + 1];
-                uint8_t arr_reg = regs & 0xff;
-                uint8_t idx_reg = (regs >> 8) & 0xff;
-                tl_dex_object *arr = v[arr_reg].l;
-                int32_t idx = v[idx_reg].i;
-                if (arr && arr->array.elements && idx >= 0 && (uint32_t)idx < arr->array.length) {
-                    if (opcode == 0x45) {
-                        v[op_b].j = ((int64_t *)arr->array.elements)[idx];
-                    } else if (opcode == 0x46) {
-                        v[op_b].l = ((tl_dex_object **)arr->array.elements)[idx];
-                    } else {
-                        v[op_b].i = ((int32_t *)arr->array.elements)[idx];
+                tl_dex_object *arr = tl_dex_array(v[regs & 0xff].l);
+                int32_t idx = v[(regs >> 8) & 0xff].i;
+                uint32_t es = stride[opcode - 0x44];
+                tl_dex_val *dst = &v[op_b];
+                if (arr && arr->array.elements && idx >= 0 && (uint32_t)idx < arr->array.length &&
+                    arr->array.elem_size == es) {
+                    const uint8_t *at = (const uint8_t *)arr->array.elements + (size_t)idx * es;
+                    switch (opcode) {
+                        case 0x44: { uint32_t u; memcpy(&u, at, 4); dst->raw64 = u; break; }
+                        case 0x45: case 0x46: memcpy(&dst->raw64, at, 8); break;
+                        case 0x47: dst->raw64 = at[0]; break;
+                        case 0x48: dst->raw64 = (uint32_t)(int32_t)(int8_t)at[0]; break;
+                        case 0x49: { uint16_t u; memcpy(&u, at, 2); dst->raw64 = u; break; }
+                        default:   { int16_t sv; memcpy(&sv, at, 2); dst->raw64 = (uint32_t)(int32_t)sv; break; }
                     }
+                } else {
+                    dst->raw64 = 0;
+                    TL_LOG_FEW(aget_bad, 24, "tl: array read failed in %s.%s pc=%u (array=%s idx=%d len=%d elem=%u want=%u)",
+                               method->clazz ? method->clazz->descriptor : "?", method->name, pc,
+                               arr ? "ok" : "null", idx, arr ? (int)arr->array.length : -1,
+                               arr ? arr->array.elem_size : 0, es);
                 }
                 pc += 2;
                 break;
             }
 
-            case 0x4b: /* aput */
-            case 0x4c: /* aput-wide */
-            case 0x4d: /* aput-object */
-            case 0x4e: /* aput-boolean */
-            case 0x4f: /* aput-byte */
-            case 0x50: /* aput-char */
-            case 0x51: { /* aput-short */
+            case 0x4b: case 0x4c: case 0x4d: case 0x4e: case 0x4f: case 0x50: case 0x51: {
+                static const uint8_t stride[7] = { 4, 8, 8, 1, 1, 2, 2 };
                 uint16_t regs = insns[pc + 1];
-                uint8_t arr_reg = regs & 0xff;
-                uint8_t idx_reg = (regs >> 8) & 0xff;
-                tl_dex_object *arr = v[arr_reg].l;
-                int32_t idx = v[idx_reg].i;
-                if (arr && arr->array.elements && idx >= 0 && (uint32_t)idx < arr->array.length) {
-                    if (opcode == 0x4c) {
-                        ((int64_t *)arr->array.elements)[idx] = v[op_b].j;
-                    } else if (opcode == 0x4d) {
-                        ((tl_dex_object **)arr->array.elements)[idx] = v[op_b].l;
-                    } else {
-                        ((int32_t *)arr->array.elements)[idx] = v[op_b].i;
+                tl_dex_object *arr = tl_dex_array(v[regs & 0xff].l);
+                int32_t idx = v[(regs >> 8) & 0xff].i;
+                uint32_t es = stride[opcode - 0x4b];
+                const tl_dex_val val = v[op_b];
+                if (arr && arr->array.elements && idx >= 0 && (uint32_t)idx < arr->array.length &&
+                    arr->array.elem_size == es) {
+                    uint8_t *at = (uint8_t *)arr->array.elements + (size_t)idx * es;
+                    switch (opcode) {
+                        case 0x4b: { uint32_t u = val.raw32; memcpy(at, &u, 4); break; }
+                        case 0x4c: case 0x4d: memcpy(at, &val.raw64, 8); break;
+                        case 0x4e: case 0x4f: at[0] = (uint8_t)val.i; break;
+                        default:   { uint16_t u = (uint16_t)val.i; memcpy(at, &u, 2); break; }
                     }
+                } else {
+                    TL_LOG_FEW(aput_bad, 24, "tl: array write failed in %s.%s pc=%u (array=%s idx=%d len=%d elem=%u want=%u)",
+                               method->clazz ? method->clazz->descriptor : "?", method->name, pc,
+                               arr ? "ok" : "null", idx, arr ? (int)arr->array.length : -1,
+                               arr ? arr->array.elem_size : 0, es);
                 }
                 pc += 2;
                 break;
@@ -884,7 +1349,12 @@ bool tl_dex_invoke(tl_dex_context *ctx, tl_dex_method *method, tl_dex_val *args,
                 uint8_t b = (op_b >> 4) & 0x0f;
                 tl_dex_field *f = dex_resolve_field(ctx, dex, insns[pc + 1]);
                 tl_dex_object *obj = v[b].l;
-                if (obj && obj->fields && f) {
+                if (obj && f && f->slot == UINT32_MAX) {
+                    /* Not a field of an app class: a framework object's own. */
+                    tl_dex_val out; out.raw64 = 0;
+                    if (!tl_framework_field_get(ctx, obj, f, &out)) dex_note_unresolved_field(f, "read");
+                    v[a] = out;
+                } else if (obj && obj->nfields && f && f->slot < obj->nfields) {
                     v[a] = obj->fields[f->slot];
                 } else {
                     v[a].raw64 = 0;
@@ -904,8 +1374,16 @@ bool tl_dex_invoke(tl_dex_context *ctx, tl_dex_method *method, tl_dex_val *args,
                 uint8_t b = (op_b >> 4) & 0x0f;
                 tl_dex_field *f = dex_resolve_field(ctx, dex, insns[pc + 1]);
                 tl_dex_object *obj = v[b].l;
-                if (obj && obj->fields && f) {
+                if (obj && f && f->slot == UINT32_MAX) {
+                    if (!tl_framework_field_set(ctx, obj, f, v[a])) dex_note_unresolved_field(f, "write");
+                } else if (obj && obj->nfields && f && f->slot < obj->nfields) {
                     obj->fields[f->slot] = v[a];
+#ifdef TL_DEX_TRACE
+                    if (ctx->trace)
+                        fprintf(stderr, "        iput %s.%s slot=%u <- 0x%llx\n",
+                                f->clazz ? f->clazz->descriptor : "?", f->name, f->slot,
+                                (unsigned long long)v[a].raw64);
+#endif
                 }
                 pc += 2;
                 break;
@@ -919,7 +1397,13 @@ bool tl_dex_invoke(tl_dex_context *ctx, tl_dex_method *method, tl_dex_val *args,
             case 0x65: /* sget-char */
             case 0x66: { /* sget-short */
                 tl_dex_field *f = dex_resolve_field(ctx, dex, insns[pc + 1]);
-                if (f && f->clazz && f->clazz->static_values) {
+                if (f) dex_ensure_class_initialized(ctx, f->clazz);
+                if (f && f->slot == UINT32_MAX) {
+                    tl_dex_val out; out.raw64 = 0;
+                    if (!tl_framework_static_get(ctx, f, &out)) dex_note_unresolved_field(f, "static read");
+                    v[op_b] = out;
+                } else if (f && f->clazz && f->clazz->static_values &&
+                    f->slot < (uint32_t)f->clazz->num_static_fields) {
                     v[op_b] = f->clazz->static_values[f->slot];
                 } else {
                     v[op_b].raw64 = 0;
@@ -936,7 +1420,9 @@ bool tl_dex_invoke(tl_dex_context *ctx, tl_dex_method *method, tl_dex_val *args,
             case 0x6c: /* sput-char */
             case 0x6d: { /* sput-short */
                 tl_dex_field *f = dex_resolve_field(ctx, dex, insns[pc + 1]);
-                if (f && f->clazz && f->clazz->static_values) {
+                if (f) dex_ensure_class_initialized(ctx, f->clazz);
+                if (f && f->clazz && f->clazz->static_values &&
+                    f->slot < (uint32_t)f->clazz->num_static_fields) {
                     f->clazz->static_values[f->slot] = v[op_b];
                 }
                 pc += 2;
@@ -952,6 +1438,12 @@ bool tl_dex_invoke(tl_dex_context *ctx, tl_dex_method *method, tl_dex_val *args,
                 uint16_t m_idx = insns[pc + 1];
                 uint16_t arg_regs = insns[pc + 2];
                 tl_dex_method *target = dex_resolve_method(ctx, dex, m_idx);
+                /* Calling a static method is a use of its class; calling an
+                 * instance method is not -- whatever produced the instance
+                 * initialised it already. */
+                if (opcode == 0x71 && target) {
+                    dex_ensure_class_initialized(ctx, target->clazz);
+                }
 
                 uint8_t reg_list[5];
                 reg_list[0] = arg_regs & 0x0f;
@@ -965,6 +1457,20 @@ bool tl_dex_invoke(tl_dex_context *ctx, tl_dex_method *method, tl_dex_val *args,
                     call_args[i] = v[reg_list[i]];
                 }
 
+                /* Cleared first, always. move-result reads whatever this call
+                 * leaves behind, and any callee that returns early without
+                 * writing it -- a shim given a null argument, say -- would
+                 * otherwise hand the caller the PREVIOUS call's result. That is
+                 * how an int from one call became the "Bitmap" of the next. */
+#ifdef TL_DEX_TRACE
+                if (ctx->trace) {
+                    fprintf(stderr, "        args:");
+                    for (int i = 0; i < count && i < 5; i++)
+                        fprintf(stderr, " v%u=0x%llx", reg_list[i], (unsigned long long)call_args[i].raw64);
+                    fprintf(stderr, "\n");
+                }
+#endif
+                last_result.raw64 = 0;
                 tl_dex_invoke(ctx, target, call_args, count, &last_result);
                 pc += 3;
                 break;
@@ -979,11 +1485,15 @@ bool tl_dex_invoke(tl_dex_context *ctx, tl_dex_method *method, tl_dex_val *args,
                 uint16_t m_idx = insns[pc + 1];
                 uint16_t first_reg = insns[pc + 2];
                 tl_dex_method *target = dex_resolve_method(ctx, dex, m_idx);
+                if (opcode == 0x77 && target) {
+                    dex_ensure_class_initialized(ctx, target->clazz);
+                }
 
                 tl_dex_val *call_args = calloc(count ? count : 1, sizeof(tl_dex_val));
                 for (int i = 0; i < count; i++) {
                     call_args[i] = v[first_reg + i];
                 }
+                last_result.raw64 = 0;   /* see the non-range form above */
                 tl_dex_invoke(ctx, target, call_args, count, &last_result);
                 free(call_args);
                 pc += 3;
@@ -991,186 +1501,139 @@ bool tl_dex_invoke(tl_dex_context *ctx, tl_dex_method *method, tl_dex_val *args,
             }
 
             /* Unary arithmetic & Conversions */
-            case 0x7b: /* neg-int */    v[op_b & 0x0f].i = -v[(op_b >> 4) & 0x0f].i; pc += 1; break;
-            case 0x7c: /* not-int */    v[op_b & 0x0f].i = ~v[(op_b >> 4) & 0x0f].i; pc += 1; break;
+            case 0x7b: /* neg-int */    put_i(&v[op_b & 0x0f], -v[(op_b >> 4) & 0x0f].i); pc += 1; break;
+            case 0x7c: /* not-int */    put_i(&v[op_b & 0x0f], ~v[(op_b >> 4) & 0x0f].i); pc += 1; break;
             case 0x7d: /* neg-long */   v[op_b & 0x0f].j = -v[(op_b >> 4) & 0x0f].j; pc += 1; break;
             case 0x7e: /* not-long */   v[op_b & 0x0f].j = ~v[(op_b >> 4) & 0x0f].j; pc += 1; break;
-            case 0x7f: /* neg-float */  v[op_b & 0x0f].f = -v[(op_b >> 4) & 0x0f].f; pc += 1; break;
+            case 0x7f: /* neg-float */  put_f(&v[op_b & 0x0f], -v[(op_b >> 4) & 0x0f].f); pc += 1; break;
             case 0x80: /* neg-double */ v[op_b & 0x0f].d = -v[(op_b >> 4) & 0x0f].d; pc += 1; break;
             case 0x81: /* int-to-long */   v[op_b & 0x0f].j = v[(op_b >> 4) & 0x0f].i; pc += 1; break;
-            case 0x82: /* int-to-float */  v[op_b & 0x0f].f = (float)v[(op_b >> 4) & 0x0f].i; pc += 1; break;
+            case 0x82: /* int-to-float */  put_f(&v[op_b & 0x0f], (float)v[(op_b >> 4) & 0x0f].i); pc += 1; break;
             case 0x83: /* int-to-double */ v[op_b & 0x0f].d = (double)v[(op_b >> 4) & 0x0f].i; pc += 1; break;
-            case 0x84: /* long-to-int */   v[op_b & 0x0f].i = (int32_t)v[(op_b >> 4) & 0x0f].j; pc += 1; break;
-            case 0x85: /* long-to-float */ v[op_b & 0x0f].f = (float)v[(op_b >> 4) & 0x0f].j; pc += 1; break;
+            case 0x84: /* long-to-int */   put_i(&v[op_b & 0x0f], (int32_t)v[(op_b >> 4) & 0x0f].j); pc += 1; break;
+            case 0x85: /* long-to-float */ put_f(&v[op_b & 0x0f], (float)v[(op_b >> 4) & 0x0f].j); pc += 1; break;
             case 0x86: /* long-to-double */v[op_b & 0x0f].d = (double)v[(op_b >> 4) & 0x0f].j; pc += 1; break;
-            case 0x87: /* float-to-int */  v[op_b & 0x0f].i = (int32_t)v[(op_b >> 4) & 0x0f].f; pc += 1; break;
+            case 0x87: /* float-to-int */  put_i(&v[op_b & 0x0f], (int32_t)v[(op_b >> 4) & 0x0f].f); pc += 1; break;
             case 0x88: /* float-to-long */ v[op_b & 0x0f].j = (int64_t)v[(op_b >> 4) & 0x0f].f; pc += 1; break;
             case 0x89: /* float-to-double */v[op_b & 0x0f].d = (double)v[(op_b >> 4) & 0x0f].f; pc += 1; break;
-            case 0x8a: /* double-to-int */ v[op_b & 0x0f].i = (int32_t)v[(op_b >> 4) & 0x0f].d; pc += 1; break;
+            case 0x8a: /* double-to-int */ put_i(&v[op_b & 0x0f], (int32_t)v[(op_b >> 4) & 0x0f].d); pc += 1; break;
             case 0x8b: /* double-to-long */v[op_b & 0x0f].j = (int64_t)v[(op_b >> 4) & 0x0f].d; pc += 1; break;
-            case 0x8c: /* double-to-float */v[op_b & 0x0f].f = (float)v[(op_b >> 4) & 0x0f].d; pc += 1; break;
+            case 0x8c: /* double-to-float */put_f(&v[op_b & 0x0f], (float)v[(op_b >> 4) & 0x0f].d); pc += 1; break;
+            case 0x8d: /* int-to-byte */  put_i(&v[op_b & 0x0f], (int8_t)v[(op_b >> 4) & 0x0f].i);   pc += 1; break;
+            case 0x8e: /* int-to-char */  put_i(&v[op_b & 0x0f], (uint16_t)v[(op_b >> 4) & 0x0f].i); pc += 1; break;
+            case 0x8f: /* int-to-short */ put_i(&v[op_b & 0x0f], (int16_t)v[(op_b >> 4) & 0x0f].i);  pc += 1; break;
 
-            /* Binary arithmetic (3 registers) */
-            case 0x90: { /* add-int */
-                uint16_t regs = insns[pc + 1];
-                v[op_b].i = v[regs & 0xff].i + v[(regs >> 8) & 0xff].i;
-                pc += 2;
-                break;
-            }
-            case 0x91: { /* sub-int */
-                uint16_t regs = insns[pc + 1];
-                v[op_b].i = v[regs & 0xff].i - v[(regs >> 8) & 0xff].i;
-                pc += 2;
-                break;
-            }
-            case 0x92: { /* mul-int */
-                uint16_t regs = insns[pc + 1];
-                v[op_b].i = v[regs & 0xff].i * v[(regs >> 8) & 0xff].i;
-                pc += 2;
-                break;
-            }
-            case 0x93: { /* div-int */
-                uint16_t regs = insns[pc + 1];
-                int32_t d = v[(regs >> 8) & 0xff].i;
-                v[op_b].i = d ? (v[regs & 0xff].i / d) : 0;
-                pc += 2;
-                break;
-            }
-            case 0x94: { /* rem-int */
-                uint16_t regs = insns[pc + 1];
-                int32_t d = v[(regs >> 8) & 0xff].i;
-                v[op_b].i = d ? (v[regs & 0xff].i % d) : 0;
-                pc += 2;
-                break;
-            }
-            case 0x95: { /* and-int */
-                uint16_t regs = insns[pc + 1];
-                v[op_b].i = v[regs & 0xff].i & v[(regs >> 8) & 0xff].i;
-                pc += 2;
-                break;
-            }
-            case 0x96: { /* or-int */
-                uint16_t regs = insns[pc + 1];
-                v[op_b].i = v[regs & 0xff].i | v[(regs >> 8) & 0xff].i;
-                pc += 2;
-                break;
-            }
-            case 0x97: { /* xor-int */
-                uint16_t regs = insns[pc + 1];
-                v[op_b].i = v[regs & 0xff].i ^ v[(regs >> 8) & 0xff].i;
-                pc += 2;
-                break;
-            }
-            case 0x98: { /* shl-int */
-                uint16_t regs = insns[pc + 1];
-                v[op_b].i = v[regs & 0xff].i << (v[(regs >> 8) & 0xff].i & 0x1f);
-                pc += 2;
-                break;
-            }
-            case 0x99: { /* shr-int */
-                uint16_t regs = insns[pc + 1];
-                v[op_b].i = v[regs & 0xff].i >> (v[(regs >> 8) & 0xff].i & 0x1f);
-                pc += 2;
-                break;
-            }
+            /* ---- Binary arithmetic: generated, one case per opcode ---- */
+            case 0x90: { uint16_t r_ = insns[pc + 1]; put_i(&v[op_b], i_add(v[r_ & 0xff].i, v[(r_ >> 8) & 0xff].i)); pc += 2; break; }
+            case 0x91: { uint16_t r_ = insns[pc + 1]; put_i(&v[op_b], i_sub(v[r_ & 0xff].i, v[(r_ >> 8) & 0xff].i)); pc += 2; break; }
+            case 0x92: { uint16_t r_ = insns[pc + 1]; put_i(&v[op_b], i_mul(v[r_ & 0xff].i, v[(r_ >> 8) & 0xff].i)); pc += 2; break; }
+            case 0x93: { uint16_t r_ = insns[pc + 1]; put_i(&v[op_b], i_div(v[r_ & 0xff].i, v[(r_ >> 8) & 0xff].i)); pc += 2; break; }
+            case 0x94: { uint16_t r_ = insns[pc + 1]; put_i(&v[op_b], i_rem(v[r_ & 0xff].i, v[(r_ >> 8) & 0xff].i)); pc += 2; break; }
+            case 0x95: { uint16_t r_ = insns[pc + 1]; put_i(&v[op_b], i_and(v[r_ & 0xff].i, v[(r_ >> 8) & 0xff].i)); pc += 2; break; }
+            case 0x96: { uint16_t r_ = insns[pc + 1]; put_i(&v[op_b], i_or(v[r_ & 0xff].i, v[(r_ >> 8) & 0xff].i)); pc += 2; break; }
+            case 0x97: { uint16_t r_ = insns[pc + 1]; put_i(&v[op_b], i_xor(v[r_ & 0xff].i, v[(r_ >> 8) & 0xff].i)); pc += 2; break; }
+            case 0x98: { uint16_t r_ = insns[pc + 1]; put_i(&v[op_b], i_shl(v[r_ & 0xff].i, v[(r_ >> 8) & 0xff].i)); pc += 2; break; }
+            case 0x99: { uint16_t r_ = insns[pc + 1]; put_i(&v[op_b], i_shr(v[r_ & 0xff].i, v[(r_ >> 8) & 0xff].i)); pc += 2; break; }
+            case 0x9a: { uint16_t r_ = insns[pc + 1]; put_i(&v[op_b], i_ushr(v[r_ & 0xff].i, v[(r_ >> 8) & 0xff].i)); pc += 2; break; }
+            case 0x9b: { uint16_t r_ = insns[pc + 1]; put_j(&v[op_b], l_add(v[r_ & 0xff].j, v[(r_ >> 8) & 0xff].j)); pc += 2; break; }
+            case 0x9c: { uint16_t r_ = insns[pc + 1]; put_j(&v[op_b], l_sub(v[r_ & 0xff].j, v[(r_ >> 8) & 0xff].j)); pc += 2; break; }
+            case 0x9d: { uint16_t r_ = insns[pc + 1]; put_j(&v[op_b], l_mul(v[r_ & 0xff].j, v[(r_ >> 8) & 0xff].j)); pc += 2; break; }
+            case 0x9e: { uint16_t r_ = insns[pc + 1]; put_j(&v[op_b], l_div(v[r_ & 0xff].j, v[(r_ >> 8) & 0xff].j)); pc += 2; break; }
+            case 0x9f: { uint16_t r_ = insns[pc + 1]; put_j(&v[op_b], l_rem(v[r_ & 0xff].j, v[(r_ >> 8) & 0xff].j)); pc += 2; break; }
+            case 0xa0: { uint16_t r_ = insns[pc + 1]; put_j(&v[op_b], l_and(v[r_ & 0xff].j, v[(r_ >> 8) & 0xff].j)); pc += 2; break; }
+            case 0xa1: { uint16_t r_ = insns[pc + 1]; put_j(&v[op_b], l_or(v[r_ & 0xff].j, v[(r_ >> 8) & 0xff].j)); pc += 2; break; }
+            case 0xa2: { uint16_t r_ = insns[pc + 1]; put_j(&v[op_b], l_xor(v[r_ & 0xff].j, v[(r_ >> 8) & 0xff].j)); pc += 2; break; }
+            case 0xa3: { uint16_t r_ = insns[pc + 1]; put_j(&v[op_b], l_shl(v[r_ & 0xff].j, v[(r_ >> 8) & 0xff].i)); pc += 2; break; }
+            case 0xa4: { uint16_t r_ = insns[pc + 1]; put_j(&v[op_b], l_shr(v[r_ & 0xff].j, v[(r_ >> 8) & 0xff].i)); pc += 2; break; }
+            case 0xa5: { uint16_t r_ = insns[pc + 1]; put_j(&v[op_b], l_ushr(v[r_ & 0xff].j, v[(r_ >> 8) & 0xff].i)); pc += 2; break; }
+            case 0xa6: { uint16_t r_ = insns[pc + 1]; put_f(&v[op_b], f_add(v[r_ & 0xff].f, v[(r_ >> 8) & 0xff].f)); pc += 2; break; }
+            case 0xa7: { uint16_t r_ = insns[pc + 1]; put_f(&v[op_b], f_sub(v[r_ & 0xff].f, v[(r_ >> 8) & 0xff].f)); pc += 2; break; }
+            case 0xa8: { uint16_t r_ = insns[pc + 1]; put_f(&v[op_b], f_mul(v[r_ & 0xff].f, v[(r_ >> 8) & 0xff].f)); pc += 2; break; }
+            case 0xa9: { uint16_t r_ = insns[pc + 1]; put_f(&v[op_b], f_div(v[r_ & 0xff].f, v[(r_ >> 8) & 0xff].f)); pc += 2; break; }
+            case 0xaa: { uint16_t r_ = insns[pc + 1]; put_f(&v[op_b], f_rem(v[r_ & 0xff].f, v[(r_ >> 8) & 0xff].f)); pc += 2; break; }
+            case 0xab: { uint16_t r_ = insns[pc + 1]; put_d(&v[op_b], d_add(v[r_ & 0xff].d, v[(r_ >> 8) & 0xff].d)); pc += 2; break; }
+            case 0xac: { uint16_t r_ = insns[pc + 1]; put_d(&v[op_b], d_sub(v[r_ & 0xff].d, v[(r_ >> 8) & 0xff].d)); pc += 2; break; }
+            case 0xad: { uint16_t r_ = insns[pc + 1]; put_d(&v[op_b], d_mul(v[r_ & 0xff].d, v[(r_ >> 8) & 0xff].d)); pc += 2; break; }
+            case 0xae: { uint16_t r_ = insns[pc + 1]; put_d(&v[op_b], d_div(v[r_ & 0xff].d, v[(r_ >> 8) & 0xff].d)); pc += 2; break; }
+            case 0xaf: { uint16_t r_ = insns[pc + 1]; put_d(&v[op_b], d_rem(v[r_ & 0xff].d, v[(r_ >> 8) & 0xff].d)); pc += 2; break; }
 
-            case 0xa6: { /* add-float */
-                uint16_t regs = insns[pc + 1];
-                v[op_b].f = v[regs & 0xff].f + v[(regs >> 8) & 0xff].f;
-                pc += 2;
-                break;
-            }
-            case 0xa7: { /* sub-float */
-                uint16_t regs = insns[pc + 1];
-                v[op_b].f = v[regs & 0xff].f - v[(regs >> 8) & 0xff].f;
-                pc += 2;
-                break;
-            }
-            case 0xa8: { /* mul-float */
-                uint16_t regs = insns[pc + 1];
-                v[op_b].f = v[regs & 0xff].f * v[(regs >> 8) & 0xff].f;
-                pc += 2;
-                break;
-            }
-            case 0xa9: { /* div-float */
-                uint16_t regs = insns[pc + 1];
-                v[op_b].f = v[regs & 0xff].f / v[(regs >> 8) & 0xff].f;
-                pc += 2;
-                break;
-            }
-            case 0xab: { /* add-double */
-                uint16_t regs = insns[pc + 1];
-                v[op_b].d = v[regs & 0xff].d + v[(regs >> 8) & 0xff].d;
-                pc += 2;
-                break;
-            }
-            case 0xac: { /* sub-double */
-                uint16_t regs = insns[pc + 1];
-                v[op_b].d = v[regs & 0xff].d - v[(regs >> 8) & 0xff].d;
-                pc += 2;
-                break;
-            }
-            case 0xad: { /* mul-double */
-                uint16_t regs = insns[pc + 1];
-                v[op_b].d = v[regs & 0xff].d * v[(regs >> 8) & 0xff].d;
-                pc += 2;
-                break;
-            }
+            /* ---- /2addr forms ---- */
+            case 0xb0: { tl_dex_val *d_ = &v[op_b & 0x0f]; put_i(d_, i_add(d_->i, v[(op_b >> 4) & 0x0f].i)); pc += 1; break; }
+            case 0xb1: { tl_dex_val *d_ = &v[op_b & 0x0f]; put_i(d_, i_sub(d_->i, v[(op_b >> 4) & 0x0f].i)); pc += 1; break; }
+            case 0xb2: { tl_dex_val *d_ = &v[op_b & 0x0f]; put_i(d_, i_mul(d_->i, v[(op_b >> 4) & 0x0f].i)); pc += 1; break; }
+            case 0xb3: { tl_dex_val *d_ = &v[op_b & 0x0f]; put_i(d_, i_div(d_->i, v[(op_b >> 4) & 0x0f].i)); pc += 1; break; }
+            case 0xb4: { tl_dex_val *d_ = &v[op_b & 0x0f]; put_i(d_, i_rem(d_->i, v[(op_b >> 4) & 0x0f].i)); pc += 1; break; }
+            case 0xb5: { tl_dex_val *d_ = &v[op_b & 0x0f]; put_i(d_, i_and(d_->i, v[(op_b >> 4) & 0x0f].i)); pc += 1; break; }
+            case 0xb6: { tl_dex_val *d_ = &v[op_b & 0x0f]; put_i(d_, i_or(d_->i, v[(op_b >> 4) & 0x0f].i)); pc += 1; break; }
+            case 0xb7: { tl_dex_val *d_ = &v[op_b & 0x0f]; put_i(d_, i_xor(d_->i, v[(op_b >> 4) & 0x0f].i)); pc += 1; break; }
+            case 0xb8: { tl_dex_val *d_ = &v[op_b & 0x0f]; put_i(d_, i_shl(d_->i, v[(op_b >> 4) & 0x0f].i)); pc += 1; break; }
+            case 0xb9: { tl_dex_val *d_ = &v[op_b & 0x0f]; put_i(d_, i_shr(d_->i, v[(op_b >> 4) & 0x0f].i)); pc += 1; break; }
+            case 0xba: { tl_dex_val *d_ = &v[op_b & 0x0f]; put_i(d_, i_ushr(d_->i, v[(op_b >> 4) & 0x0f].i)); pc += 1; break; }
+            case 0xbb: { tl_dex_val *d_ = &v[op_b & 0x0f]; put_j(d_, l_add(d_->j, v[(op_b >> 4) & 0x0f].j)); pc += 1; break; }
+            case 0xbc: { tl_dex_val *d_ = &v[op_b & 0x0f]; put_j(d_, l_sub(d_->j, v[(op_b >> 4) & 0x0f].j)); pc += 1; break; }
+            case 0xbd: { tl_dex_val *d_ = &v[op_b & 0x0f]; put_j(d_, l_mul(d_->j, v[(op_b >> 4) & 0x0f].j)); pc += 1; break; }
+            case 0xbe: { tl_dex_val *d_ = &v[op_b & 0x0f]; put_j(d_, l_div(d_->j, v[(op_b >> 4) & 0x0f].j)); pc += 1; break; }
+            case 0xbf: { tl_dex_val *d_ = &v[op_b & 0x0f]; put_j(d_, l_rem(d_->j, v[(op_b >> 4) & 0x0f].j)); pc += 1; break; }
+            case 0xc0: { tl_dex_val *d_ = &v[op_b & 0x0f]; put_j(d_, l_and(d_->j, v[(op_b >> 4) & 0x0f].j)); pc += 1; break; }
+            case 0xc1: { tl_dex_val *d_ = &v[op_b & 0x0f]; put_j(d_, l_or(d_->j, v[(op_b >> 4) & 0x0f].j)); pc += 1; break; }
+            case 0xc2: { tl_dex_val *d_ = &v[op_b & 0x0f]; put_j(d_, l_xor(d_->j, v[(op_b >> 4) & 0x0f].j)); pc += 1; break; }
+            case 0xc3: { tl_dex_val *d_ = &v[op_b & 0x0f]; put_j(d_, l_shl(d_->j, v[(op_b >> 4) & 0x0f].i)); pc += 1; break; }
+            case 0xc4: { tl_dex_val *d_ = &v[op_b & 0x0f]; put_j(d_, l_shr(d_->j, v[(op_b >> 4) & 0x0f].i)); pc += 1; break; }
+            case 0xc5: { tl_dex_val *d_ = &v[op_b & 0x0f]; put_j(d_, l_ushr(d_->j, v[(op_b >> 4) & 0x0f].i)); pc += 1; break; }
+            case 0xc6: { tl_dex_val *d_ = &v[op_b & 0x0f]; put_f(d_, f_add(d_->f, v[(op_b >> 4) & 0x0f].f)); pc += 1; break; }
+            case 0xc7: { tl_dex_val *d_ = &v[op_b & 0x0f]; put_f(d_, f_sub(d_->f, v[(op_b >> 4) & 0x0f].f)); pc += 1; break; }
+            case 0xc8: { tl_dex_val *d_ = &v[op_b & 0x0f]; put_f(d_, f_mul(d_->f, v[(op_b >> 4) & 0x0f].f)); pc += 1; break; }
+            case 0xc9: { tl_dex_val *d_ = &v[op_b & 0x0f]; put_f(d_, f_div(d_->f, v[(op_b >> 4) & 0x0f].f)); pc += 1; break; }
+            case 0xca: { tl_dex_val *d_ = &v[op_b & 0x0f]; put_f(d_, f_rem(d_->f, v[(op_b >> 4) & 0x0f].f)); pc += 1; break; }
+            case 0xcb: { tl_dex_val *d_ = &v[op_b & 0x0f]; put_d(d_, d_add(d_->d, v[(op_b >> 4) & 0x0f].d)); pc += 1; break; }
+            case 0xcc: { tl_dex_val *d_ = &v[op_b & 0x0f]; put_d(d_, d_sub(d_->d, v[(op_b >> 4) & 0x0f].d)); pc += 1; break; }
+            case 0xcd: { tl_dex_val *d_ = &v[op_b & 0x0f]; put_d(d_, d_mul(d_->d, v[(op_b >> 4) & 0x0f].d)); pc += 1; break; }
+            case 0xce: { tl_dex_val *d_ = &v[op_b & 0x0f]; put_d(d_, d_div(d_->d, v[(op_b >> 4) & 0x0f].d)); pc += 1; break; }
+            case 0xcf: { tl_dex_val *d_ = &v[op_b & 0x0f]; put_d(d_, d_rem(d_->d, v[(op_b >> 4) & 0x0f].d)); pc += 1; break; }
 
-            /* Binary arithmetic /2addr */
-            case 0xb0: v[op_b & 0x0f].i += v[(op_b >> 4) & 0x0f].i; pc += 1; break; /* add-int/2addr */
-            case 0xb1: v[op_b & 0x0f].i -= v[(op_b >> 4) & 0x0f].i; pc += 1; break; /* sub-int/2addr */
-            case 0xb2: v[op_b & 0x0f].i *= v[(op_b >> 4) & 0x0f].i; pc += 1; break; /* mul-int/2addr */
-            case 0xc6: v[op_b & 0x0f].f += v[(op_b >> 4) & 0x0f].f; pc += 1; break; /* add-float/2addr */
-            case 0xc7: v[op_b & 0x0f].f -= v[(op_b >> 4) & 0x0f].f; pc += 1; break; /* sub-float/2addr */
-            case 0xc8: v[op_b & 0x0f].f *= v[(op_b >> 4) & 0x0f].f; pc += 1; break; /* mul-float/2addr */
-            case 0xc9: v[op_b & 0x0f].f /= v[(op_b >> 4) & 0x0f].f; pc += 1; break; /* div-float/2addr */
+            /* ---- literal forms ---- */
+            case 0xd0: put_i(&v[op_b & 0x0f], i_add(v[(op_b >> 4) & 0x0f].i, (int16_t)insns[pc + 1])); pc += 2; break;
+            case 0xd1: put_i(&v[op_b & 0x0f], i_rsub(v[(op_b >> 4) & 0x0f].i, (int16_t)insns[pc + 1])); pc += 2; break;
+            case 0xd2: put_i(&v[op_b & 0x0f], i_mul(v[(op_b >> 4) & 0x0f].i, (int16_t)insns[pc + 1])); pc += 2; break;
+            case 0xd3: put_i(&v[op_b & 0x0f], i_div(v[(op_b >> 4) & 0x0f].i, (int16_t)insns[pc + 1])); pc += 2; break;
+            case 0xd4: put_i(&v[op_b & 0x0f], i_rem(v[(op_b >> 4) & 0x0f].i, (int16_t)insns[pc + 1])); pc += 2; break;
+            case 0xd5: put_i(&v[op_b & 0x0f], i_and(v[(op_b >> 4) & 0x0f].i, (int16_t)insns[pc + 1])); pc += 2; break;
+            case 0xd6: put_i(&v[op_b & 0x0f], i_or(v[(op_b >> 4) & 0x0f].i, (int16_t)insns[pc + 1])); pc += 2; break;
+            case 0xd7: put_i(&v[op_b & 0x0f], i_xor(v[(op_b >> 4) & 0x0f].i, (int16_t)insns[pc + 1])); pc += 2; break;
+            case 0xd8: put_i(&v[op_b], i_add(v[insns[pc + 1] & 0xff].i, (int8_t)(insns[pc + 1] >> 8))); pc += 2; break;
+            case 0xd9: put_i(&v[op_b], i_rsub(v[insns[pc + 1] & 0xff].i, (int8_t)(insns[pc + 1] >> 8))); pc += 2; break;
+            case 0xda: put_i(&v[op_b], i_mul(v[insns[pc + 1] & 0xff].i, (int8_t)(insns[pc + 1] >> 8))); pc += 2; break;
+            case 0xdb: put_i(&v[op_b], i_div(v[insns[pc + 1] & 0xff].i, (int8_t)(insns[pc + 1] >> 8))); pc += 2; break;
+            case 0xdc: put_i(&v[op_b], i_rem(v[insns[pc + 1] & 0xff].i, (int8_t)(insns[pc + 1] >> 8))); pc += 2; break;
+            case 0xdd: put_i(&v[op_b], i_and(v[insns[pc + 1] & 0xff].i, (int8_t)(insns[pc + 1] >> 8))); pc += 2; break;
+            case 0xde: put_i(&v[op_b], i_or(v[insns[pc + 1] & 0xff].i, (int8_t)(insns[pc + 1] >> 8))); pc += 2; break;
+            case 0xdf: put_i(&v[op_b], i_xor(v[insns[pc + 1] & 0xff].i, (int8_t)(insns[pc + 1] >> 8))); pc += 2; break;
+            case 0xe0: put_i(&v[op_b], i_shl(v[insns[pc + 1] & 0xff].i, (int8_t)(insns[pc + 1] >> 8))); pc += 2; break;
+            case 0xe1: put_i(&v[op_b], i_shr(v[insns[pc + 1] & 0xff].i, (int8_t)(insns[pc + 1] >> 8))); pc += 2; break;
+            case 0xe2: put_i(&v[op_b], i_ushr(v[insns[pc + 1] & 0xff].i, (int8_t)(insns[pc + 1] >> 8))); pc += 2; break;
 
-            /* Literal arithmetic */
-            case 0xd0: /* add-int/lit16 */
-                v[op_b & 0x0f].i = v[(op_b >> 4) & 0x0f].i + (int16_t)insns[pc + 1];
-                pc += 2;
-                break;
-            case 0xd1: /* rsub-int */
-                v[op_b & 0x0f].i = (int16_t)insns[pc + 1] - v[(op_b >> 4) & 0x0f].i;
-                pc += 2;
-                break;
-            case 0xd2: /* mul-int/lit16 */
-                v[op_b & 0x0f].i = v[(op_b >> 4) & 0x0f].i * (int16_t)insns[pc + 1];
-                pc += 2;
-                break;
-
-            case 0xd8: /* add-int/lit8 */
-                v[op_b].i = v[insns[pc + 1] & 0xff].i + (int8_t)((insns[pc + 1] >> 8) & 0xff);
-                pc += 2;
-                break;
-            case 0xd9: /* rsub-int/lit8 */
-                v[op_b].i = (int8_t)((insns[pc + 1] >> 8) & 0xff) - v[insns[pc + 1] & 0xff].i;
-                pc += 2;
-                break;
-            case 0xda: /* mul-int/lit8 */
-                v[op_b].i = v[insns[pc + 1] & 0xff].i * (int8_t)((insns[pc + 1] >> 8) & 0xff);
-                pc += 2;
-                break;
-            case 0xdb: { /* div-int/lit8 */
-                int8_t d = (int8_t)((insns[pc + 1] >> 8) & 0xff);
-                v[op_b].i = d ? (v[insns[pc + 1] & 0xff].i / d) : 0;
-                pc += 2;
-                break;
+            default: {
+                /*
+                 * An opcode this interpreter does not implement.
+                 *
+                 * This used to step one code unit and carry on, which is only
+                 * right for a one-unit instruction. Most of the missing ones were
+                 * longer, so the operands were then decoded as the next
+                 * instructions and the method ran off into nonsense without a
+                 * word. Stop instead, and say which opcode and where: the call
+                 * ends, and the log names exactly what to implement next.
+                 */
+                static uint32_t reported[8];       /* one bit per opcode value */
+                uint32_t bit = 1u << (opcode & 31), word = (opcode >> 5) & 7;
+                if (!(reported[word] & bit)) {
+                    reported[word] |= bit;
+                    dex_log("tl: UNIMPLEMENTED opcode 0x%02x in %s.%s at pc=%u -- ending the call",
+                            opcode, method->clazz ? method->clazz->descriptor : "?",
+                            method->name, pc);
+                }
+                success = false;
+                goto done;
             }
-            case 0xde: /* and-int/lit8 */
-                v[op_b].i = v[insns[pc + 1] & 0xff].i & (int8_t)((insns[pc + 1] >> 8) & 0xff);
-                pc += 2;
-                break;
-            case 0xdf: /* or-int/lit8 */
-                v[op_b].i = v[insns[pc + 1] & 0xff].i | (int8_t)((insns[pc + 1] >> 8) & 0xff);
-                pc += 2;
-                break;
-
-            default:
-                /* Advance by standard width */
-                pc += 1;
-                break;
         }
     }
 
@@ -1181,9 +1644,80 @@ done:
 
 /* ------------------------------------------------ Frame & Touch Dispatch */
 
+void tl_dex_post_delayed(tl_dex_context *ctx, tl_dex_object *runnable, uint64_t delay_ms)
+{
+    if (!ctx || !runnable) return;
+    tl_dex_task *t = calloc(1, sizeof(*t));
+    if (!t) return;
+    t->runnable = runnable;
+    t->due_nanos = ctx->clock_nanos + delay_ms * 1000000ull;
+
+    /* Sorted by due time, and after anything already due at the same moment:
+     * two posts for the same instant run in the order they were made. */
+    tl_dex_task **at = &ctx->tasks;
+    while (*at && (*at)->due_nanos <= t->due_nanos) at = &(*at)->next;
+    t->next = *at;
+    *at = t;
+}
+
+void tl_dex_remove_callbacks(tl_dex_context *ctx, tl_dex_object *runnable)
+{
+    if (!ctx) return;
+    tl_dex_task **at = &ctx->tasks;
+    while (*at) {
+        if (!runnable || (*at)->runnable == runnable) {
+            tl_dex_task *dead = *at;
+            *at = dead->next;
+            free(dead);
+        } else {
+            at = &(*at)->next;
+        }
+    }
+}
+
+/* Run everything that has come due, once. Detached from the queue first, so a
+ * task that posts more work (as these usually do) adds to a queue nobody is in
+ * the middle of walking, and that work waits for a later frame. */
+static void dex_drain_input(tl_dex_context *ctx);
+
+static void dex_run_due_tasks(tl_dex_context *ctx)
+{
+    tl_dex_task *due = NULL, **tail = &due;
+    tl_dex_task **at = &ctx->tasks;
+    while (*at && (*at)->due_nanos <= ctx->clock_nanos) {
+        tl_dex_task *t = *at;
+        *at = t->next;
+        t->next = NULL;
+        *tail = t;
+        tail = &t->next;
+    }
+    while (due) {
+        tl_dex_task *t = due;
+        due = t->next;
+        if (t->runnable && t->runnable->clazz) {
+            tl_dex_method *run = tl_dex_find_method(t->runnable->clazz, "run", "V");
+            if (run) {
+                tl_dex_val a[1];
+                a[0].raw64 = 0;
+                a[0].l = t->runnable;
+                tl_dex_invoke(ctx, run, a, 1, NULL);
+            }
+        }
+        free(t);
+    }
+}
+
 void tl_dex_tick_frame(tl_dex_context *ctx, uint64_t frame_time_nanos)
 {
     if (!ctx) return;
+
+    /* Never backwards: code that measures an interval would see it as negative. */
+    if (frame_time_nanos > ctx->clock_nanos) ctx->clock_nanos = frame_time_nanos;
+
+    /* Input first, then deferred work, then the frame callback: the order
+     * Android's Choreographer runs them in. */
+    dex_drain_input(ctx);
+    dex_run_due_tasks(ctx);
 
     /* 1. Tick Choreographer callback */
     if (ctx->choreographer_cb) {
@@ -1201,23 +1735,65 @@ void tl_dex_tick_frame(tl_dex_context *ctx, uint64_t frame_time_nanos)
     ctx->frame_count++;
 }
 
-void tl_dex_send_touch(tl_dex_context *ctx, int action, float x, float y)
+/* Deliver one touch to the app. Only ever called from the pump thread. */
+static void dex_deliver_touch(tl_dex_context *ctx, int action, float x, float y)
 {
-    if (!ctx || !ctx->current_view) return;
+    if (!ctx->current_view) return;
 
     tl_dex_class *c_me = tl_dex_find_class(ctx, "Landroid/view/MotionEvent;");
     tl_dex_object *ev = tl_dex_alloc_object(c_me);
     if (ev && ev->fields) {
-        ev->fields[0].f = x;
-        ev->fields[1].f = y;
-        ev->fields[2].i = action;
+        ev->fields[0].raw64 = 0; ev->fields[0].f = x;
+        ev->fields[1].raw64 = 0; ev->fields[1].f = y;
+        ev->fields[2].raw64 = 0; ev->fields[2].i = action;
     }
 
     tl_dex_method *onTouch = tl_dex_find_method(ctx->current_view->clazz, "onTouchEvent", "ZL");
     if (onTouch) {
         tl_dex_val args[2];
-        args[0].l = ctx->current_view;
-        args[1].l = ev;
+        args[0].raw64 = 0; args[0].l = ctx->current_view;
+        args[1].raw64 = 0; args[1].l = ev;
         tl_dex_invoke(ctx, onTouch, args, 2, NULL);
+    }
+}
+
+/*
+ * Queue a touch. Safe to call from any thread; the app sees it at the start of
+ * the next frame. A full queue drops the event rather than make the UI thread
+ * wait on the interpreter -- sixty-four slots is some thirty frames of a touch
+ * moving at the screen's full rate, which nothing healthy comes near.
+ */
+void tl_dex_send_touch(tl_dex_context *ctx, int action, float x, float y)
+{
+    if (!ctx) return;
+    pthread_mutex_lock(&ctx->input_lock);
+    int next = (ctx->input_tail + 1) % 64;
+    if (next != ctx->input_head) {
+        ctx->input[ctx->input_tail].action = action;
+        ctx->input[ctx->input_tail].x = x;
+        ctx->input[ctx->input_tail].y = y;
+        ctx->input_tail = next;
+    }
+    pthread_mutex_unlock(&ctx->input_lock);
+}
+
+/* Hand every queued touch to the app, in order. The lock is held only to take
+ * an event off the queue, never while the app's handler runs: a handler that
+ * is slow must not stall the UI thread's next send_touch. */
+static void dex_drain_input(tl_dex_context *ctx)
+{
+    for (;;) {
+        int action; float x, y;
+        pthread_mutex_lock(&ctx->input_lock);
+        if (ctx->input_head == ctx->input_tail) {
+            pthread_mutex_unlock(&ctx->input_lock);
+            return;
+        }
+        action = ctx->input[ctx->input_head].action;
+        x = ctx->input[ctx->input_head].x;
+        y = ctx->input[ctx->input_head].y;
+        ctx->input_head = (ctx->input_head + 1) % 64;
+        pthread_mutex_unlock(&ctx->input_lock);
+        dex_deliver_touch(ctx, action, x, y);
     }
 }

@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "husk-tl-framework.h"
+#include "husk-tl-res.h"
 #include "husk-tl-dex.h"
 #include "husk-tl-internal.h"
 #include <stdio.h>
@@ -56,6 +57,12 @@ typedef struct {
 
 typedef struct {
     CGContextRef cg_ctx;
+    /* The app's resource table, and the buffer it reads from. Loaded on first
+     * use: most frames never ask for a resource, and parsing a 1.4 MB table
+     * at startup would be paid by apps that never do. */
+    tl_res *res;
+    uint8_t *arsc;
+    bool res_tried;
     tl_dex_object *canvas_obj;
     tl_dex_object *activity_obj;
     tl_dex_object *resources_obj;
@@ -82,6 +89,57 @@ static void matrix_multiply(tl_framework_matrix *dst, const tl_framework_matrix 
         }
     }
     memcpy(dst, &res, sizeof(res));
+}
+
+/* ------------------------------------------------------------- Resources */
+
+/*
+ * The screen density resource lookups are answered for.
+ *
+ * Android picks, among the versions of a drawable made for different densities,
+ * the one nearest the device's, then scales it so it comes out the same physical
+ * size. Only the first half is done here: the highest density wins and the
+ * bitmap is used at its own pixel size. For an app that ships one copy of a
+ * drawable the two are the same thing.
+ */
+#define TL_FRAMEWORK_DENSITY_DPI 480
+
+/*
+ * The app's resource table, loaded the first time anything asks.
+ *
+ * The bytes are copied into a buffer owned here. tl_zip_data hands back a
+ * pointer into the APK's mapping when the entry is stored uncompressed, and
+ * that mapping goes away with tl_zip_close -- while the table keeps pointing
+ * into whatever it was given for as long as the app runs.
+ */
+static tl_res *framework_res(tl_dex_context *ctx)
+{
+    tl_framework_state *st = ctx ? ctx->framework_data : NULL;
+    if (!st) return NULL;
+    if (st->res || st->res_tried) return st->res;
+    st->res_tried = true;
+    if (!ctx->apk_path) return NULL;
+
+    tl_zip z;
+    char zerr[128] = {0};
+    if (!tl_zip_open(&z, ctx->apk_path, zerr, sizeof(zerr))) return NULL;
+
+    const tl_zip_entry *entry = tl_zip_find(&z, "resources.arsc");
+    const uint8_t *data = NULL;
+    size_t len = 0;
+    bool owned = false;
+    if (entry && tl_zip_data(&z, entry, 64 * 1024 * 1024, &data, &len, &owned,
+                             zerr, sizeof(zerr))) {
+        st->arsc = malloc(len);
+        if (st->arsc) {
+            memcpy(st->arsc, data, len);
+            st->res = tl_res_create(st->arsc, len);
+            if (!st->res) { free(st->arsc); st->arsc = NULL; }
+        }
+        if (owned) free((void *)data);
+    }
+    tl_zip_close(&z);
+    return st->res;
 }
 
 /* ----------------------------------------------------- Asset & Bitmap Loading */
@@ -152,15 +210,15 @@ static bool matrix_init(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val
     (void)ctx; (void)args; (void)nargs; (void)ret;
     tl_framework_matrix *m = calloc(1, sizeof(*m));
     matrix_identity(m);
-    this_obj->native_ptr = m;
+    tl_dex_set_native(this_obj, m);
     return true;
 }
 
 static bool matrix_reset(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
 {
     (void)ctx; (void)args; (void)nargs; (void)ret;
-    if (this_obj && this_obj->native_ptr) {
-        matrix_identity((tl_framework_matrix *)this_obj->native_ptr);
+    if (this_obj && tl_dex_native(this_obj)) {
+        matrix_identity((tl_framework_matrix *)tl_dex_native(this_obj));
     }
     return true;
 }
@@ -168,8 +226,8 @@ static bool matrix_reset(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_va
 static bool matrix_postTranslate(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
 {
     (void)ctx; (void)nargs;
-    if (this_obj && this_obj->native_ptr) {
-        tl_framework_matrix *m = this_obj->native_ptr;
+    if (this_obj && tl_dex_native(this_obj)) {
+        tl_framework_matrix *m = tl_dex_native(this_obj);
         float dx = args[1].f;
         float dy = args[2].f;
         tl_framework_matrix t;
@@ -185,8 +243,8 @@ static bool matrix_postTranslate(tl_dex_context *ctx, tl_dex_object *this_obj, t
 static bool matrix_postRotate(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
 {
     (void)ctx;
-    if (this_obj && this_obj->native_ptr) {
-        tl_framework_matrix *m = this_obj->native_ptr;
+    if (this_obj && tl_dex_native(this_obj)) {
+        tl_framework_matrix *m = tl_dex_native(this_obj);
         float degrees = args[1].f;
         float rad = degrees * (float)(M_PI / 180.0);
         float c = cosf(rad);
@@ -221,8 +279,8 @@ static bool matrix_postRotate(tl_dex_context *ctx, tl_dex_object *this_obj, tl_d
 static bool matrix_postScale(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
 {
     (void)ctx; (void)nargs;
-    if (this_obj && this_obj->native_ptr) {
-        tl_framework_matrix *m = this_obj->native_ptr;
+    if (this_obj && tl_dex_native(this_obj)) {
+        tl_framework_matrix *m = tl_dex_native(this_obj);
         float sx = args[1].f;
         float sy = args[2].f;
         tl_framework_matrix s;
@@ -242,15 +300,15 @@ static bool paint_init(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val 
     tl_framework_paint *p = calloc(1, sizeof(*p));
     p->color = 0xffffffff;
     p->alpha = 255;
-    this_obj->native_ptr = p;
+    tl_dex_set_native(this_obj, p);
     return true;
 }
 
 static bool paint_setFilterBitmap(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
 {
     (void)ctx; (void)nargs; (void)ret;
-    if (this_obj && this_obj->native_ptr) {
-        ((tl_framework_paint *)this_obj->native_ptr)->filter = (args[1].i != 0);
+    if (this_obj && tl_dex_native(this_obj)) {
+        ((tl_framework_paint *)tl_dex_native(this_obj))->filter = (args[1].i != 0);
     }
     return true;
 }
@@ -258,8 +316,8 @@ static bool paint_setFilterBitmap(tl_dex_context *ctx, tl_dex_object *this_obj, 
 static bool paint_setAntiAlias(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
 {
     (void)ctx; (void)nargs; (void)ret;
-    if (this_obj && this_obj->native_ptr) {
-        ((tl_framework_paint *)this_obj->native_ptr)->antialias = (args[1].i != 0);
+    if (this_obj && tl_dex_native(this_obj)) {
+        ((tl_framework_paint *)tl_dex_native(this_obj))->antialias = (args[1].i != 0);
     }
     return true;
 }
@@ -267,8 +325,8 @@ static bool paint_setAntiAlias(tl_dex_context *ctx, tl_dex_object *this_obj, tl_
 static bool paint_setARGB(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
 {
     (void)ctx; (void)nargs; (void)ret;
-    if (this_obj && this_obj->native_ptr) {
-        tl_framework_paint *p = this_obj->native_ptr;
+    if (this_obj && tl_dex_native(this_obj)) {
+        tl_framework_paint *p = tl_dex_native(this_obj);
         int a = args[1].i & 0xff;
         int r = args[2].i & 0xff;
         int g = args[3].i & 0xff;
@@ -282,8 +340,8 @@ static bool paint_setARGB(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_v
 static bool paint_setColor(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
 {
     (void)ctx; (void)nargs; (void)ret;
-    if (this_obj && this_obj->native_ptr) {
-        tl_framework_paint *p = this_obj->native_ptr;
+    if (this_obj && tl_dex_native(this_obj)) {
+        tl_framework_paint *p = tl_dex_native(this_obj);
         p->color = args[1].raw32;
         p->alpha = (int)((p->color >> 24) & 0xff);
     }
@@ -293,8 +351,8 @@ static bool paint_setColor(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_
 static bool paint_setAlpha(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
 {
     (void)ctx; (void)nargs; (void)ret;
-    if (this_obj && this_obj->native_ptr) {
-        tl_framework_paint *p = this_obj->native_ptr;
+    if (this_obj && tl_dex_native(this_obj)) {
+        tl_framework_paint *p = tl_dex_native(this_obj);
         p->alpha = args[1].i & 0xff;
         p->color = (p->color & 0x00ffffff) | ((uint32_t)p->alpha << 24);
     }
@@ -305,8 +363,8 @@ static bool paint_getAlpha(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_
 {
     (void)ctx; (void)args; (void)nargs;
     int a = 255;
-    if (this_obj && this_obj->native_ptr) {
-        a = ((tl_framework_paint *)this_obj->native_ptr)->alpha;
+    if (this_obj && tl_dex_native(this_obj)) {
+        a = ((tl_framework_paint *)tl_dex_native(this_obj))->alpha;
     }
     if (ret) ret->i = a;
     return true;
@@ -319,11 +377,35 @@ static bool paint_setColorFilter(tl_dex_context *ctx, tl_dex_object *this_obj, t
 }
 
 /* android/graphics/Rect & RectF */
+
+/*
+ * Rect's public fields, over the same native struct its methods use.
+ *
+ * Rect (ints) and RectF (floats) share one float representation here, so a
+ * field access is a pointer into it. Reads convert to the field's declared type
+ * and writes convert from it, which is what makes `rect.top = 5` and
+ * `rect.set(0, 5, 0, 0)` agree about what the rectangle is.
+ */
+static float *rect_field_ptr(tl_framework_rect *r, const char *name)
+{
+    if (!strcmp(name, "left"))   return &r->left;
+    if (!strcmp(name, "top"))    return &r->top;
+    if (!strcmp(name, "right"))  return &r->right;
+    if (!strcmp(name, "bottom")) return &r->bottom;
+    return NULL;
+}
+
+static bool is_rect_class(const char *owner)
+{
+    return owner && (!strcmp(owner, "Landroid/graphics/Rect;") ||
+                     !strcmp(owner, "Landroid/graphics/RectF;"));
+}
+
 static bool rect_init_void(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
 {
     (void)ctx; (void)args; (void)nargs; (void)ret;
     tl_framework_rect *r = calloc(1, sizeof(*r));
-    this_obj->native_ptr = r;
+    tl_dex_set_native(this_obj, r);
     return true;
 }
 
@@ -337,7 +419,7 @@ static bool rect_init_int(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_v
         r->right = (float)args[3].i;
         r->bottom = (float)args[4].i;
     }
-    this_obj->native_ptr = r;
+    tl_dex_set_native(this_obj, r);
     return true;
 }
 
@@ -351,15 +433,15 @@ static bool rect_init_float(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex
         r->right = args[3].f;
         r->bottom = args[4].f;
     }
-    this_obj->native_ptr = r;
+    tl_dex_set_native(this_obj, r);
     return true;
 }
 
 static bool rect_set_int(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
 {
     (void)ctx; (void)nargs; (void)ret;
-    if (this_obj && this_obj->native_ptr && nargs >= 5) {
-        tl_framework_rect *r = this_obj->native_ptr;
+    if (this_obj && tl_dex_native(this_obj) && nargs >= 5) {
+        tl_framework_rect *r = tl_dex_native(this_obj);
         r->left   = (float)args[1].i;
         r->top    = (float)args[2].i;
         r->right  = (float)args[3].i;
@@ -371,8 +453,8 @@ static bool rect_set_int(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_va
 static bool rect_set_float(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
 {
     (void)ctx; (void)nargs; (void)ret;
-    if (this_obj && this_obj->native_ptr && nargs >= 5) {
-        tl_framework_rect *r = this_obj->native_ptr;
+    if (this_obj && tl_dex_native(this_obj) && nargs >= 5) {
+        tl_framework_rect *r = tl_dex_native(this_obj);
         r->left   = args[1].f;
         r->top    = args[2].f;
         r->right  = args[3].f;
@@ -381,12 +463,670 @@ static bool rect_set_float(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_
     return true;
 }
 
+/*
+ * RectF.offset(dx, dy) and Rect.offset(dx, dy): slide a rectangle without
+ * resizing it. Games move their sprites' bounding boxes with it every frame.
+ * Rect takes ints and RectF floats; the shorty tells them apart, and both
+ * land on the same float storage.
+ */
+static bool rect_offset(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{
+    (void)ctx; (void)ret;
+    tl_framework_rect *r = tl_dex_native(this_obj);
+    if (r && nargs >= 3) {
+        r->left += args[1].f;  r->right  += args[1].f;
+        r->top  += args[2].f;  r->bottom += args[2].f;
+    }
+    return true;
+}
+static bool rect_offset_int(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{
+    (void)ctx; (void)ret;
+    tl_framework_rect *r = tl_dex_native(this_obj);
+    if (r && nargs >= 3) {
+        r->left += (float)args[1].i;  r->right  += (float)args[1].i;
+        r->top  += (float)args[2].i;  r->bottom += (float)args[2].i;
+    }
+    return true;
+}
+
+/*
+ * java.util.concurrent.ExecutorService, run on the caller's thread.
+ *
+ * This layer interprets on a single thread and has no scheduler. A task handed
+ * to an executor is therefore run immediately, to completion, inside submit() --
+ * which is what a direct executor does, and is correct for anything that only
+ * needs its task to happen. (Code that needs the task to happen LATER, or in
+ * parallel with the caller, would behave differently; nothing seen so far does.)
+ * It returns no Future: the games seen so far fire and forget.
+ */
+static bool executor_submit(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{
+    (void)this_obj;
+    if (ret) ret->raw64 = 0;
+    tl_dex_object *task = nargs >= 2 ? args[1].l : NULL;
+    if (task && task->clazz) {
+        tl_dex_method *run = tl_dex_find_method(task->clazz, "run", "V");
+        if (!run) run = tl_dex_find_method(task->clazz, "call", NULL);
+        if (run) {
+            tl_dex_val a[1];
+            a[0].raw64 = 0;
+            a[0].l = task;
+            tl_dex_invoke(ctx, run, a, 1, NULL);
+        }
+    }
+    return true;
+}
+
+static bool return_false(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{ (void)ctx; (void)this_obj; (void)args; (void)nargs; if (ret) ret->raw64 = 0; return true; }
+
+/*
+ * View.post / postDelayed / removeCallbacks, and the same three on Handler.
+ *
+ * They hand the runnable to the layer's task queue (see tl_dex_post_delayed);
+ * the receiver doesn't matter, because there is one queue and one thread.
+ * postDelayed takes its delay as a long, which occupies two argument slots, so
+ * the first argument after it would be at args[4] -- there is none here.
+ */
+static bool view_post(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{
+    (void)this_obj;
+    if (nargs >= 2) tl_dex_post_delayed(ctx, args[1].l, 0);
+    if (ret) { ret->raw64 = 0; ret->i = 1; }
+    return true;
+}
+static bool view_postDelayed(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{
+    (void)this_obj;
+    int64_t ms = nargs >= 3 ? args[2].j : 0;
+    if (ms < 0) ms = 0;
+    if (nargs >= 2) tl_dex_post_delayed(ctx, args[1].l, (uint64_t)ms);
+    if (ret) { ret->raw64 = 0; ret->i = 1; }
+    return true;
+}
+static bool view_removeCallbacks(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{
+    (void)this_obj;
+    if (nargs >= 2) tl_dex_remove_callbacks(ctx, args[1].l);
+    if (ret) ret->raw64 = 0;
+    return true;
+}
+static bool return_true(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{ (void)ctx; (void)this_obj; (void)args; (void)nargs; if (ret) { ret->raw64 = 0; ret->i = 1; } return true; }
+
+/*
+ * java.lang.String.
+ *
+ * Strings are kept as UTF-8, but Java's length() and charAt() count UTF-16 code
+ * units, and the two agree only for ASCII. Anything that indexes goes through
+ * these helpers, which take the ASCII shortcut when it applies and otherwise
+ * decode properly -- so a string with an emoji does not have a different length
+ * on Android than here.
+ */
+static size_t utf16_length(const char *s)
+{
+    size_t n = 0;
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        if ((*p & 0xC0) == 0x80) continue;          /* continuation byte */
+        n += (*p >= 0xF0) ? 2 : 1;                  /* astral: a surrogate pair */
+    }
+    return n;
+}
+
+static int utf16_at(const char *s, int index)
+{
+    int unit = 0;
+    const unsigned char *p = (const unsigned char *)s;
+    while (*p) {
+        uint32_t cp; int len;
+        if (*p < 0x80)       { cp = *p;                         len = 1; }
+        else if (*p < 0xE0)  { cp = *p & 0x1F;                  len = 2; }
+        else if (*p < 0xF0)  { cp = *p & 0x0F;                  len = 3; }
+        else                 { cp = *p & 0x07;                  len = 4; }
+        for (int i = 1; i < len && p[i]; i++) cp = (cp << 6) | (p[i] & 0x3F);
+        if (cp >= 0x10000) {
+            cp -= 0x10000;
+            if (unit == index)     return 0xD800 + (int)(cp >> 10);
+            if (unit + 1 == index) return 0xDC00 + (int)(cp & 0x3FF);
+            unit += 2;
+        } else {
+            if (unit == index) return (int)cp;
+            unit++;
+        }
+        p += len;
+    }
+    return 0;
+}
+
+static bool string_length(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{ (void)ctx; (void)args; (void)nargs; const char *s = tl_dex_string(this_obj);
+  if (ret) { ret->raw64 = 0; ret->i = s ? (int32_t)utf16_length(s) : 0; } return true; }
+
+static bool string_charAt(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{ (void)ctx; (void)nargs; const char *s = tl_dex_string(this_obj);
+  int idx = args[1].i;
+  if (ret) { ret->raw64 = 0; ret->i = (s && idx >= 0 && (size_t)idx < utf16_length(s)) ? utf16_at(s, idx) : 0; }
+  return true; }
+
+/* String.toCharArray(): the UTF-16 code units, two bytes each, as a char[]. */
+static bool string_toCharArray(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{
+    (void)ctx; (void)args; (void)nargs;
+    if (!ret) return true;
+    ret->raw64 = 0;
+    const char *s = tl_dex_string(this_obj);
+    if (!s) return true;
+    size_t n = utf16_length(s);
+    tl_dex_object *arr = tl_dex_alloc_array(NULL, (uint32_t)n, 2);
+    if (!arr || !arr->array.elements) return true;
+    uint16_t *out = arr->array.elements;
+    for (size_t i = 0; i < n; i++) out[i] = (uint16_t)utf16_at(s, (int)i);
+    ret->l = arr;
+    return true;
+}
+
+static bool string_isEmpty(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{ (void)ctx; (void)args; (void)nargs; const char *s = tl_dex_string(this_obj);
+  if (ret) { ret->raw64 = 0; ret->i = (!s || !*s) ? 1 : 0; } return true; }
+
+static bool string_toString(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{ (void)ctx; (void)args; (void)nargs; if (ret) { ret->raw64 = 0; ret->l = this_obj; } return true; }
+
+static bool string_equals(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{ (void)ctx; const char *a = tl_dex_string(this_obj);
+  const char *b = nargs >= 2 ? tl_dex_string(args[1].l) : NULL;
+  if (ret) { ret->raw64 = 0; ret->i = (a && b && !strcmp(a, b)) ? 1 : 0; } return true; }
+
+/* Java's own hash, so anything that prints or compares hash codes agrees. */
+static bool string_hashCode(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{ (void)ctx; (void)args; (void)nargs; const char *s = tl_dex_string(this_obj);
+  uint32_t h = 0;
+  if (s) { size_t n = utf16_length(s); for (size_t i = 0; i < n; i++) h = h * 31u + (uint32_t)utf16_at(s, (int)i); }
+  if (ret) { ret->raw64 = 0; ret->i = (int32_t)h; } return true; }
+
+static bool string_concat(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{
+    const char *a = tl_dex_string(this_obj), *b = nargs >= 2 ? tl_dex_string(args[1].l) : NULL;
+    if (!ret) return true;
+    ret->raw64 = 0;
+    if (!a) a = "";
+    if (!b) b = "";
+    size_t la = strlen(a), lb = strlen(b);
+    char *both = malloc(la + lb + 1);
+    if (!both) return true;
+    memcpy(both, a, la); memcpy(both + la, b, lb); both[la + lb] = 0;
+    ret->l = tl_dex_alloc_string(ctx, both);
+    free(both);
+    return true;
+}
+
+/* String.valueOf(x): a new string from a primitive. It is static, so the value
+ * is args[0] -- including a long or double, which lives whole in that one slot. */
+#define STRING_VALUEOF(fname, fmt, expr) \
+    static bool string_valueOf_##fname(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret) \
+    { (void)this_obj; (void)nargs; char buf[64]; snprintf(buf, sizeof(buf), fmt, expr); \
+      if (ret) { ret->raw64 = 0; ret->l = tl_dex_alloc_string(ctx, buf); } return true; }
+STRING_VALUEOF(i, "%d",  args[0].i)
+STRING_VALUEOF(j, "%lld", (long long)args[0].j)
+STRING_VALUEOF(f, "%g",  (double)args[0].f)
+STRING_VALUEOF(d, "%g",  args[0].d)
+STRING_VALUEOF(z, "%s",  args[0].i ? "true" : "false")
+
+static bool string_valueOf_c(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{
+    (void)this_obj; (void)nargs;
+    char buf[8] = {0};
+    uint32_t cp = (uint32_t)args[0].i & 0xFFFF;
+    if (cp < 0x80)        { buf[0] = (char)cp; }
+    else if (cp < 0x800)  { buf[0] = (char)(0xC0 | (cp >> 6)); buf[1] = (char)(0x80 | (cp & 0x3F)); }
+    else                  { buf[0] = (char)(0xE0 | (cp >> 12)); buf[1] = (char)(0x80 | ((cp >> 6) & 0x3F)); buf[2] = (char)(0x80 | (cp & 0x3F)); }
+    if (ret) { ret->raw64 = 0; ret->l = tl_dex_alloc_string(ctx, buf); }
+    return true;
+}
+
+/* valueOf(Object): a string stays itself, and anything else is its own name. */
+static bool string_valueOf_l(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{
+    (void)this_obj; (void)nargs;
+    const char *s = tl_dex_string(args[0].l);
+    if (ret) { ret->raw64 = 0; ret->l = tl_dex_alloc_string(ctx, s ? s : (args[0].l ? "object" : "null")); }
+    return true;
+}
+
+/*
+ * The boxed number types.
+ *
+ * Integer.valueOf, Float.valueOf and the rest exist because collections and
+ * generics hold objects, not primitives, so every int that goes into a List
+ * is boxed on the way in and unboxed on the way out. A box here is a plain
+ * object whose first field slot holds the value; there is no Integer class to
+ * instantiate, because the framework classes are not loaded from anywhere.
+ */
+static tl_dex_object *box_make(tl_dex_context *ctx, const char *desc, tl_dex_val v)
+{
+    tl_dex_object *o = tl_dex_alloc_object(tl_dex_find_class(ctx, desc));
+    if (o && o->nfields) { o->fields[0] = v; }
+    return o;
+}
+static tl_dex_val box_value(const tl_dex_object *o)
+{
+    tl_dex_val z; z.raw64 = 0;
+    if (o && tl_dex_kind(o) == TL_KIND_OBJECT && o->nfields) z = o->fields[0];
+    return z;
+}
+
+#define BOX_VALUEOF(fname, desc, field) \
+    static bool fname(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret) \
+    { (void)this_obj; (void)nargs; tl_dex_val v; v.raw64 = 0; v.field = args[0].field; \
+      if (ret) { ret->raw64 = 0; ret->l = box_make(ctx, desc, v); } return true; }
+BOX_VALUEOF(integer_valueOf,   "Ljava/lang/Integer;", i)
+BOX_VALUEOF(long_valueOf,      "Ljava/lang/Long;",    j)
+BOX_VALUEOF(float_valueOf,     "Ljava/lang/Float;",   f)
+BOX_VALUEOF(double_valueOf,    "Ljava/lang/Double;",  d)
+BOX_VALUEOF(boolean_valueOf,   "Ljava/lang/Boolean;", i)
+BOX_VALUEOF(character_valueOf, "Ljava/lang/Character;", i)
+
+/* The unboxing accessors convert between types the way Java's do: intValue() on
+ * a Float truncates, floatValue() on an Integer widens. `from` says what the
+ * box holds. */
+enum { BOX_I, BOX_J, BOX_F, BOX_D };
+static double box_as_double(tl_dex_val v, int from)
+{ return from == BOX_I ? (double)v.i : from == BOX_J ? (double)v.j : from == BOX_F ? (double)v.f : v.d; }
+static int64_t box_as_long(tl_dex_val v, int from)
+{ return from == BOX_I ? (int64_t)v.i : from == BOX_J ? v.j : from == BOX_F ? (int64_t)v.f : (int64_t)v.d; }
+
+#define BOX_ACCESSOR(fname, from, out_kind) \
+    static bool fname(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret) \
+    { (void)ctx; (void)args; (void)nargs; tl_dex_val v = box_value(this_obj); \
+      if (ret) { ret->raw64 = 0; \
+        if (out_kind == BOX_I)      ret->i = (int32_t)box_as_long(v, from); \
+        else if (out_kind == BOX_J) ret->j = box_as_long(v, from); \
+        else if (out_kind == BOX_F) ret->f = (float)box_as_double(v, from); \
+        else                        ret->d = box_as_double(v, from); } return true; }
+BOX_ACCESSOR(integer_intValue,    BOX_I, BOX_I)
+BOX_ACCESSOR(integer_longValue,   BOX_I, BOX_J)
+BOX_ACCESSOR(integer_floatValue,  BOX_I, BOX_F)
+BOX_ACCESSOR(integer_doubleValue, BOX_I, BOX_D)
+BOX_ACCESSOR(long_longValue,      BOX_J, BOX_J)
+BOX_ACCESSOR(long_intValue,       BOX_J, BOX_I)
+BOX_ACCESSOR(float_floatValue,    BOX_F, BOX_F)
+BOX_ACCESSOR(float_intValue,      BOX_F, BOX_I)
+BOX_ACCESSOR(float_doubleValue,   BOX_F, BOX_D)
+BOX_ACCESSOR(double_doubleValue,  BOX_D, BOX_D)
+BOX_ACCESSOR(double_intValue,     BOX_D, BOX_I)
+BOX_ACCESSOR(double_floatValue,   BOX_D, BOX_F)
+
+static bool boolean_booleanValue(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{ (void)ctx; (void)args; (void)nargs; if (ret) { ret->raw64 = 0; ret->i = box_value(this_obj).i ? 1 : 0; } return true; }
+
+static bool integer_parseInt(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{ (void)ctx; (void)this_obj; (void)nargs; const char *s = tl_dex_string(args[0].l);
+  if (ret) { ret->raw64 = 0; ret->i = s ? (int32_t)strtol(s, NULL, 10) : 0; } return true; }
+
+static bool integer_toString_static(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{ return string_valueOf_i(ctx, this_obj, args, nargs, ret); }
+
+static bool integer_compare(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{ (void)ctx; (void)this_obj; (void)nargs;
+  if (ret) { ret->raw64 = 0; ret->i = args[0].i < args[1].i ? -1 : args[0].i > args[1].i ? 1 : 0; } return true; }
+
+/*
+ * java.lang.Math and java.lang.System.
+ *
+ * Static methods, so args[] holds the call's own parameters from index 0 with no
+ * receiver -- and a long or double takes TWO entries, because the call lists
+ * both of its registers. (A wide value lives whole in the lower register of its
+ * pair; the upper one is carried along and ignored.) That is why the second
+ * operand of a (DD)D is args[2] and the second of an (FF)F is args[1].
+ *
+ * These were missing, and a missing static returns zero. Math.min and
+ * Math.max returning zero turn every clamp into "stay at the edge", and
+ * currentTimeMillis returning zero means no game timer ever expires.
+ */
+#define RET_INT(v)   do { if (ret) { ret->raw64 = 0; ret->i = (int32_t)(v); } } while (0)
+#define RET_LONG(v)  do { if (ret) { ret->raw64 = 0; ret->j = (int64_t)(v); } } while (0)
+#define RET_FLOAT(v) do { if (ret) { ret->raw64 = 0; ret->f = (float)(v); } } while (0)
+#define RET_DOUBLE(v) do { if (ret) { ret->raw64 = 0; ret->d = (double)(v); } } while (0)
+
+#define UNUSED_NATIVE_ARGS (void)ctx; (void)this_obj; (void)nargs
+
+static bool math_min_i(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{ UNUSED_NATIVE_ARGS; RET_INT(args[0].i < args[1].i ? args[0].i : args[1].i); return true; }
+static bool math_max_i(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{ UNUSED_NATIVE_ARGS; RET_INT(args[0].i > args[1].i ? args[0].i : args[1].i); return true; }
+static bool math_min_j(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{ UNUSED_NATIVE_ARGS; RET_LONG(args[0].j < args[2].j ? args[0].j : args[2].j); return true; }
+static bool math_max_j(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{ UNUSED_NATIVE_ARGS; RET_LONG(args[0].j > args[2].j ? args[0].j : args[2].j); return true; }
+static bool math_min_f(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{ UNUSED_NATIVE_ARGS; RET_FLOAT(fminf(args[0].f, args[1].f)); return true; }
+static bool math_max_f(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{ UNUSED_NATIVE_ARGS; RET_FLOAT(fmaxf(args[0].f, args[1].f)); return true; }
+static bool math_min_d(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{ UNUSED_NATIVE_ARGS; RET_DOUBLE(fmin(args[0].d, args[2].d)); return true; }
+static bool math_max_d(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{ UNUSED_NATIVE_ARGS; RET_DOUBLE(fmax(args[0].d, args[2].d)); return true; }
+
+static bool math_abs_i(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{ UNUSED_NATIVE_ARGS; int32_t v = args[0].i; RET_INT(v < 0 ? (int32_t)(0u - (uint32_t)v) : v); return true; }
+static bool math_abs_j(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{ UNUSED_NATIVE_ARGS; int64_t v = args[0].j; RET_LONG(v < 0 ? (int64_t)(0ull - (uint64_t)v) : v); return true; }
+static bool math_abs_f(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{ UNUSED_NATIVE_ARGS; RET_FLOAT(fabsf(args[0].f)); return true; }
+static bool math_abs_d(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{ UNUSED_NATIVE_ARGS; RET_DOUBLE(fabs(args[0].d)); return true; }
+
+/* One-double-in, one-double-out functions share a shape. */
+#define MATH_D1(fname, expr) \
+    static bool math_##fname(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret) \
+    { UNUSED_NATIVE_ARGS; double x = args[0].d; RET_DOUBLE(expr); return true; }
+MATH_D1(sqrt, sqrt(x))
+MATH_D1(sin, sin(x))
+MATH_D1(cos, cos(x))
+MATH_D1(tan, tan(x))
+MATH_D1(asin, asin(x))
+MATH_D1(acos, acos(x))
+MATH_D1(atan, atan(x))
+MATH_D1(exp, exp(x))
+MATH_D1(log, log(x))
+MATH_D1(log10, log10(x))
+MATH_D1(floor, floor(x))
+MATH_D1(ceil, ceil(x))
+MATH_D1(toRadians, x / 180.0 * 3.14159265358979323846)
+MATH_D1(toDegrees, x * 180.0 / 3.14159265358979323846)
+
+static bool math_pow(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{ UNUSED_NATIVE_ARGS; RET_DOUBLE(pow(args[0].d, args[2].d)); return true; }
+static bool math_atan2(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{ UNUSED_NATIVE_ARGS; RET_DOUBLE(atan2(args[0].d, args[2].d)); return true; }
+static bool math_hypot(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{ UNUSED_NATIVE_ARGS; RET_DOUBLE(hypot(args[0].d, args[2].d)); return true; }
+
+/* Java rounds half up, which is neither C's round() (half away from zero) nor
+ * lrint() (half to even): -2.5 rounds to -2, not -3. */
+static bool math_round_f(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{ UNUSED_NATIVE_ARGS; double r = floor((double)args[0].f + 0.5);
+  RET_INT(r > 2147483647.0 ? 2147483647 : r < -2147483648.0 ? INT32_MIN : (int32_t)r); return true; }
+static bool math_round_d(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{ UNUSED_NATIVE_ARGS; double r = floor(args[0].d + 0.5);
+  RET_LONG(r >= 9.2233720368547758e18 ? INT64_MAX : r <= -9.2233720368547758e18 ? INT64_MIN : (int64_t)r); return true; }
+
+static bool math_random(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{ UNUSED_NATIVE_ARGS; (void)args; RET_DOUBLE((double)(arc4random() >> 5) / 134217728.0); return true; }
+
+/* System. The clock is the layer's own; see tl_dex_context.clock_nanos. */
+static bool system_nanoTime(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{ (void)this_obj; (void)args; (void)nargs; RET_LONG(ctx ? ctx->clock_nanos : 0); return true; }
+
+/* A fixed epoch to count up from, so the value looks like a timestamp (and is
+ * the same on every run) without being the machine's clock. */
+static bool system_currentTimeMillis(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{ (void)this_obj; (void)args; (void)nargs;
+  RET_LONG(1700000000000ll + (ctx ? (int64_t)(ctx->clock_nanos / 1000000ull) : 0)); return true; }
+
+/*
+ * System.arraycopy(src, srcPos, dest, destPos, length).
+ *
+ * Java's rule is all or nothing: a range that does not fit throws and copies
+ * nothing, so every bound is checked before the first byte moves. memmove,
+ * because source and destination may be the same array and overlap -- which is
+ * the usual reason to call it.
+ */
+static bool system_arraycopy(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{
+    UNUSED_NATIVE_ARGS; (void)ret;
+    tl_dex_object *src = args[0].l, *dst = args[2].l;
+    int32_t sp = args[1].i, dp = args[3].i, len = args[4].i;
+    if (!src || !dst || !src->array.elements || !dst->array.elements) return true;
+    if (sp < 0 || dp < 0 || len < 0) return true;
+    if ((uint64_t)sp + (uint64_t)len > src->array.length) return true;
+    if ((uint64_t)dp + (uint64_t)len > dst->array.length) return true;
+    if (src->array.elem_size != dst->array.elem_size) return true;
+    size_t es = src->array.elem_size;
+    memmove((uint8_t *)dst->array.elements + (size_t)dp * es,
+            (const uint8_t *)src->array.elements + (size_t)sp * es, (size_t)len * es);
+    return true;
+}
+
+static bool system_identityHashCode(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{ UNUSED_NATIVE_ARGS; RET_INT(((uintptr_t)args[0].l) >> 4); return true; }
+
+/* Matrix.setScale(sx, sy) and setScale(sx, sy, px, py): a fresh scale, about the
+ * origin or about a pivot -- unlike postScale, it replaces whatever was there. */
+static bool matrix_setScale(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{
+    UNUSED_NATIVE_ARGS; (void)ret;
+    if (!this_obj || !tl_dex_native(this_obj)) return true;
+    tl_framework_matrix *m = tl_dex_native(this_obj);
+    float sx = args[1].f, sy = args[2].f;
+    float px = nargs >= 5 ? args[3].f : 0.0f, py = nargs >= 5 ? args[4].f : 0.0f;
+    matrix_identity(m);
+    m->m[0] = sx;
+    m->m[4] = sy;
+    m->m[2] = px - sx * px;
+    m->m[5] = py - sy * py;
+    return true;
+}
+
+/*
+ * Audio, for now silent.
+ *
+ * SoundPool is built through two builders chained off each other, so every setter
+ * has to hand back the builder it was called on -- a null there ends the chain
+ * and the game ends up with no pool and a crash on its first sound. The pool
+ * itself plays nothing yet; load() returns distinct ids so the game's own
+ * bookkeeping stays coherent. Real audio is a separate piece of work and the
+ * game does not depend on it to run.
+ */
+static bool return_this(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{ (void)ctx; (void)args; (void)nargs; if (ret) { ret->raw64 = 0; ret->l = this_obj; } return true; }
+
+static bool soundpool_build(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{
+    (void)this_obj; (void)args; (void)nargs;
+    if (ret) {
+        ret->raw64 = 0;
+        ret->l = tl_dex_alloc_object(tl_dex_find_class(ctx, "Landroid/media/SoundPool;"));
+    }
+    return true;
+}
+
+static bool soundpool_load(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{
+    (void)ctx; (void)this_obj; (void)args; (void)nargs;
+    static int next_sound_id = 1;
+    RET_INT(next_sound_id++);
+    return true;
+}
+
+/*
+ * java.lang.Enum.
+ *
+ * An enum constant is an ordinary object whose first two field slots belong to
+ * Enum: its name and its ordinal (see dex_link_class). The compiler-generated
+ * static initialiser builds every constant with `new E("NAME", 0)`, which
+ * lands in Enum's constructor -- so for the whole lifetime of this layer every
+ * ordinal() read back zero, and any `switch (state)` took its first branch
+ * whatever the state was.
+ *
+ * In Flappy Bird that is the game stuck on its title screen: the touch is
+ * delivered, the state never advances, and the frame never changes.
+ */
+static bool enum_init(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{
+    (void)ctx; (void)ret;
+    /* args: this, name, ordinal */
+    if (this_obj && this_obj->nfields > TL_ENUM_SLOT_ORDINAL && nargs >= 3) {
+        this_obj->fields[TL_ENUM_SLOT_NAME] = args[1];
+        this_obj->fields[TL_ENUM_SLOT_ORDINAL].raw64 = 0;
+        this_obj->fields[TL_ENUM_SLOT_ORDINAL].i = args[2].i;
+    }
+    return true;
+}
+
+static int enum_ordinal_of(const tl_dex_object *o)
+{
+    return (o && o->nfields > TL_ENUM_SLOT_ORDINAL) ? o->fields[TL_ENUM_SLOT_ORDINAL].i : 0;
+}
+
+static bool enum_ordinal(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{
+    (void)ctx; (void)args; (void)nargs;
+    if (ret) { ret->raw64 = 0; ret->i = enum_ordinal_of(this_obj); }
+    return true;
+}
+
+/* name() and toString() are the same string until an enum overrides one. */
+static bool enum_name(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{
+    (void)ctx; (void)args; (void)nargs;
+    if (ret) {
+        ret->raw64 = 0;
+        if (this_obj && this_obj->nfields > TL_ENUM_SLOT_NAME) {
+            ret->l = this_obj->fields[TL_ENUM_SLOT_NAME].l;
+        }
+    }
+    return true;
+}
+
+/* Enum constants are singletons, so identity is equality. */
+static bool enum_equals(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{
+    (void)ctx;
+    if (ret) { ret->raw64 = 0; ret->i = (nargs >= 2 && this_obj && args[1].l == this_obj) ? 1 : 0; }
+    return true;
+}
+
+static bool enum_hashCode(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{
+    (void)ctx; (void)args; (void)nargs;
+    if (ret) { ret->raw64 = 0; ret->i = (int32_t)(((uintptr_t)this_obj) >> 4); }
+    return true;
+}
+
+static bool enum_compareTo(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{
+    (void)ctx;
+    if (ret) {
+        ret->raw64 = 0;
+        ret->i = enum_ordinal_of(this_obj) - enum_ordinal_of(nargs >= 2 ? args[1].l : NULL);
+    }
+    return true;
+}
+
+/*
+ * clone() on an array.
+ *
+ * Every enum has a compiler-generated values() that returns `$VALUES.clone()`,
+ * so a game that so much as lists its states calls this. The class in the call
+ * is the array type itself ("[Lcom/example/State;"), which no class here is
+ * named, so the resolver sends all of them to the one shim registered as "[".
+ */
+static bool array_clone(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{
+    (void)ctx; (void)args; (void)nargs;
+    if (!ret) return true;
+    ret->raw64 = 0;
+    if (!this_obj || !this_obj->array.elements) return true;
+
+    tl_dex_object *copy = tl_dex_alloc_array(this_obj->clazz, this_obj->array.length,
+                                             this_obj->array.elem_size);
+    if (copy && copy->array.elements) {
+        memcpy(copy->array.elements, this_obj->array.elements,
+               (size_t)this_obj->array.length * this_obj->array.elem_size);
+    }
+    ret->l = copy;
+    return true;
+}
+
+/*
+ * Rect.intersects, in both of the shapes an app can call it.
+ *
+ * Android has a static `Rect.intersects(Rect, Rect)` and an instance
+ * `rect.intersects(l, t, r, b)`, and which one the app meant is not something
+ * the shim table can tell from the name -- a static call arrives with no `this`
+ * at all, so the dispatcher hands the first argument through in its place.
+ * Reading the arguments is what separates them.
+ *
+ * Unshimmed, this returned nothing, which a game reads as "no collision" or
+ * "collision" at random depending on which way it tests. Flappy Bird compares
+ * the bird against the pipes with it.
+ */
+static bool rect_intersects(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{
+    (void)ctx;
+    int hit = 0;
+    const tl_framework_rect *a = NULL, *b = NULL;
+    tl_framework_rect box;
+
+    if (nargs >= 2 && args[0].l && tl_dex_native(args[0].l) &&
+        args[1].l && tl_dex_native(args[1].l)) {
+        /* static intersects(Rect, Rect) */
+        a = tl_dex_native(args[0].l);
+        b = tl_dex_native(args[1].l);
+    } else if (this_obj && tl_dex_native(this_obj) && nargs >= 5) {
+        /* instance intersects(left, top, right, bottom) */
+        a = tl_dex_native(this_obj);
+        box.left   = (float)args[1].i;
+        box.top    = (float)args[2].i;
+        box.right  = (float)args[3].i;
+        box.bottom = (float)args[4].i;
+        b = &box;
+    }
+
+    if (a && b) {
+        hit = (a->left < b->right && b->left < a->right &&
+               a->top < b->bottom && b->top < a->bottom) ? 1 : 0;
+    }
+    if (ret) ret->i = hit;
+    return true;
+}
+
+/*
+ * Rect.intersect: the same test, except that it also narrows this rectangle to
+ * the overlap when there is one. Apps use the returned boolean and then read
+ * the rectangle back, so doing only half of it is worse than not shimming it.
+ */
+static bool rect_intersect(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{
+    (void)ctx;
+    int hit = 0;
+    if (this_obj && tl_dex_native(this_obj)) {
+        tl_framework_rect *a = tl_dex_native(this_obj);
+        tl_framework_rect b;
+        bool have = false;
+
+        if (nargs >= 2 && args[1].l && tl_dex_native(args[1].l)) {
+            b = *(tl_framework_rect *)tl_dex_native(args[1].l);
+            have = true;
+        } else if (nargs >= 5) {
+            b.left   = (float)args[1].i;
+            b.top    = (float)args[2].i;
+            b.right  = (float)args[3].i;
+            b.bottom = (float)args[4].i;
+            have = true;
+        }
+
+        if (have && a->left < b.right && b.left < a->right &&
+            a->top < b.bottom && b.top < a->bottom) {
+            if (b.left   > a->left)   a->left   = b.left;
+            if (b.top    > a->top)    a->top    = b.top;
+            if (b.right  < a->right)  a->right  = b.right;
+            if (b.bottom < a->bottom) a->bottom = b.bottom;
+            hit = 1;
+        }
+    }
+    if (ret) ret->i = hit;
+    return true;
+}
+
 static bool rect_contains(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
 {
     (void)ctx; (void)nargs;
     int inside = 0;
-    if (this_obj && this_obj->native_ptr) {
-        tl_framework_rect *r = this_obj->native_ptr;
+    if (this_obj && tl_dex_native(this_obj)) {
+        tl_framework_rect *r = tl_dex_native(this_obj);
         float x = (float)args[1].i;
         float y = (float)args[2].i;
         if (x >= r->left && x <= r->right && y >= r->top && y <= r->bottom) {
@@ -402,8 +1142,8 @@ static bool bitmap_getWidth(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex
 {
     (void)ctx; (void)args; (void)nargs;
     int w = 0;
-    if (this_obj && this_obj->native_ptr) {
-        w = ((tl_framework_bitmap *)this_obj->native_ptr)->width;
+    if (this_obj && tl_dex_native(this_obj)) {
+        w = ((tl_framework_bitmap *)tl_dex_native(this_obj))->width;
     }
     if (ret) ret->i = w;
     return true;
@@ -413,8 +1153,8 @@ static bool bitmap_getHeight(tl_dex_context *ctx, tl_dex_object *this_obj, tl_de
 {
     (void)ctx; (void)args; (void)nargs;
     int h = 0;
-    if (this_obj && this_obj->native_ptr) {
-        h = ((tl_framework_bitmap *)this_obj->native_ptr)->height;
+    if (this_obj && tl_dex_native(this_obj)) {
+        h = ((tl_framework_bitmap *)tl_dex_native(this_obj))->height;
     }
     if (ret) ret->i = h;
     return true;
@@ -432,9 +1172,9 @@ static bool bitmap_createBitmap(tl_dex_context *ctx, tl_dex_object *this_obj, tl
     tl_dex_class *b_class = tl_dex_find_class(ctx, "Landroid/graphics/Bitmap;");
     tl_dex_object *new_obj = tl_dex_alloc_object(b_class);
 
-    if (nargs >= 5 && args[0].l && args[0].l->native_ptr) {
+    if (nargs >= 5 && args[0].l && tl_dex_native(args[0].l)) {
         /* createBitmap(Bitmap src, int x, int y, int width, int height) */
-        tl_framework_bitmap *src = args[0].l->native_ptr;
+        tl_framework_bitmap *src = tl_dex_native(args[0].l);
         int sx = args[1].i;
         int sy = args[2].i;
         int sw = args[3].i;
@@ -464,7 +1204,7 @@ static bool bitmap_createBitmap(tl_dex_context *ctx, tl_dex_object *this_obj, tl
         CGContextRelease(c);
         CGColorSpaceRelease(cs);
 #endif
-        new_obj->native_ptr = dst;
+        tl_dex_set_native(new_obj, dst);
     } else if (nargs >= 2) {
         /* createBitmap(int width, int height, ...) */
         int w = args[0].i;
@@ -473,7 +1213,7 @@ static bool bitmap_createBitmap(tl_dex_context *ctx, tl_dex_object *this_obj, tl
         dst->width = w;
         dst->height = h;
         dst->pixels = calloc(w * h, sizeof(uint32_t));
-        new_obj->native_ptr = dst;
+        tl_dex_set_native(new_obj, dst);
     }
     if (ret) ret->l = new_obj;
     return true;
@@ -485,8 +1225,8 @@ static bool bitmap_createScaledBitmap(tl_dex_context *ctx, tl_dex_object *this_o
     tl_dex_class *b_class = tl_dex_find_class(ctx, "Landroid/graphics/Bitmap;");
     tl_dex_object *new_obj = tl_dex_alloc_object(b_class);
 
-    if (args[0].l && args[0].l->native_ptr) {
-        tl_framework_bitmap *src = args[0].l->native_ptr;
+    if (args[0].l && tl_dex_native(args[0].l)) {
+        tl_framework_bitmap *src = tl_dex_native(args[0].l);
         int dstW = args[1].i;
         int dstH = args[2].i;
         tl_framework_bitmap *dst = calloc(1, sizeof(*dst));
@@ -510,7 +1250,7 @@ static bool bitmap_createScaledBitmap(tl_dex_context *ctx, tl_dex_object *this_o
         CGContextRelease(c);
         CGColorSpaceRelease(cs);
 #endif
-        new_obj->native_ptr = dst;
+        tl_dex_set_native(new_obj, dst);
     }
     if (ret) ret->l = new_obj;
     return true;
@@ -521,38 +1261,30 @@ static bool bitmapFactory_decodeResource(tl_dex_context *ctx, tl_dex_object *thi
 {
     (void)this_obj; (void)nargs;
     uint32_t res_id = args[1].raw32;
+
+    /* Whatever file the id names, from the app's own table. */
     const char *entry = NULL;
-    char num_buf[64] = {0};
-    if (res_id >= 0x7f080200 && res_id <= 0x7f080209) {
-        snprintf(num_buf, sizeof(num_buf), "res/drawable/number_%d.png", (int)(res_id - 0x7f080200));
-        entry = num_buf;
-    } else {
-        switch (res_id) {
-            case 0x7f080077: entry = "res/drawable/atlas.png"; break;
-            case 0x7f0800ff: entry = "res/drawable/pipe-green.png"; break;
-            case 0x7f08007b: entry = "res/drawable/bluebird-downflap.png"; break;
-            case 0x7f08007c: entry = "res/drawable/bluebird-midflap.png"; break;
-            case 0x7f08007d: entry = "res/drawable/bluebird-upflap.png"; break;
-            case 0x7f080108: entry = "res/drawable/yellowbird-downflap.png"; break;
-            case 0x7f080109: entry = "res/drawable/yellowbird-midflap.png"; break;
-            case 0x7f08010a: entry = "res/drawable/yellowbird-upflap.png"; break;
-            case 0x7f080100: entry = "res/drawable/redbird-downflap.png"; break;
-            case 0x7f080101: entry = "res/drawable/redbird-midflap.png"; break;
-            case 0x7f080102: entry = "res/drawable/redbird-upflap.png"; break;
-            default: break;
-        }
-    }
+    tl_res *res = framework_res(ctx);
+    if (res && res_id) entry = tl_res_file(res, res_id, TL_FRAMEWORK_DENSITY_DPI);
 
     tl_framework_bitmap *bmp = NULL;
     if (entry && ctx->apk_path) {
         bmp = load_png_from_apk(ctx->apk_path, entry);
     }
 
+    /* The contract is a Bitmap or null, never a Bitmap with nothing behind it:
+     * apps test the result for null, and an empty Bitmap passes that test and
+     * fails everywhere after it. */
+    if (!bmp) {
+        if (ret) ret->raw64 = 0;
+        return true;
+    }
+
     tl_dex_class *b_class = tl_dex_find_class(ctx, "Landroid/graphics/Bitmap;");
     tl_dex_object *b_obj = tl_dex_alloc_object(b_class);
-    b_obj->native_ptr = bmp;
+    tl_dex_set_native(b_obj, bmp);
 
-    if (ret) ret->l = b_obj;
+    if (ret) { ret->raw64 = 0; ret->l = b_obj; }
     return true;
 }
 
@@ -603,8 +1335,8 @@ static bool canvas_drawBitmap_xy(tl_dex_context *ctx, tl_dex_object *this_obj, t
 {
     (void)this_obj; (void)nargs; (void)ret;
     tl_framework_state *st = ctx->framework_data;
-    if (!st || !st->cg_ctx || !args[1].l || !args[1].l->native_ptr) return true;
-    tl_framework_bitmap *bmp = args[1].l->native_ptr;
+    if (!st || !st->cg_ctx || !args[1].l || !tl_dex_native(args[1].l)) return true;
+    tl_framework_bitmap *bmp = tl_dex_native(args[1].l);
     if (!bmp->cg_image) return true;
 
     float x = args[2].f;
@@ -624,11 +1356,11 @@ static bool canvas_drawBitmap_matrix(tl_dex_context *ctx, tl_dex_object *this_ob
 {
     (void)this_obj; (void)nargs; (void)ret;
     tl_framework_state *st = ctx->framework_data;
-    if (!st || !st->cg_ctx || !args[1].l || !args[1].l->native_ptr) return true;
-    tl_framework_bitmap *bmp = args[1].l->native_ptr;
-    if (!bmp->cg_image || !args[2].l || !args[2].l->native_ptr) return true;
+    if (!st || !st->cg_ctx || !args[1].l || !tl_dex_native(args[1].l)) return true;
+    tl_framework_bitmap *bmp = tl_dex_native(args[1].l);
+    if (!bmp->cg_image || !args[2].l || !tl_dex_native(args[2].l)) return true;
 
-    tl_framework_matrix *mat = args[2].l->native_ptr;
+    tl_framework_matrix *mat = tl_dex_native(args[2].l);
     CGContextSaveGState(st->cg_ctx);
     CGAffineTransform t = CGAffineTransformMake(mat->m[0], mat->m[3],
                                                     mat->m[1], mat->m[4],
@@ -645,12 +1377,12 @@ static bool canvas_drawBitmap_rect(tl_dex_context *ctx, tl_dex_object *this_obj,
 {
     (void)this_obj; (void)nargs; (void)ret;
     tl_framework_state *st = ctx->framework_data;
-    if (!st || !st->cg_ctx || !args[1].l || !args[1].l->native_ptr) return true;
-    tl_framework_bitmap *bmp = args[1].l->native_ptr;
+    if (!st || !st->cg_ctx || !args[1].l || !tl_dex_native(args[1].l)) return true;
+    tl_framework_bitmap *bmp = tl_dex_native(args[1].l);
     if (!bmp->cg_image) return true;
 
-    tl_framework_rect *src = (args[2].l) ? args[2].l->native_ptr : NULL;
-    tl_framework_rect *dst = (args[3].l) ? args[3].l->native_ptr : NULL;
+    tl_framework_rect *src = (args[2].l) ? tl_dex_native(args[2].l) : NULL;
+    tl_framework_rect *dst = (args[3].l) ? tl_dex_native(args[3].l) : NULL;
     if (!dst) return true;
 
     float dst_x = dst->left;
@@ -699,18 +1431,18 @@ static bool canvas_drawRect(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex
         t = args[2].f;
         w = args[3].f - args[1].f;
         h = args[4].f - args[2].f;
-        if (args[5].l && args[5].l->native_ptr) {
-            paint = args[5].l->native_ptr;
+        if (args[5].l && tl_dex_native(args[5].l)) {
+            paint = tl_dex_native(args[5].l);
         }
-    } else if (nargs >= 3 && args[1].l && args[1].l->native_ptr) {
+    } else if (nargs >= 3 && args[1].l && tl_dex_native(args[1].l)) {
         /* drawRect(Rect/RectF rect, Paint paint) */
-        tl_framework_rect *r = args[1].l->native_ptr;
+        tl_framework_rect *r = tl_dex_native(args[1].l);
         l = r->left;
         t = r->top;
         w = r->right - r->left;
         h = r->bottom - r->top;
-        if (args[2].l && args[2].l->native_ptr) {
-            paint = args[2].l->native_ptr;
+        if (args[2].l && tl_dex_native(args[2].l)) {
+            paint = tl_dex_native(args[2].l);
         }
     }
 
@@ -803,16 +1535,24 @@ static bool sharedPrefs_getLong(tl_dex_context *ctx, tl_dex_object *this_obj, tl
 }
 
 /* android/content/res/Resources */
+/*
+ * Resources.getIdentifier(name, defType, defPackage): the id the app's own
+ * table gives a name.
+ *
+ * This was a list of four names, written to suit the game it was first tried
+ * on, with everything else answering zero. A zero id then goes straight into
+ * decodeResource, which returns nothing for it, which the game reports as
+ * "could not load" -- so any sprite not on the list was simply absent.
+ */
 static bool resources_getIdentifier(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
 {
-    (void)ctx; (void)this_obj; (void)nargs;
-    const char *name = (args[1].l && args[1].l->str_utf8) ? args[1].l->str_utf8 : "";
-    int id = 0;
-    if (!strcmp(name, "atlas")) id = 0x7f080077;
-    else if (!strcmp(name, "pipe_green") || !strcmp(name, "pipe-green")) id = 0x7f0800ff;
-    else if (!strncmp(name, "number_", 7)) id = 0x7f080200 + atoi(name + 7);
-    else if (!strncmp(name, "font_", 5)) id = 0x7f080300 + atoi(name + 5);
-    if (ret) ret->i = id;
+    (void)this_obj;
+    const char *name = (nargs > 1 && args[1].l && tl_dex_string(args[1].l)) ? tl_dex_string(args[1].l) : NULL;
+    const char *type = (nargs > 2 && args[2].l && tl_dex_string(args[2].l)) ? tl_dex_string(args[2].l) : NULL;
+    uint32_t id = 0;
+    tl_res *res = framework_res(ctx);
+    if (res && name) id = tl_res_find(res, type, name);
+    if (ret) { ret->raw64 = 0; ret->i = (int32_t)id; }
     return true;
 }
 
@@ -866,12 +1606,6 @@ static bool random_nextBoolean(tl_dex_context *ctx, tl_dex_object *this_obj, tl_
 }
 
 /* java/lang/Math */
-static bool math_abs(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
-{
-    (void)ctx; (void)this_obj; (void)nargs;
-    if (ret) ret->f = fabsf(args[0].f);
-    return true;
-}
 
 /* java/util/ArrayList */
 static bool arrayList_init(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
@@ -880,15 +1614,15 @@ static bool arrayList_init(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_
     tl_framework_list *lst = calloc(1, sizeof(*lst));
     lst->capacity = 16;
     lst->items = calloc(lst->capacity, sizeof(tl_dex_val));
-    this_obj->native_ptr = lst;
+    tl_dex_set_native(this_obj, lst);
     return true;
 }
 
 static bool arrayList_add(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
 {
     (void)ctx; (void)nargs;
-    if (this_obj && this_obj->native_ptr) {
-        tl_framework_list *lst = this_obj->native_ptr;
+    if (this_obj && tl_dex_native(this_obj)) {
+        tl_framework_list *lst = tl_dex_native(this_obj);
         if (lst->size >= lst->capacity) {
             lst->capacity *= 2;
             lst->items = realloc(lst->items, lst->capacity * sizeof(tl_dex_val));
@@ -903,8 +1637,8 @@ static bool arrayList_size(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_
 {
     (void)ctx; (void)args; (void)nargs;
     int s = 0;
-    if (this_obj && this_obj->native_ptr) {
-        s = ((tl_framework_list *)this_obj->native_ptr)->size;
+    if (this_obj && tl_dex_native(this_obj)) {
+        s = ((tl_framework_list *)tl_dex_native(this_obj))->size;
     }
     if (ret) ret->i = s;
     return true;
@@ -913,8 +1647,8 @@ static bool arrayList_size(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_
 static bool arrayList_get(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
 {
     (void)ctx; (void)nargs;
-    if (this_obj && this_obj->native_ptr && ret) {
-        tl_framework_list *lst = this_obj->native_ptr;
+    if (this_obj && tl_dex_native(this_obj) && ret) {
+        tl_framework_list *lst = tl_dex_native(this_obj);
         int idx = args[1].i;
         if (idx >= 0 && idx < lst->size) {
             *ret = lst->items[idx];
@@ -928,8 +1662,8 @@ static bool arrayList_get(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_v
 static bool arrayList_clear(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
 {
     (void)ctx; (void)args; (void)nargs; (void)ret;
-    if (this_obj && this_obj->native_ptr) {
-        ((tl_framework_list *)this_obj->native_ptr)->size = 0;
+    if (this_obj && tl_dex_native(this_obj)) {
+        ((tl_framework_list *)tl_dex_native(this_obj))->size = 0;
     }
     return true;
 }
@@ -940,9 +1674,9 @@ static bool arrayList_iterator(tl_dex_context *ctx, tl_dex_object *this_obj, tl_
     tl_dex_class *it_class = tl_dex_find_class(ctx, "Ljava/util/Iterator;");
     tl_dex_object *it_obj = tl_dex_alloc_object(it_class);
     tl_framework_iterator *it = calloc(1, sizeof(*it));
-    it->list = this_obj ? this_obj->native_ptr : NULL;
+    it->list = this_obj ? tl_dex_native(this_obj) : NULL;
     it->cursor = 0;
-    it_obj->native_ptr = it;
+    tl_dex_set_native(it_obj, it);
     if (ret) ret->l = it_obj;
     return true;
 }
@@ -951,8 +1685,8 @@ static bool iterator_hasNext(tl_dex_context *ctx, tl_dex_object *this_obj, tl_de
 {
     (void)ctx; (void)args; (void)nargs;
     int has = 0;
-    if (this_obj && this_obj->native_ptr) {
-        tl_framework_iterator *it = this_obj->native_ptr;
+    if (this_obj && tl_dex_native(this_obj)) {
+        tl_framework_iterator *it = tl_dex_native(this_obj);
         if (it->list && it->cursor < it->list->size) {
             has = 1;
         }
@@ -964,8 +1698,8 @@ static bool iterator_hasNext(tl_dex_context *ctx, tl_dex_object *this_obj, tl_de
 static bool iterator_next(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
 {
     (void)ctx; (void)args; (void)nargs;
-    if (this_obj && this_obj->native_ptr && ret) {
-        tl_framework_iterator *it = this_obj->native_ptr;
+    if (this_obj && tl_dex_native(this_obj) && ret) {
+        tl_framework_iterator *it = tl_dex_native(this_obj);
         if (it->list && it->cursor < it->list->size) {
             *ret = it->list->items[it->cursor++];
         } else {
@@ -976,22 +1710,59 @@ static bool iterator_next(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_v
 }
 
 /* java/lang/reflect/Array */
-static bool array_newInstance(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+/*
+ * java.lang.reflect.Array.newInstance, in its two shapes.
+ *
+ *   newInstance(Class, int)    -> a one-dimensional array
+ *   newInstance(Class, int...) -> one array per dimension, all allocated
+ *
+ * The two used to be one function that decided which it had been called as by
+ * testing whether the second argument was a non-null pointer. For the int form
+ * that argument is the LENGTH -- 3, say -- which is non-null, so it read the
+ * contents of address 3. They have different shorties, so they are registered
+ * separately and nothing has to guess.
+ *
+ * A multi-dimensional request allocates the rows too. Allocating only the outer
+ * array left `Bitmap[3][3]` as three null rows, and the first `grid[i][j]`
+ * indexed into null.
+ */
+#define TL_MAX_ARRAY_LEN (16 * 1024 * 1024)
+
+static tl_dex_object *new_array_dims(tl_dex_class *elem_class, const int32_t *dims, uint32_t ndims)
+{
+    int32_t len = dims[0] > 0 ? dims[0] : 0;
+    if (len > TL_MAX_ARRAY_LEN) len = 0;     /* a wild length, not a real request */
+    tl_dex_object *arr = tl_dex_alloc_array(elem_class, (uint32_t)len, sizeof(void *));
+    if (arr && arr->array.elements && ndims > 1) {
+        tl_dex_object **rows = arr->array.elements;
+        for (int32_t i = 0; i < len; i++) {
+            rows[i] = new_array_dims(elem_class, dims + 1, ndims - 1);
+        }
+    }
+    return arr;
+}
+
+static bool array_newInstance_len(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
 {
     (void)ctx; (void)this_obj; (void)nargs;
     tl_dex_class *elem_class = args[0].l ? args[0].l->clazz : NULL;
-    tl_dex_object *dim_obj = args[1].l;
-    int len = 0;
+    int32_t dims[1] = { args[1].i };
+    if (ret) { ret->raw64 = 0; ret->l = new_array_dims(elem_class, dims, 1); }
+    return true;
+}
 
-    if (dim_obj && dim_obj->array.elements) {
-        int32_t *dims = (int32_t *)dim_obj->array.elements;
-        len = dims[0];
-    } else {
-        len = args[1].i;
+static bool array_newInstance_dims(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{
+    (void)ctx; (void)this_obj; (void)nargs;
+    tl_dex_class *elem_class = args[0].l ? args[0].l->clazz : NULL;
+    tl_dex_object *d = args[1].l;
+    if (ret) ret->raw64 = 0;
+    /* An int[] -- four bytes a slot -- and not empty, or there is no shape. */
+    if (!d || !d->array.elements || d->array.elem_size != 4 || d->array.length == 0 ||
+        d->array.length > 8) {
+        return true;
     }
-
-    tl_dex_object *arr = tl_dex_alloc_array(elem_class, len, sizeof(void *));
-    if (ret) ret->l = arr;
+    if (ret) ret->l = new_array_dims(elem_class, (const int32_t *)d->array.elements, d->array.length);
     return true;
 }
 
@@ -1036,8 +1807,8 @@ static bool executors_newSingleThreadExecutor(tl_dex_context *ctx, tl_dex_object
 static bool log_print(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
 {
     (void)ctx; (void)this_obj; (void)nargs;
-    const char *tag = (args[0].l && args[0].l->str_utf8) ? args[0].l->str_utf8 : "";
-    const char *msg = (args[1].l && args[1].l->str_utf8) ? args[1].l->str_utf8 : "";
+    const char *tag = (args[0].l && tl_dex_string(args[0].l)) ? tl_dex_string(args[0].l) : "";
+    const char *msg = (args[1].l && tl_dex_string(args[1].l)) ? tl_dex_string(args[1].l) : "";
     printf("[%s] %s\n", tag, msg);
     if (ret) ret->i = 0;
     return true;
@@ -1047,44 +1818,39 @@ static bool log_print(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *
 static bool stringBuilder_init_void(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
 {
     (void)ctx; (void)args; (void)nargs; (void)ret;
-    if (this_obj) {
-        if (this_obj->str_utf8) free(this_obj->str_utf8);
-        this_obj->str_utf8 = strdup("");
-    }
+    /* tl_dex_set_string releases whatever the object held before. */
+    if (this_obj) tl_dex_set_string(this_obj, strdup(""));
     return true;
 }
 
 static bool stringBuilder_init_str(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
 {
     (void)ctx; (void)ret;
-    const char *s = (nargs >= 2 && args[1].l && args[1].l->str_utf8) ? args[1].l->str_utf8 : "";
-    if (this_obj) {
-        if (this_obj->str_utf8) free(this_obj->str_utf8);
-        this_obj->str_utf8 = strdup(s);
-    }
+    const char *s = (nargs >= 2 && args[1].l && tl_dex_string(args[1].l)) ? tl_dex_string(args[1].l) : "";
+    if (this_obj) tl_dex_set_string(this_obj, strdup(s));
     return true;
 }
 
 static void stringBuilder_append_text(tl_dex_object *this_obj, const char *add)
 {
     if (!this_obj || !add) return;
-    size_t old_len = this_obj->str_utf8 ? strlen(this_obj->str_utf8) : 0;
+    size_t old_len = tl_dex_string(this_obj) ? strlen(tl_dex_string(this_obj)) : 0;
     size_t add_len = strlen(add);
     char *nb = malloc(old_len + add_len + 1);
     if (!nb) return;
-    if (this_obj->str_utf8) {
-        memcpy(nb, this_obj->str_utf8, old_len);
-        free(this_obj->str_utf8);
+    if (tl_dex_string(this_obj)) {
+        memcpy(nb, tl_dex_string(this_obj), old_len);
     }
     memcpy(nb + old_len, add, add_len);
     nb[old_len + add_len] = '\0';
-    this_obj->str_utf8 = nb;
+    /* Copied out above, so the old buffer can go now -- set_string frees it. */
+    tl_dex_set_string(this_obj, nb);
 }
 
 static bool stringBuilder_append_str(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
 {
     (void)ctx;
-    const char *s = (nargs >= 2 && args[1].l && args[1].l->str_utf8) ? args[1].l->str_utf8 : "null";
+    const char *s = (nargs >= 2 && args[1].l && tl_dex_string(args[1].l)) ? tl_dex_string(args[1].l) : "null";
     stringBuilder_append_text(this_obj, s);
     if (ret) ret->l = this_obj;
     return true;
@@ -1135,7 +1901,7 @@ static bool stringBuilder_append_bool(tl_dex_context *ctx, tl_dex_object *this_o
 static bool stringBuilder_toString(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
 {
     (void)args; (void)nargs;
-    const char *s = (this_obj && this_obj->str_utf8) ? this_obj->str_utf8 : "";
+    const char *s = (this_obj && tl_dex_string(this_obj)) ? tl_dex_string(this_obj) : "";
     if (ret) ret->l = tl_dex_alloc_string(ctx, s);
     return true;
 }
@@ -1159,6 +1925,14 @@ typedef struct {
 
 static const tl_native_entry s_native_methods[] = {
     { "Ljava/lang/Object;", "<init>", NULL, obj_init },
+    { "Ljava/lang/Enum;", "<init>", NULL, enum_init },
+    { "Ljava/lang/Enum;", "ordinal", NULL, enum_ordinal },
+    { "Ljava/lang/Enum;", "name", NULL, enum_name },
+    { "Ljava/lang/Enum;", "toString", NULL, enum_name },
+    { "Ljava/lang/Enum;", "equals", NULL, enum_equals },
+    { "Ljava/lang/Enum;", "hashCode", NULL, enum_hashCode },
+    { "Ljava/lang/Enum;", "compareTo", NULL, enum_compareTo },
+    { "[", "clone", NULL, array_clone },
 
     /* StringBuilder */
     { "Ljava/lang/StringBuilder;", "<init>", "V", stringBuilder_init_void },
@@ -1197,11 +1971,15 @@ static const tl_native_entry s_native_methods[] = {
     { "Landroid/graphics/Rect;", "set", "VIIII", rect_set_int },
     { "Landroid/graphics/Rect;", "set", NULL, rect_set_int },
     { "Landroid/graphics/Rect;", "contains", NULL, rect_contains },
+    { "Landroid/graphics/Rect;", "intersects", NULL, rect_intersects },
+    { "Landroid/graphics/Rect;", "intersect", NULL, rect_intersect },
     { "Landroid/graphics/RectF;", "<init>", "V", rect_init_void },
     { "Landroid/graphics/RectF;", "<init>", "VFFFF", rect_init_float },
     { "Landroid/graphics/RectF;", "<init>", NULL, rect_init_float },
     { "Landroid/graphics/RectF;", "set", "VFFFF", rect_set_float },
     { "Landroid/graphics/RectF;", "set", NULL, rect_set_float },
+    { "Landroid/graphics/RectF;", "intersects", NULL, rect_intersects },
+    { "Landroid/graphics/RectF;", "intersect", NULL, rect_intersect },
 
     /* Bitmap */
     { "Landroid/graphics/Bitmap;", "getWidth", NULL, bitmap_getWidth },
@@ -1256,7 +2034,109 @@ static const tl_native_entry s_native_methods[] = {
     { "Landroid/view/MotionEvent;", "getAction", NULL, motionEvent_getAction },
 
     /* Math & Collections */
-    { "Ljava/lang/Math;", "abs", NULL, math_abs },
+    { "Landroid/graphics/RectF;", "offset", NULL, rect_offset },
+    { "Landroid/graphics/Rect;", "offset", NULL, rect_offset_int },
+    { "Ljava/util/concurrent/ExecutorService;", "submit", NULL, executor_submit },
+    { "Ljava/util/concurrent/ExecutorService;", "execute", NULL, executor_submit },
+    { "Ljava/util/concurrent/ExecutorService;", "isShutdown", NULL, return_false },
+    { "Ljava/lang/Math;", "min", "III", math_min_i },
+    { "Ljava/lang/Math;", "max", "III", math_max_i },
+    { "Ljava/lang/Math;", "min", "JJJ", math_min_j },
+    { "Ljava/lang/Math;", "max", "JJJ", math_max_j },
+    { "Ljava/lang/Math;", "min", "FFF", math_min_f },
+    { "Ljava/lang/Math;", "max", "FFF", math_max_f },
+    { "Ljava/lang/Math;", "min", "DDD", math_min_d },
+    { "Ljava/lang/Math;", "max", "DDD", math_max_d },
+    { "Ljava/lang/Math;", "abs", "II", math_abs_i },
+    { "Ljava/lang/Math;", "abs", "JJ", math_abs_j },
+    { "Ljava/lang/Math;", "abs", "FF", math_abs_f },
+    { "Ljava/lang/Math;", "abs", "DD", math_abs_d },
+    { "Ljava/lang/Math;", "sqrt", NULL, math_sqrt },
+    { "Ljava/lang/Math;", "sin", NULL, math_sin },
+    { "Ljava/lang/Math;", "cos", NULL, math_cos },
+    { "Ljava/lang/Math;", "tan", NULL, math_tan },
+    { "Ljava/lang/Math;", "asin", NULL, math_asin },
+    { "Ljava/lang/Math;", "acos", NULL, math_acos },
+    { "Ljava/lang/Math;", "atan", NULL, math_atan },
+    { "Ljava/lang/Math;", "atan2", NULL, math_atan2 },
+    { "Ljava/lang/Math;", "exp", NULL, math_exp },
+    { "Ljava/lang/Math;", "log", NULL, math_log },
+    { "Ljava/lang/Math;", "log10", NULL, math_log10 },
+    { "Ljava/lang/Math;", "pow", NULL, math_pow },
+    { "Ljava/lang/Math;", "hypot", NULL, math_hypot },
+    { "Ljava/lang/Math;", "floor", NULL, math_floor },
+    { "Ljava/lang/Math;", "ceil", NULL, math_ceil },
+    { "Ljava/lang/Math;", "round", "IF", math_round_f },
+    { "Ljava/lang/Math;", "round", "JD", math_round_d },
+    { "Ljava/lang/Math;", "toRadians", NULL, math_toRadians },
+    { "Ljava/lang/Math;", "toDegrees", NULL, math_toDegrees },
+    { "Ljava/lang/Math;", "random", NULL, math_random },
+    { "Ljava/lang/System;", "nanoTime", NULL, system_nanoTime },
+    { "Ljava/lang/System;", "currentTimeMillis", NULL, system_currentTimeMillis },
+    { "Ljava/lang/System;", "arraycopy", NULL, system_arraycopy },
+    { "Ljava/lang/System;", "identityHashCode", NULL, system_identityHashCode },
+    { "Ljava/util/WeakHashMap;", "<init>", NULL, noop_stub },
+    { "Landroid/view/View;", "onDraw", NULL, noop_stub },
+    { "Landroid/view/View;", "post", NULL, view_post },
+    { "Landroid/view/View;", "postDelayed", NULL, view_postDelayed },
+    { "Landroid/view/View;", "removeCallbacks", NULL, view_removeCallbacks },
+    { "Landroid/view/View;", "performHapticFeedback", NULL, return_true },
+    { "Landroid/os/Handler;", "<init>", NULL, noop_stub },
+    { "Landroid/os/Handler;", "post", NULL, view_post },
+    { "Landroid/os/Handler;", "postDelayed", NULL, view_postDelayed },
+    { "Landroid/os/Handler;", "removeCallbacks", NULL, view_removeCallbacks },
+    { "Ljava/lang/String;", "length", NULL, string_length },
+    { "Ljava/lang/String;", "charAt", NULL, string_charAt },
+    { "Ljava/lang/String;", "isEmpty", NULL, string_isEmpty },
+    { "Ljava/lang/String;", "toCharArray", NULL, string_toCharArray },
+    { "Landroid/view/View;", "setOnApplyWindowInsetsListener", NULL, noop_stub },
+    { "Ljava/lang/String;", "toString", NULL, string_toString },
+    { "Ljava/lang/String;", "equals", NULL, string_equals },
+    { "Ljava/lang/String;", "hashCode", NULL, string_hashCode },
+    { "Ljava/lang/String;", "concat", NULL, string_concat },
+    { "Ljava/lang/String;", "valueOf", "LI", string_valueOf_i },
+    { "Ljava/lang/String;", "valueOf", "LJ", string_valueOf_j },
+    { "Ljava/lang/String;", "valueOf", "LF", string_valueOf_f },
+    { "Ljava/lang/String;", "valueOf", "LD", string_valueOf_d },
+    { "Ljava/lang/String;", "valueOf", "LZ", string_valueOf_z },
+    { "Ljava/lang/String;", "valueOf", "LC", string_valueOf_c },
+    { "Ljava/lang/String;", "valueOf", "LL", string_valueOf_l },
+    { "Ljava/lang/Integer;", "valueOf", "LI", integer_valueOf },
+    { "Ljava/lang/Integer;", "intValue", NULL, integer_intValue },
+    { "Ljava/lang/Integer;", "longValue", NULL, integer_longValue },
+    { "Ljava/lang/Integer;", "floatValue", NULL, integer_floatValue },
+    { "Ljava/lang/Integer;", "doubleValue", NULL, integer_doubleValue },
+    { "Ljava/lang/Integer;", "parseInt", NULL, integer_parseInt },
+    { "Ljava/lang/Integer;", "toString", "LI", integer_toString_static },
+    { "Ljava/lang/Integer;", "compare", NULL, integer_compare },
+    { "Ljava/lang/Long;", "valueOf", "LJ", long_valueOf },
+    { "Ljava/lang/Long;", "longValue", NULL, long_longValue },
+    { "Ljava/lang/Long;", "intValue", NULL, long_intValue },
+    { "Ljava/lang/Float;", "valueOf", "LF", float_valueOf },
+    { "Ljava/lang/Float;", "floatValue", NULL, float_floatValue },
+    { "Ljava/lang/Float;", "intValue", NULL, float_intValue },
+    { "Ljava/lang/Float;", "doubleValue", NULL, float_doubleValue },
+    { "Ljava/lang/Double;", "valueOf", "LD", double_valueOf },
+    { "Ljava/lang/Double;", "doubleValue", NULL, double_doubleValue },
+    { "Ljava/lang/Double;", "intValue", NULL, double_intValue },
+    { "Ljava/lang/Double;", "floatValue", NULL, double_floatValue },
+    { "Ljava/lang/Boolean;", "valueOf", "LZ", boolean_valueOf },
+    { "Ljava/lang/Boolean;", "booleanValue", NULL, boolean_booleanValue },
+    { "Ljava/lang/Character;", "valueOf", "LC", character_valueOf },
+    { "Landroid/graphics/Matrix;", "setScale", NULL, matrix_setScale },
+    { "Landroid/media/AudioAttributes$Builder;", "<init>", NULL, noop_stub },
+    { "Landroid/media/AudioAttributes$Builder;", "setUsage", NULL, return_this },
+    { "Landroid/media/AudioAttributes$Builder;", "setContentType", NULL, return_this },
+    { "Landroid/media/AudioAttributes$Builder;", "build", NULL, return_this },
+    { "Landroid/media/SoundPool$Builder;", "<init>", NULL, noop_stub },
+    { "Landroid/media/SoundPool$Builder;", "setMaxStreams", NULL, return_this },
+    { "Landroid/media/SoundPool$Builder;", "setAudioAttributes", NULL, return_this },
+    { "Landroid/media/SoundPool$Builder;", "build", NULL, soundpool_build },
+    { "Landroid/media/SoundPool;", "load", NULL, soundpool_load },
+    { "Landroid/media/SoundPool;", "play", NULL, noop_stub },
+    { "Landroid/media/SoundPool;", "stop", NULL, noop_stub },
+    { "Landroid/media/SoundPool;", "pause", NULL, noop_stub },
+    { "Landroid/media/SoundPool;", "release", NULL, noop_stub },
     { "Ljava/util/Random;", "<init>", NULL, random_init },
     { "Ljava/util/Random;", "nextInt", NULL, random_nextInt },
     { "Ljava/util/Random;", "nextFloat", NULL, random_nextFloat },
@@ -1276,7 +2156,8 @@ static const tl_native_entry s_native_methods[] = {
     { "Ljava/util/Iterator;", "hasNext", NULL, iterator_hasNext },
     { "Ljava/util/Iterator;", "next", NULL, iterator_next },
 
-    { "Ljava/lang/reflect/Array;", "newInstance", NULL, array_newInstance },
+    { "Ljava/lang/reflect/Array;", "newInstance", "LLI", array_newInstance_len },
+    { "Ljava/lang/reflect/Array;", "newInstance", "LLL", array_newInstance_dims },
     { "Ljava/util/concurrent/Executors;", "newSingleThreadExecutor", NULL, executors_newSingleThreadExecutor },
     { "Ljava/util/concurrent/ExecutorService;", "execute", NULL, noop_stub },
     { "Landroid/util/Log;", "w", NULL, log_print },
@@ -1286,6 +2167,59 @@ static const tl_native_entry s_native_methods[] = {
 
     { NULL, NULL, NULL, NULL }
 };
+
+bool tl_framework_field_get(tl_dex_context *ctx, tl_dex_object *obj, const tl_dex_field *f, tl_dex_val *out)
+{
+    (void)ctx;
+    if (!obj || !f || !f->name || !out) return false;
+    if (is_rect_class(f->owner)) {
+        tl_framework_rect *r = tl_dex_native(obj);
+        float *p = r ? rect_field_ptr(r, f->name) : NULL;
+        if (!p) return false;
+        out->raw64 = 0;
+        if (f->type && f->type[0] == 'F') out->f = *p;
+        else                              out->i = (int32_t)*p;
+        return true;
+    }
+    return false;
+}
+
+bool tl_framework_field_set(tl_dex_context *ctx, tl_dex_object *obj, const tl_dex_field *f, tl_dex_val value)
+{
+    (void)ctx; (void)value;
+    if (!obj || !f || !f->name) return false;
+    /* BitmapFactory.Options is a bag of hints -- inScaled, inSampleSize,
+     * inPreferredConfig -- that an app sets before decoding. This layer decodes
+     * one way regardless, so accepting the write and ignoring it is the correct
+     * implementation, not a missing one. */
+    if (f->owner && !strcmp(f->owner, "Landroid/graphics/BitmapFactory$Options;")) return true;
+    if (is_rect_class(f->owner)) {
+        tl_framework_rect *r = tl_dex_native(obj);
+        float *p = r ? rect_field_ptr(r, f->name) : NULL;
+        if (!p) return false;
+        *p = (f->type && f->type[0] == 'F') ? value.f : (float)value.i;
+        return true;
+    }
+    return false;
+}
+
+/*
+ * Static fields of framework classes. Build.VERSION.SDK_INT is the one apps ask
+ * about most: it gates which APIs they call, and zero reads as "older than
+ * anything", sending code down compatibility paths meant for Android 1.x.
+ * This layer answers as the API level its shims were written against.
+ */
+bool tl_framework_static_get(tl_dex_context *ctx, const tl_dex_field *f, tl_dex_val *out)
+{
+    (void)ctx;
+    if (!f || !f->owner || !f->name || !out) return false;
+    out->raw64 = 0;
+    if (!strcmp(f->owner, "Landroid/os/Build$VERSION;") && !strcmp(f->name, "SDK_INT")) {
+        out->i = 34;
+        return true;
+    }
+    return false;
+}
 
 tl_dex_native_func tl_framework_lookup(const char *class_desc, const char *method_name, const char *shorty)
 {
@@ -1358,6 +2292,8 @@ void tl_framework_cleanup(tl_dex_context *ctx)
 #if defined(__APPLE__)
     if (st->cg_ctx) CGContextRelease(st->cg_ctx);
 #endif
+    tl_res_destroy(st->res);
+    free(st->arsc);
     free(st);
     ctx->framework_data = NULL;
 }
