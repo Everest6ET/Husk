@@ -127,16 +127,52 @@ void tl_window_release(tl_window *w);
 
 /* ELF64 fixed-size pieces, laid out explicitly: the loader reads files
  * written by other toolchains and cannot lean on the host's <elf.h>. */
-typedef struct { uint8_t  e_ident[16]; uint16_t e_type, e_machine;
-                 uint32_t e_version, e_entry, e_phoff, e_shoff, e_flags;
-                 uint16_t e_ehsize, e_phentsize, e_phnum, e_shentsize,
-                          e_shnum, e_shstrndx; } tl_ehdr;
-typedef struct { uint32_t p_type, p_flags; uint64_t p_offset, p_vaddr,
-                          p_paddr, p_filesz, p_memsz, p_align; } tl_phdr;
-typedef struct { int32_t  d_tag; uint64_t d_val; } tl_dyn;
-typedef struct { uint32_t st_name, st_info, st_other;
-                 uint16_t st_shndx; uint64_t st_value, st_size; } tl_sym;
-typedef struct { uint64_t r_offset, r_addend; } tl_rela;
+typedef struct {
+    uint8_t  e_ident[16];
+    uint16_t e_type;
+    uint16_t e_machine;
+    uint32_t e_version;
+    uint64_t e_entry;
+    uint64_t e_phoff;
+    uint64_t e_shoff;
+    uint32_t e_flags;
+    uint16_t e_ehsize;
+    uint16_t e_phentsize;
+    uint16_t e_phnum;
+    uint16_t e_shentsize;
+    uint16_t e_shnum;
+    uint16_t e_shstrndx;
+} tl_ehdr;
+_Static_assert(sizeof(tl_ehdr) == 64, "tl_ehdr must be 64 bytes");
+
+typedef struct {
+    uint32_t p_type, p_flags;
+    uint64_t p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_align;
+} tl_phdr;
+_Static_assert(sizeof(tl_phdr) == 56, "tl_phdr must be 56 bytes");
+
+typedef struct {
+    int64_t  d_tag;
+    uint64_t d_val;
+} tl_dyn;
+_Static_assert(sizeof(tl_dyn) == 16, "tl_dyn must be 16 bytes");
+
+typedef struct {
+    uint32_t st_name;
+    uint8_t  st_info;
+    uint8_t  st_other;
+    uint16_t st_shndx;
+    uint64_t st_value;
+    uint64_t st_size;
+} tl_sym;
+_Static_assert(sizeof(tl_sym) == 24, "tl_sym must be 24 bytes");
+
+typedef struct {
+    uint64_t r_offset;
+    uint64_t r_info;
+    int64_t  r_addend;
+} tl_rela;
+_Static_assert(sizeof(tl_rela) == 24, "tl_rela must be 24 bytes");
 
 /* The NDK types the guest receives. Field order is the NDK's ABI; unused
  * fields are void* placeholders of the right size. */
@@ -399,7 +435,7 @@ static bool lex_dynamic(lex *e, ldyn *d)
     const uint8_t *p = e->d + off;
     size_t n = (size_t)(e->dyn_filesz / sizeof(tl_dyn));
     for (size_t i = 0; i < n; i++) {
-        int32_t tag = (int32_t)ld32(p + i * sizeof(tl_dyn));
+        int64_t tag = (int64_t)ld64(p + i * sizeof(tl_dyn));
         uint64_t val = ld64(p + i * sizeof(tl_dyn) + 8);
         switch (tag) {
         case DT_NULL: return true;
@@ -627,10 +663,11 @@ static bool apply_relocations(tl_lib *L, lex *e, const ldyn *d)
         }
         size_t n = (size_t)(d->relasz / sizeof(tl_rela));
         for (size_t i = 0; i < n; i++) {
-            uint64_t w0 = ld64(e->d + off + i * sizeof(tl_rela));
-            uint64_t w1 = ld64(e->d + off + i * sizeof(tl_rela) + 8);
-            if (!reloc_one(w0, ELF64_R_TYPE(w1), (uint32_t)ELF64_R_SYM(w1),
-                           (int64_t)w1, L)) {
+            uint64_t r_offset = ld64(e->d + off + i * sizeof(tl_rela));
+            uint64_t r_info   = ld64(e->d + off + i * sizeof(tl_rela) + 8);
+            int64_t  r_addend = (int64_t)ld64(e->d + off + i * sizeof(tl_rela) + 16);
+            if (!reloc_one(r_offset, ELF64_R_TYPE(r_info), (uint32_t)ELF64_R_SYM(r_info),
+                           r_addend, L)) {
                 return false;
             }
             done++;
@@ -643,10 +680,11 @@ static bool apply_relocations(tl_lib *L, lex *e, const ldyn *d)
             return false;
         }
         for (size_t i = 0; i < d->pltrelsz / sizeof(tl_rela); i++) {
-            uint64_t w0 = ld64(e->d + off + i * sizeof(tl_rela));
-            uint64_t w1 = ld64(e->d + off + i * sizeof(tl_rela) + 8);
-            if (!reloc_one(w0, ELF64_R_TYPE(w1), (uint32_t)ELF64_R_SYM(w1),
-                           (int64_t)w1, L)) {
+            uint64_t r_offset = ld64(e->d + off + i * sizeof(tl_rela));
+            uint64_t r_info   = ld64(e->d + off + i * sizeof(tl_rela) + 8);
+            int64_t  r_addend = (int64_t)ld64(e->d + off + i * sizeof(tl_rela) + 16);
+            if (!reloc_one(r_offset, ELF64_R_TYPE(r_info), (uint32_t)ELF64_R_SYM(r_info),
+                           r_addend, L)) {
                 return false;
             }
             done++;
