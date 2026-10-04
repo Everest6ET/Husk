@@ -315,16 +315,19 @@ int tl_log_sink_fd = -1;
 
 void tl_log_line(const char *fmt, ...)
 {
-    char line[512];
+    /* Room for the newline and the terminator after the longest line. The limit used to be one too many:
+     * a line of 511 characters or more wrote its terminator one byte past the buffer, into the saved registers
+     * above it -- harmless until Unity logged its 3 KB OpenGL extension list and the function returned to garbage. */
+    char line[2048];
     va_list ap;
     va_start(ap, fmt);
-    int w = vsnprintf(line, sizeof(line) - 1, fmt, ap);
+    int w = vsnprintf(line, sizeof(line) - 2, fmt, ap);
     va_end(ap);
     if (w <= 0) {
         return;
     }
-    if ((size_t)w >= sizeof(line) - 1) {
-        w = (int)sizeof(line) - 1;
+    if ((size_t)w > sizeof(line) - 3) {
+        w = (int)sizeof(line) - 3;
     }
     line[w] = '\n';
     line[w + 1] = '\0';

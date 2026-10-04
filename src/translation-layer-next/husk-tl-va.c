@@ -20,11 +20,14 @@
  * then x29/x30 above that, calls the implementation with x0 = sp, and returns its
  * result untouched in x0 / d0.
  */
+/* How many times an implementation returned with a callee-saved register changed, and the last such case. */
+volatile struct { uint64_t count, x21, impl, mask; } tl_va_clobber;
+
 __asm__(
     ".text\n.p2align 2\n.globl _tl_va_common\n_tl_va_common:\n"
     "  stp x29, x30, [sp, #-16]!\n"
     "  mov x29, sp\n"
-    "  sub sp, sp, #208\n"
+    "  sub sp, sp, #288\n"
     "  stp x0, x1, [sp, #0]\n"
     "  stp x2, x3, [sp, #16]\n"
     "  stp x4, x5, [sp, #32]\n"
@@ -35,8 +38,40 @@ __asm__(
     "  stp q6, q7, [sp, #160]\n"
     "  add x9, x29, #16\n"
     "  str x9, [sp, #192]\n"
+    /* The callee-saved registers, kept aside: whatever the implementation does, the guest gets them back. */
+    "  stp x19, x20, [sp, #208]\n"
+    "  stp x21, x22, [sp, #224]\n"
+    "  stp x23, x24, [sp, #240]\n"
+    "  stp x25, x26, [sp, #256]\n"
+    "  stp x27, x28, [sp, #272]\n"
+    "  str x16, [sp, #200]\n"
     "  mov x0, sp\n"
     "  blr x16\n"
+    "  mov x11, xzr\n"
+    "  ldp x9, x10, [sp, #208]\n"
+    "  eor x9, x9, x19\n  eor x10, x10, x20\n  orr x11, x11, x9\n  orr x11, x11, x10\n"
+    "  ldp x9, x10, [sp, #224]\n"
+    "  eor x9, x9, x21\n  eor x10, x10, x22\n  orr x11, x11, x9\n  orr x11, x11, x10\n"
+    "  ldp x9, x10, [sp, #240]\n"
+    "  eor x9, x9, x23\n  eor x10, x10, x24\n  orr x11, x11, x9\n  orr x11, x11, x10\n"
+    "  ldp x9, x10, [sp, #256]\n"
+    "  eor x9, x9, x25\n  eor x10, x10, x26\n  orr x11, x11, x9\n  orr x11, x11, x10\n"
+    "  ldp x9, x10, [sp, #272]\n"
+    "  eor x9, x9, x27\n  eor x10, x10, x28\n  orr x11, x11, x9\n  orr x11, x11, x10\n"
+    "  cbz x11, 1f\n"
+    "  adrp x12, _tl_va_clobber@PAGE\n"
+    "  add x12, x12, _tl_va_clobber@PAGEOFF\n"
+    "  ldr x13, [x12]\n  add x13, x13, #1\n  str x13, [x12]\n"
+    "  str x21, [x12, #8]\n"
+    "  ldr x14, [sp, #200]\n"
+    "  str x14, [x12, #16]\n"
+    "  str x11, [x12, #24]\n"
+    "1:\n"
+    "  ldp x19, x20, [sp, #208]\n"
+    "  ldp x21, x22, [sp, #224]\n"
+    "  ldp x23, x24, [sp, #240]\n"
+    "  ldp x25, x26, [sp, #256]\n"
+    "  ldp x27, x28, [sp, #272]\n"
     "  mov sp, x29\n"
     "  ldp x29, x30, [sp], #16\n"
     "  ret\n");

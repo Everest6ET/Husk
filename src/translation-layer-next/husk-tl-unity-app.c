@@ -2,6 +2,7 @@
 #define _DARWIN_C_SOURCE
 #include "husk-tl-unity-app.h"
 
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
@@ -133,6 +134,15 @@ static void *heartbeat_thread(void *arg)
         tl_log_line("unity: alive: %lu frames (+%lu)", f, f - last);
 #endif
         last = f;
+        { extern volatile struct { uint64_t count, x21, impl, mask; } tl_va_clobber;
+          static uint64_t seen;
+          if (tl_va_clobber.count != seen) {
+              seen = tl_va_clobber.count;
+              Dl_info di;
+              const char *nm = dladdr((void *)tl_va_clobber.impl, &di) && di.dli_sname ? di.dli_sname : "?";
+              tl_log_line("unity: a variadic shim's implementation (%s) changed callee-saved registers (%llu times; x21 then %#llx, diff mask %#llx)",
+                          nm, (unsigned long long)seen, (unsigned long long)tl_va_clobber.x21, (unsigned long long)tl_va_clobber.mask);
+          } }
         if (atomic_load(&A.state) == HUSK_UNITY_ENDED || atomic_load(&A.state) == HUSK_UNITY_FAILED) return NULL;
     }
 }
