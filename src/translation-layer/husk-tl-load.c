@@ -1529,7 +1529,8 @@ static void *attempt_thread(void *arg)
     jit_init();
     jit_writable(false);
 
-    tl_log_line("=== lifecycle begins, %d second budget ===", seconds);
+    if (seconds > 0) tl_log_line("=== lifecycle begins, %d second budget ===", seconds);
+    else tl_log_line("=== lifecycle begins, no time limit ===");
 
     /* The entry point, on the thread that owns the toggle:
      * void ANativeActivity_onCreate(ANativeActivity*, void* savedState,
@@ -1591,7 +1592,7 @@ static void *attempt_thread(void *arg)
             clock_gettime(CLOCK_MONOTONIC, &now_ts);
             long elapsed = (now_ts.tv_sec - start.tv_sec) * 1000
                          + (now_ts.tv_nsec - start.tv_nsec) / 1000000;
-            if (elapsed > budget_ms) {
+            if (seconds > 0 && elapsed > budget_ms) {
                 tl_log_line("run: %d second budget reached after %llu frame(s)",
                             seconds, (unsigned long long)g_run.frames);
                 break;
@@ -1667,7 +1668,7 @@ static void *attempt_thread(void *arg)
         clock_gettime(CLOCK_MONOTONIC, &now);
         long elapsed = (now.tv_sec - start.tv_sec) * 1000
                      + (now.tv_nsec - start.tv_nsec) / 1000000;
-        if (elapsed > budget_ms) {
+        if (seconds > 0 && elapsed > budget_ms) {
             tl_log_line("run: %d second budget reached after %llu frame(s)",
                         seconds, (unsigned long long)g_run.frames);
             break;

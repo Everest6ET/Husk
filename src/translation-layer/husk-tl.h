@@ -63,7 +63,7 @@ char *husk_tl_run_checks(bool may_execute);
  * one attempt at a time; husk_tl_attempt_start refuses while one is live.
  *
  * Returns 0 when the attempt started, -1 when it could not (already
- * running, thread failure). Progress: husk_tl_attempt_done() turns true
+ * running, thread failure). `seconds` of zero or less means no time limit. Progress: husk_tl_attempt_done() turns true
  * when the run is over, husk_tl_attempt_frames() counts frames the guest
  * posted, husk_tl_attempt_log() hands over the run's log (caller frees),
  * husk_tl_attempt_stop() asks for an early end, and husk_tl_attempt_reset()

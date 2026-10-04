@@ -745,7 +745,8 @@ final class TLAttemptRunner: ObservableObject {
 
     private var pollTicks: Int = 0
 
-    func start(apks: [String], seconds: Int = 120) {
+    /// `seconds` of 0 is no limit: the run goes on until it is stopped. It used to stop itself after two minutes.
+    func start(apks: [String], seconds: Int = 0) {
         guard !isRunning else { return }
         isRunning = true
         isDone = false
