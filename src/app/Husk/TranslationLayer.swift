@@ -650,7 +650,6 @@ final class TLAttemptRunner: ObservableObject {
     @Published var exitCode: Int? = nil
     @Published var frameCount = 0
     @Published var logText: String = ""
-    @Published var currentFrame: UIImage? = nil
 
     private var timer: Timer?
 
@@ -692,7 +691,6 @@ final class TLAttemptRunner: ObservableObject {
         isDone = false
         exitCode = nil
         frameCount = 0
-        currentFrame = nil
         logText = ""
         pollTicks = 0
 
@@ -714,7 +712,10 @@ final class TLAttemptRunner: ObservableObject {
             }
 
             Task { @MainActor in
-                self.timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+                // Ten times a second is plenty for a status line and a log. The
+                // screen no longer comes through here: it presents itself from a
+                // display link, so this timer is no longer on the frame's path.
+                self.timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
                     self?.poll()
                 }
             }
@@ -728,10 +729,11 @@ final class TLAttemptRunner: ObservableObject {
 
     private func poll() {
         pollTicks += 1
-        if pollTicks % 6 == 0 {
+        if pollTicks % 5 == 0 {
             updateLog()
         }
-        updateFrames()
+        let n = Int(husk_tl_attempt_frames())
+        if n != frameCount { frameCount = n }
 
         var code: Int32 = 0
         if husk_tl_attempt_done(&code) {
@@ -741,7 +743,7 @@ final class TLAttemptRunner: ObservableObject {
             isDone = true
             exitCode = Int(code)
             updateLog()
-            updateFrames()
+            frameCount = Int(husk_tl_attempt_frames())
         }
     }
 
@@ -753,47 +755,6 @@ final class TLAttemptRunner: ObservableObject {
                 self.logText = text
             }
         }
-    }
-
-    private func updateFrames() {
-        let n = Int(husk_tl_attempt_frames())
-        if n != frameCount || currentFrame == nil {
-            frameCount = n
-            husk_tl_frame_begin_read()
-            defer { husk_tl_frame_end_read() }
-            if let ptr = husk_tl_frame_pixels() {
-                let w = Int(husk_tl_frame_width())
-                let h = Int(husk_tl_frame_height())
-                let stride = Int(husk_tl_frame_stride())
-                if w > 0, h > 0, stride > 0 {
-                    self.currentFrame = makeImage(from: ptr, width: w, height: h, stride: stride)
-                }
-            }
-        }
-    }
-
-    private func makeImage(from pixels: UnsafePointer<UInt8>, width: Int, height: Int, stride: Int) -> UIImage? {
-        let bytesPerRow = stride * 4
-        let totalBytes = bytesPerRow * height
-        guard let dataProvider = CGDataProvider(data: Data(bytes: pixels, count: totalBytes) as CFData) else {
-            return nil
-        }
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
-        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue)
-        guard let cgImage = CGImage(
-            width: width,
-            height: height,
-            bitsPerComponent: 8,
-            bitsPerPixel: 32,
-            bytesPerRow: bytesPerRow,
-            space: colorSpace,
-            bitmapInfo: bitmapInfo,
-            provider: dataProvider,
-            decode: nil,
-            shouldInterpolate: false,
-            intent: .defaultIntent
-        ) else { return nil }
-        return UIImage(cgImage: cgImage)
     }
 }
 
@@ -833,33 +794,10 @@ struct TLAttemptView: View {
 
                 Divider()
 
-                if let frame = runner.currentFrame {
-                    GeometryReader { geo in
-                        Image(uiImage: frame)
-                            .resizable()
-                            .aspectRatio(contentMode: .fit)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .background(Color.black)
-                            .contentShape(Rectangle())
-                            .gesture(
-                                DragGesture(minimumDistance: 0)
-                                    .onChanged { value in
-                                        sendTouch(location: value.location, size: geo.size, action: 0)
-                                    }
-                                    .onEnded { value in
-                                        sendTouch(location: value.location, size: geo.size, action: 1)
-                                    }
-                            )
-                    }
-                    .frame(height: 380)
-                    .overlay(alignment: .bottomTrailing) {
-                        Text("\(runner.frameCount) frames")
-                            .font(.caption2.monospaced())
-                            .padding(4)
-                            .background(.ultraThinMaterial)
-                            .cornerRadius(4)
-                            .padding(6)
-                    }
+                if runner.isRunning || runner.frameCount > 0 {
+                    TLScreenView()
+                        .frame(height: 380)
+                        .background(Color.black)
                     Divider()
                 }
 
@@ -913,27 +851,6 @@ struct TLAttemptView: View {
                 runner.stop()
             }
         }
-    }
-
-    private func sendTouch(location: CGPoint, size: CGSize, action: Int32) {
-        let imageAspect: CGFloat = 540.0 / 960.0
-        let viewAspect = size.width / size.height
-        var drawW = size.width
-        var drawH = size.height
-        var offsetX: CGFloat = 0
-        var offsetY: CGFloat = 0
-        if viewAspect > imageAspect {
-            drawW = size.height * imageAspect
-            offsetX = (size.width - drawW) / 2.0
-        } else {
-            drawH = size.width / imageAspect
-            offsetY = (size.height - drawH) / 2.0
-        }
-        let relX = (location.x - offsetX) / drawW
-        let relY = (location.y - offsetY) / drawH
-        let x = Float(max(0, min(1, relX)) * 540.0)
-        let y = Float(max(0, min(1, relY)) * 960.0)
-        husk_tl_send_touch(action, x, y)
     }
 }
 

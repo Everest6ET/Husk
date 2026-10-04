@@ -28,6 +28,7 @@
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <mach/mach_time.h>
 #include <pthread.h>
 #include <sched.h>
 #include <stdarg.h>
@@ -293,10 +294,10 @@ typedef struct {
     tl_activity activity;
     tl_activity_callbacks callbacks;
 
-    /* the frame the guest last posted */
+    /* frames the guest has posted. The pixels themselves live in the slots below,
+     * which outlive a run: a frame the UI is still showing must not vanish because
+     * the next attempt began. */
     pthread_mutex_t frame_mutex;
-    uint8_t *frame;
-    int frame_w, frame_h, frame_stride;
     uint64_t frames;
 
     volatile bool stop_requested;
@@ -331,40 +332,145 @@ void tl_log_line(const char *fmt, ...)
     pthread_mutex_unlock(&g_log_mutex);
 }
 
-/* The window, between lock/unlock, is what the guest is drawing into;
- * after a post, the same bytes are the frame Swift reads. The copy keeps
- * Swift's view stable while the guest draws the next one. */
+/*
+ * Finished frames, handed to the UI without a copy.
+ *
+ * The guest draws into the window's own buffer, which is half-finished for most
+ * of every frame, so the UI can never look at that. When a frame completes it is
+ * copied into one of these slots and the slot is published as the newest. The UI
+ * pins the newest slot to read it and releases it when done.
+ *
+ * At any moment one slot is the newest, the UI may hold two (the frame on the
+ * screen and the one just taken to replace it), and one is being written -- four
+ * in all. There are six, because Core Animation can keep an older image alive
+ * while the GPU is still uploading it, and a producer that finds no free slot
+ * has to drop the frame. The producer only ever writes a slot that is none of
+ * those, so it takes no lock while it copies two megabytes, and a reader can
+ * keep a frame as long as it likes without the guest ever waiting on it.
+ *
+ * Static rather than part of the run: the run struct is wiped and rebuilt
+ * between attempts, and a frame that is still on screen -- or still being
+ * uploaded by the display -- must not be freed under it.
+ */
+#define TL_FRAME_SLOTS 6
+
+typedef struct {
+    uint8_t *px;
+    size_t   cap;
+    int      pins;         /* readers holding it, or 1 while it is being written */
+} tl_frame_slot;
+
+static pthread_mutex_t g_slot_lock = PTHREAD_MUTEX_INITIALIZER;
+static tl_frame_slot   g_slots[TL_FRAME_SLOTS];
+static int             g_front = -1;        /* newest finished slot, or none */
+static uint64_t        g_generation;
+static int             g_front_w, g_front_h, g_front_stride;
+static uint64_t        g_dropped;           /* frames with no free slot: should stay zero */
+
+/* A new attempt starts with nothing on offer. Slots in use stay allocated. */
+static void slots_invalidate(void)
+{
+    pthread_mutex_lock(&g_slot_lock);
+    g_front = -1;
+    pthread_mutex_unlock(&g_slot_lock);
+}
+
+/* The window, between lock/unlock, is what the guest is drawing into; this is
+ * the moment it is finished, so it is copied out and published. */
 void tl_loader_frame_posted(void)
 {
     tl_window *w = g_run.window;
     if (!w) {
         return;
     }
-    pthread_mutex_lock(&g_run.frame_mutex);
-    size_t bytes = (size_t)w->width * w->height * 4;
-    uint8_t *grown = realloc(g_run.frame, bytes);
-    if (grown) {
-        g_run.frame = grown;
-        memcpy(g_run.frame, w->bits, bytes);
-        g_run.frame_w = w->width;
-        g_run.frame_h = w->height;
-        g_run.frame_stride = w->stridePixels;
-        g_run.frames++;
+    const size_t bytes = (size_t)w->width * w->height * 4;
+
+    /* Reserve a slot nobody is using and that is not the newest. */
+    int target = -1;
+    pthread_mutex_lock(&g_slot_lock);
+    for (int i = 0; i < TL_FRAME_SLOTS; i++) {
+        if (i != g_front && g_slots[i].pins == 0) {
+            target = i;
+            g_slots[i].pins = 1;
+            break;
+        }
     }
+    pthread_mutex_unlock(&g_slot_lock);
+    if (target < 0) {
+        g_dropped++;
+        return;
+    }
+
+    /* The copy happens outside the lock: this slot is ours alone. */
+    tl_frame_slot *slot = &g_slots[target];
+    if (slot->cap < bytes) {
+        uint8_t *grown = realloc(slot->px, bytes);
+        if (!grown) {
+            pthread_mutex_lock(&g_slot_lock);
+            slot->pins = 0;
+            pthread_mutex_unlock(&g_slot_lock);
+            return;
+        }
+        slot->px = grown;
+        slot->cap = bytes;
+    }
+    memcpy(slot->px, w->bits, bytes);
+
+    pthread_mutex_lock(&g_slot_lock);
+    slot->pins = 0;
+    g_front = target;
+    g_front_w = w->width;
+    g_front_h = w->height;
+    g_front_stride = w->stridePixels;
+    g_generation++;
+    pthread_mutex_unlock(&g_slot_lock);
+
+    pthread_mutex_lock(&g_run.frame_mutex);
+    g_run.frames++;
     pthread_mutex_unlock(&g_run.frame_mutex);
+}
+
+uint64_t husk_tl_frame_acquire(const uint8_t **pixels, int *width, int *height,
+                               int *stride_pixels, int *token)
+{
+    uint64_t gen = 0;
+    pthread_mutex_lock(&g_slot_lock);
+    if (g_front >= 0 && g_slots[g_front].px) {
+        g_slots[g_front].pins++;
+        if (pixels) *pixels = g_slots[g_front].px;
+        if (width)  *width = g_front_w;
+        if (height) *height = g_front_h;
+        if (stride_pixels) *stride_pixels = g_front_stride;
+        if (token)  *token = g_front;
+        gen = g_generation;
+    }
+    pthread_mutex_unlock(&g_slot_lock);
+    return gen;
+}
+
+void husk_tl_frame_release(int token)
+{
+    if (token < 0 || token >= TL_FRAME_SLOTS) return;
+    pthread_mutex_lock(&g_slot_lock);
+    if (g_slots[token].pins > 0) g_slots[token].pins--;
+    pthread_mutex_unlock(&g_slot_lock);
+}
+
+/* The pump publishes its counters here once a second; Swift reads them. */
+static husk_tl_perf g_perf;
+
+void husk_tl_perf_snapshot(husk_tl_perf *out)
+{
+    if (!out) return;
+    pthread_mutex_lock(&g_slot_lock);
+    *out = g_perf;
+    pthread_mutex_unlock(&g_slot_lock);
 }
 
 void tl_loader_request_stop(void)
 {
     g_run.stop_requested = true;
 }
-
-void husk_tl_frame_begin_read(void) { pthread_mutex_lock(&g_run.frame_mutex); }
-void husk_tl_frame_end_read(void)   { pthread_mutex_unlock(&g_run.frame_mutex); }
-const uint8_t *husk_tl_frame_pixels(void) { return g_run.frame; }
-int husk_tl_frame_width(void)  { return g_run.frame_w; }
-int husk_tl_frame_height(void) { return g_run.frame_h; }
-int husk_tl_frame_stride(void) { return g_run.frame_stride; }
 
 /* ------------------------------------------------------------ JIT memory */
 
@@ -1435,25 +1541,89 @@ static void *attempt_thread(void *arg)
     int budget_ms = seconds * 1000;
 
     if (g_run.dex_ctx) {
-        tl_log_line("dex: starting 60 FPS frame pump loop");
-        uint64_t nanos = 1000000000ULL;
+        /*
+         * The frame pump: sixty frames a second, on a deadline.
+         *
+         * It used to draw a frame and then sleep a full sixteen milliseconds,
+         * which puts the sleep on top of the work: a frame that cost five
+         * milliseconds took twenty-one, and the game's clock still advanced by a
+         * fixed sixteen per frame, so the game ran at three quarters of its
+         * speed and looked slow. Here each frame has a deadline -- the previous
+         * one plus a sixtieth of a second -- and the pump sleeps only for what is
+         * left of it, so the work is absorbed instead of added.
+         *
+         * The clock the app sees is real time, so physics that integrate over a
+         * frame's duration are right at any frame rate. Real time is capped at
+         * fifty milliseconds a frame: after a stall -- the app was backgrounded,
+         * or the device hitched -- the game's clock steps rather than leaps, and
+         * a bird does not cross the screen in one tick.
+         *
+         * A pump that has fallen far behind resynchronises instead of running
+         * frames back to back to catch up: sprinting to recover only makes the
+         * next stall longer.
+         */
+        tl_log_line("dex: starting 60 FPS frame pump loop (deadline paced, real time)");
+        tl_dex_context *dx = g_run.dex_ctx;
+
+        const uint64_t frame_ns = 16666667ull;
+        const uint64_t max_step_ns = 50ull * 1000000ull;
+
+        tl_pacer pacer;
+        tl_pacer_start(&pacer, frame_ns);
+
+        uint64_t game_ns = 1000000000ull;           /* where the app's clock starts */
+        uint64_t last = tl_dex_now_ns();
+
+        /* The last window's worth of counters, for the once-in-two-seconds line. */
+        uint64_t win_start = last;
+        int win_frames = 0, win_late = 0;
+        struct tl_dex_perf p0 = dx->perf;
+
         while (!g_run.stop_requested) {
-            struct timespec now;
-            clock_gettime(CLOCK_MONOTONIC, &now);
-            long elapsed = (now.tv_sec - start.tv_sec) * 1000
-                         + (now.tv_nsec - start.tv_nsec) / 1000000;
+            struct timespec now_ts;
+            clock_gettime(CLOCK_MONOTONIC, &now_ts);
+            long elapsed = (now_ts.tv_sec - start.tv_sec) * 1000
+                         + (now_ts.tv_nsec - start.tv_nsec) / 1000000;
             if (elapsed > budget_ms) {
                 tl_log_line("run: %d second budget reached after %llu frame(s)",
                             seconds, (unsigned long long)g_run.frames);
                 break;
             }
 
-            nanos += 16666666ULL; /* ~60 fps: 16.6ms */
-            tl_dex_tick_frame(g_run.dex_ctx, nanos);
-            tl_loader_frame_posted();
+            uint64_t now = tl_dex_now_ns();
+            uint64_t step = now - last;
+            last = now;
+            if (step > max_step_ns) step = max_step_ns;
+            game_ns += step;
 
-            struct timespec frame_sleep = { 0, 16666666 };
-            nanosleep(&frame_sleep, NULL);
+            tl_dex_tick_frame(dx, game_ns);
+            tl_loader_frame_posted();
+            win_frames++;
+
+            /* Sleep for what is left of this frame's time. */
+            if (tl_pacer_wait(&pacer)) win_late++;
+            uint64_t after = tl_dex_now_ns();
+
+            if (after - win_start >= 2000000000ull && win_frames > 0) {
+                double secs = (double)(after - win_start) / 1e9;
+                double n = (double)win_frames;
+                husk_tl_perf pf;
+                pf.fps       = n / secs;
+                pf.logic_ms  = (double)(dx->perf.ns_logic  - p0.ns_logic)  / n / 1e6;
+                pf.render_ms = (double)(dx->perf.ns_render - p0.ns_render) / n / 1e6;
+                pf.draw_ms   = (double)(dx->perf.ns_draw   - p0.ns_draw)   / n / 1e6;
+                pf.draws     = (double)(dx->perf.draws     - p0.draws)     / n;
+                pf.late_pct  = 100.0 * win_late / n;
+                pthread_mutex_lock(&g_slot_lock);
+                g_perf = pf;
+                pthread_mutex_unlock(&g_slot_lock);
+                tl_log_line("perf: %.1f fps | logic %.3f ms, render %.3f ms (draw %.3f ms, %.0f calls) | %.0f%% late%s",
+                            pf.fps, pf.logic_ms, pf.render_ms, pf.draw_ms, pf.draws, pf.late_pct,
+                            g_dropped ? " | frames dropped: no free slot" : "");
+                win_start = after;
+                win_frames = win_late = 0;
+                p0 = dx->perf;
+            }
         }
         int code = g_run.frames > 0 ? 2 : 1;
         tl_log_line("=== attempt ended: %s (%llu frames) ===",
@@ -1807,10 +1977,7 @@ void husk_tl_attempt_reset(void)
     tl_window_release(g_run.window);
     tl_shim_free(g_run.queue);
     tl_shim_free(g_run.assets);
-    pthread_mutex_lock(&g_run.frame_mutex);
-    free(g_run.frame);
-    g_run.frame = NULL;
-    pthread_mutex_unlock(&g_run.frame_mutex);
+    slots_invalidate();
 
     pthread_mutex_lock(&g_log_mutex);
     char *buf = g_run.log.buf;

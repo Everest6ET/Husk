@@ -21,6 +21,9 @@
  *   TL_STATE_RANGE=a-b  print the game state on every frame in a..b
  *   TL_PROGRESS=1       name each frame on stderr as it starts
  *   TL_DUMP_ARRAYS=1    print the view's array-typed fields at startup
+ *   TL_SEED=n           fix Math.random's seed, so a run (its pipes) can be replayed
+ *   TL_CG=1             draw through CoreGraphics only, to compare with the blitter
+ *   TL_DUMP_RAW=1       also write each saved frame as raw RGBA, for diffing
  *   TL_HAMMER=1         send touches from a second thread, for -fsanitize=thread
  *   TL_TRACE_FRAME=a-b  print every instruction run in those frames. Needs a
  *                       build with -DTL_DEX_TRACE; the shipping build has none.
@@ -150,6 +153,10 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    /* TL_SEED=n replays a run -- the same pipes -- and TL_CG=1 draws through
+     * CoreGraphics only, so the two renderers can be compared on the same game. */
+    if (getenv("TL_SEED")) tl_dex_seed(ctx, (uint64_t)strtoull(getenv("TL_SEED"), NULL, 10));
+    if (getenv("TL_CG")) ctx->use_cg_only = 1;
     printf("Total classes loaded: %d\n", ctx->num_classes);
 
     /* Look up Flappy Bird View class 'c' */
@@ -287,6 +294,9 @@ int main(int argc, char **argv)
      * screen white on frame 2 and left it there. */
     bool went_white = false;
     int white_run = 0, longest_white = 0, first_white = -1;
+    /* Per-state cost of a frame, from the layer's own counters. The harness
+     * runs unthrottled, so this is what a frame costs, not how fast it was shown. */
+    struct { uint64_t n, logic, render, draw, draws; } cost[8] = {{0}};
     uint64_t nanos = 1000000000ULL;
     for (int f = 0; f < FRAMES; f++) {
         nanos += 16666666ULL; /* ~60 fps */
@@ -303,7 +313,18 @@ int main(int argc, char **argv)
             if (dash) hi = atoi(dash + 1);
             ctx->trace = (f >= lo && f <= hi);
         }
+        struct tl_dex_perf before = ctx->perf;
+        int state_before = 7;
+        if (state_field && view_obj->nfields > state_field->slot) {
+            tl_dex_object *st0 = view_obj->fields[state_field->slot].l;
+            if (st0 && st0->nfields > TL_ENUM_SLOT_ORDINAL) state_before = st0->fields[TL_ENUM_SLOT_ORDINAL].i & 7;
+        }
         tl_dex_tick_frame(ctx, nanos);
+        cost[state_before].n++;
+        cost[state_before].logic  += ctx->perf.ns_logic  - before.ns_logic;
+        cost[state_before].render += ctx->perf.ns_render - before.ns_render;
+        cost[state_before].draw   += ctx->perf.ns_draw   - before.ns_draw;
+        cost[state_before].draws  += ctx->perf.draws     - before.draws;
         /* Left on through the touch below: the input handler is as much a part
          * of the frame as the tick, and it is what usually needs tracing. It is
          * switched off at the top of the next iteration. */
@@ -331,6 +352,12 @@ int main(int argc, char **argv)
             (f >= 120 && f % save_every == 0)) {
             snprintf(path, sizeof(path), "%s/flappy_frame_%03d.png", outdir, f);
             save_png(fb, width, height, path);
+            if (getenv("TL_DUMP_RAW")) {     /* the exact bytes, for diffing two runs */
+                char rawpath[1024];
+                snprintf(rawpath, sizeof(rawpath), "%s/flappy_frame_%03d.raw", outdir, f);
+                FILE *rf = fopen(rawpath, "wb");
+                if (rf) { fwrite(fb, 4, (size_t)width * height, rf); fclose(rf); }
+            }
             printf("Frame %2d: hash=%016llx fb[0]=0x%08x  -> %s\n", f,
                    (unsigned long long)hashes[f], fb[0], path);
         }
@@ -391,6 +418,17 @@ int main(int argc, char **argv)
 
     snprintf(path, sizeof(path), "%s/flappy_bird_frame.png", outdir);
     save_png(fb, width, height, path);
+
+    static const char *state_names[8] = { "title", "fading", "get ready", "starting", "playing", "game over", "?", "?" };
+    printf("\nframe cost by game state (ms per frame; render includes the draw calls)\n");
+    printf("  %-10s %6s %8s %8s %8s %10s\n", "state", "frames", "logic", "render", "of which draw", "draws/frame");
+    for (int i = 0; i < 8; i++) {
+        if (!cost[i].n) continue;
+        double n = (double)cost[i].n;
+        printf("  %-10s %6.0f %8.3f %8.3f %8.3f %10.1f\n", state_names[i], n,
+               cost[i].logic / n / 1e6, cost[i].render / n / 1e6, cost[i].draw / n / 1e6,
+               cost[i].draws / n);
+    }
 
     int failures = 0;
     /* Hammer mode is a race test, not a gameplay test: random touches from the

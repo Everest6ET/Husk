@@ -171,6 +171,24 @@ struct tl_dex_context {
      */
     int trace;
 
+    /* 0: draw through CoreGraphics only. Used to compare the two renderers on
+     * real frames, and as the way back if the blitter ever disagrees. */
+    int use_cg_only;
+
+    /* java.lang.Math.random's state. Seedable, so a run can be replayed: the
+     * same seed gives the same pipes, which is what makes two renderers
+     * comparable frame for frame. Seeded from the system unless told otherwise. */
+    uint64_t rng;
+
+    /* Where a frame's time goes. See tl_dex_perf. */
+    struct tl_dex_perf {
+        uint64_t frames;
+        uint64_t ns_logic;    /* input, deferred tasks, and the app's own doFrame */
+        uint64_t ns_render;   /* the app's onDraw, everything it calls included */
+        uint64_t ns_draw;     /* of that, time inside the canvas draw calls */
+        uint64_t draws;       /* how many of those there were */
+    } perf;
+
     /*
      * The layer's own clock, in nanoseconds, as the host last reported it.
      *
@@ -253,6 +271,41 @@ typedef struct tl_dex_task {
     tl_dex_object *runnable;
     struct tl_dex_task *next;
 } tl_dex_task;
+
+/* Monotonic nanoseconds, for measuring. The same clock the host hands the
+ * layer as frame time on the device, so a measurement and a frame stamp agree. */
+uint64_t tl_dex_now_ns(void);
+
+/*
+ * A frame pacer: sixty frames a second on a deadline.
+ *
+ * A pump that draws a frame and then sleeps a full frame's length puts the sleep
+ * on top of the work, so a frame that costs five milliseconds takes twenty-one
+ * and the whole thing runs slow. This gives every frame a deadline -- the last
+ * one's plus a frame -- and sleeps only for what remains of it, so work is
+ * absorbed rather than added.
+ *
+ * A pacer that has fallen far behind does not run frames back to back to catch
+ * up. After a stall that sprint is a burst of frames with no time between them,
+ * and it only makes the next stall longer; it resynchronises to now instead.
+ */
+typedef struct tl_pacer {
+    uint64_t frame_ns;
+    uint64_t next;          /* the deadline of the frame in progress */
+    uint32_t tb_numer, tb_denom;
+} tl_pacer;
+
+void tl_pacer_start(tl_pacer *p, uint64_t frame_ns);
+
+/* Call after each frame's work. Sleeps out what is left of the frame's time.
+ * Returns true if the frame missed its deadline. */
+bool tl_pacer_wait(tl_pacer *p);
+
+/* Replay a run: the same seed gives the same Math.random sequence. */
+void tl_dex_seed(tl_dex_context *ctx, uint64_t seed);
+
+/* The next Math.random in [0, 1). */
+double tl_dex_random(tl_dex_context *ctx);
 
 void tl_dex_post_delayed(tl_dex_context *ctx, tl_dex_object *runnable, uint64_t delay_ms);
 void tl_dex_remove_callbacks(tl_dex_context *ctx, tl_dex_object *runnable);

@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
+#include <mach/mach_time.h>
 #include "husk-tl-dex.h"
 #include "husk-tl-framework.h"
 #include "husk-tl-internal.h"
@@ -138,6 +139,7 @@ tl_dex_context *tl_dex_context_create(const char *apk_path, uint32_t *fb, int wi
     tl_dex_context *ctx = calloc(1, sizeof(*ctx));
     if (!ctx) return NULL;
     pthread_mutex_init(&ctx->input_lock, NULL);
+    tl_dex_seed(ctx, ((uint64_t)arc4random() << 32) | arc4random());
     ctx->apk_path = apk_path ? strdup(apk_path) : NULL;
     ctx->framebuffer = fb;
     ctx->fb_width = width;
@@ -1644,6 +1646,53 @@ done:
 
 /* ------------------------------------------------ Frame & Touch Dispatch */
 
+void tl_pacer_start(tl_pacer *p, uint64_t frame_ns)
+{
+    mach_timebase_info_data_t tb;
+    mach_timebase_info(&tb);
+    p->frame_ns = frame_ns;
+    p->tb_numer = tb.numer;
+    p->tb_denom = tb.denom;
+    p->next = tl_dex_now_ns() + frame_ns;
+}
+
+bool tl_pacer_wait(tl_pacer *p)
+{
+    uint64_t after = tl_dex_now_ns();
+    uint64_t deadline = p->next;
+    p->next += p->frame_ns;
+
+    if (after < deadline) {
+        /* The deadline in mach ticks: ns * denom / numer. */
+        mach_wait_until((uint64_t)((__uint128_t)deadline * p->tb_denom / p->tb_numer));
+        return false;
+    }
+    /* Late. Far enough behind and the schedule is abandoned rather than chased. */
+    if (after > deadline + 4 * p->frame_ns) p->next = after + p->frame_ns;
+    return true;
+}
+
+void tl_dex_seed(tl_dex_context *ctx, uint64_t seed)
+{
+    if (!ctx) return;
+    /* xorshift cannot start at zero. */
+    ctx->rng = seed ? seed : 0x9E3779B97F4A7C15ull;
+}
+
+/* xorshift64*: small, fast, and well distributed for a game's purposes. */
+double tl_dex_random(tl_dex_context *ctx)
+{
+    uint64_t x = ctx ? ctx->rng : 0x9E3779B97F4A7C15ull;
+    x ^= x >> 12; x ^= x << 25; x ^= x >> 27;
+    if (ctx) ctx->rng = x;
+    return (double)((x * 0x2545F4914F6CDD1Dull) >> 11) / 9007199254740992.0;   /* 2^53 */
+}
+
+uint64_t tl_dex_now_ns(void)
+{
+    return clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+}
+
 void tl_dex_post_delayed(tl_dex_context *ctx, tl_dex_object *runnable, uint64_t delay_ms)
 {
     if (!ctx || !runnable) return;
@@ -1714,6 +1763,8 @@ void tl_dex_tick_frame(tl_dex_context *ctx, uint64_t frame_time_nanos)
     /* Never backwards: code that measures an interval would see it as negative. */
     if (frame_time_nanos > ctx->clock_nanos) ctx->clock_nanos = frame_time_nanos;
 
+    uint64_t t_start = tl_dex_now_ns();
+
     /* Input first, then deferred work, then the frame callback: the order
      * Android's Choreographer runs them in. */
     dex_drain_input(ctx);
@@ -1730,9 +1781,15 @@ void tl_dex_tick_frame(tl_dex_context *ctx, uint64_t frame_time_nanos)
         }
     }
 
+    uint64_t t_logic = tl_dex_now_ns();
+
     /* 2. Render view */
     tl_framework_render_view(ctx);
     ctx->frame_count++;
+
+    ctx->perf.frames++;
+    ctx->perf.ns_logic += t_logic - t_start;
+    ctx->perf.ns_render += tl_dex_now_ns() - t_logic;
 }
 
 /* Deliver one touch to the app. Only ever called from the pump thread. */

@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "husk-tl-framework.h"
 #include "husk-tl-res.h"
+#include "husk-tl-blit.h"
 #include "husk-tl-dex.h"
 #include "husk-tl-internal.h"
 #include <stdio.h>
@@ -19,7 +20,8 @@
 typedef struct {
     int width;
     int height;
-    uint32_t *pixels;       /* ARGB8888 */
+    uint32_t *pixels;       /* premultiplied RGBA, bytes in that order */
+    int opaque;             /* 0 not yet known, 1 every pixel opaque, 2 some are not */
 #if defined(__APPLE__)
     CGImageRef cg_image;
 #endif
@@ -872,7 +874,7 @@ static bool math_round_d(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_va
   RET_LONG(r >= 9.2233720368547758e18 ? INT64_MAX : r <= -9.2233720368547758e18 ? INT64_MIN : (int64_t)r); return true; }
 
 static bool math_random(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
-{ UNUSED_NATIVE_ARGS; (void)args; RET_DOUBLE((double)(arc4random() >> 5) / 134217728.0); return true; }
+{ (void)this_obj; (void)args; (void)nargs; RET_DOUBLE(tl_dex_random(ctx)); return true; }
 
 /* System. The clock is the layer's own; see tl_dex_context.clock_nanos. */
 static bool system_nanoTime(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
@@ -1308,6 +1310,76 @@ static bool bitmapFactory_decodeResource(tl_dex_context *ctx, tl_dex_object *thi
 }
 
 /* android/graphics/Canvas */
+
+/*
+ * Where a rectangle in the canvas's coordinates lands in the framebuffer, when
+ * the transform is just a scale and a translation -- nearly every draw. Anything
+ * with rotation, skew or a mirror returns false and is left to CoreGraphics.
+ *
+ * The context's matrix maps the canvas to CoreGraphics' device space, which is
+ * y-UP; the framebuffer's rows run the other way, so a row is the height minus
+ * the device y. The base flip the context starts with (translate by the height,
+ * scale y by -1) is exactly what cancels that, which is why Android's top-left
+ * coordinates come out as framebuffer rows unchanged.
+ */
+static bool canvas_device_rect(const tl_dex_context *ctx, const tl_framework_state *st,
+                               float l, float t, float r, float b,
+                               float *dx0, float *dy0, float *dx1, float *dy1)
+{
+#if defined(__APPLE__)
+    if (ctx->use_cg_only || !st || !st->cg_ctx || !ctx->framebuffer) return false;
+    CGAffineTransform m = CGContextGetCTM(st->cg_ctx);
+    if (fabs(m.b) > 1e-5 || fabs(m.c) > 1e-5) return false;      /* rotation or skew */
+    if (m.a <= 0 || m.d >= 0) return false;                      /* a mirror */
+    *dx0 = (float)(m.a * l + m.tx);
+    *dx1 = (float)(m.a * r + m.tx);
+    *dy0 = (float)ctx->fb_height - (float)(m.d * t + m.ty);
+    *dy1 = (float)ctx->fb_height - (float)(m.d * b + m.ty);
+    return true;
+#else
+    (void)ctx; (void)st; (void)l; (void)t; (void)r; (void)b; (void)dx0; (void)dy0; (void)dx1; (void)dy1;
+    return false;
+#endif
+}
+
+static bool bitmap_opaque(tl_framework_bitmap *bmp)
+{
+    if (bmp->opaque == 0) {
+        bmp->opaque = tl_blit_image_is_opaque(bmp->pixels, bmp->width, bmp->height) ? 1 : 2;
+    }
+    return bmp->opaque == 1;
+}
+
+/* The alpha a draw carries: the paint's, or opaque with no paint. */
+static int paint_draw_alpha(const tl_framework_paint *p)
+{
+    return p ? (p->alpha < 0 ? 0 : (p->alpha > 255 ? 255 : p->alpha)) : 255;
+}
+
+/* Try the blitter. True if it drew; false means the caller should use CoreGraphics. */
+static bool blit_bitmap(tl_dex_context *ctx, tl_framework_state *st, tl_framework_bitmap *bmp,
+                        const tl_framework_paint *paint,
+                        float sx0, float sy0, float sx1, float sy1,
+                        float ul, float ut, float ur, float ub)
+{
+    if (!bmp->pixels) return false;
+    float dx0, dy0, dx1, dy1;
+    if (!canvas_device_rect(ctx, st, ul, ut, ur, ub, &dx0, &dy0, &dx1, &dy1)) return false;
+
+    /* A filtered draw that actually resizes needs interpolation the blitter does
+     * not do. At 1:1 filtering changes nothing, so that stays on the fast path. */
+    if (paint && paint->filter) {
+        bool resized = fabsf((dx1 - dx0) - (sx1 - sx0)) > 0.01f ||
+                       fabsf((dy1 - dy0) - (sy1 - sy0)) > 0.01f;
+        if (resized) return false;
+    }
+
+    tl_blit_target target = { ctx->framebuffer, ctx->fb_width, ctx->fb_height, ctx->fb_width };
+    tl_blit_draw(&target, bmp->pixels, bmp->width, bmp->height, bitmap_opaque(bmp),
+                 sx0, sy0, sx1, sy1, dx0, dy0, dx1, dy1, paint_draw_alpha(paint));
+    return true;
+}
+
 static bool canvas_save(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
 {
     (void)this_obj; (void)args; (void)nargs;
@@ -1350,20 +1422,26 @@ static bool canvas_scale(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_va
     return true;
 }
 
-static bool canvas_drawBitmap_xy(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+static bool canvas_drawBitmap_xy_impl(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
 {
-    (void)this_obj; (void)nargs; (void)ret;
+    (void)this_obj; (void)ret;
     tl_framework_state *st = ctx->framework_data;
     if (!st || !st->cg_ctx || !args[1].l || !tl_dex_native(args[1].l)) return true;
     tl_framework_bitmap *bmp = tl_dex_native(args[1].l);
-    if (!bmp->cg_image) return true;
 
     float x = args[2].f;
     float y = args[3].f;
     float w = bmp->width;
     float h = bmp->height;
+    const tl_framework_paint *paint = (nargs >= 5 && args[4].l) ? tl_dex_native(args[4].l) : NULL;
+
+    if (blit_bitmap(ctx, st, bmp, paint, 0, 0, w, h, x, y, x + w, y + h)) return true;
+    if (!bmp->cg_image) return true;
 
     CGContextSaveGState(st->cg_ctx);
+    CGContextSetAlpha(st->cg_ctx, paint_draw_alpha(paint) / 255.0f);
+    CGContextSetInterpolationQuality(st->cg_ctx, (paint && paint->filter) ? kCGInterpolationMedium
+                                                                         : kCGInterpolationNone);
     CGContextTranslateCTM(st->cg_ctx, x, y + h);
     CGContextScaleCTM(st->cg_ctx, 1.0, -1.0);
     CGContextDrawImage(st->cg_ctx, CGRectMake(0, 0, w, h), bmp->cg_image);
@@ -1371,16 +1449,31 @@ static bool canvas_drawBitmap_xy(tl_dex_context *ctx, tl_dex_object *this_obj, t
     return true;
 }
 
-static bool canvas_drawBitmap_matrix(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+static bool canvas_drawBitmap_matrix_impl(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
 {
-    (void)this_obj; (void)nargs; (void)ret;
+    (void)this_obj; (void)ret;
     tl_framework_state *st = ctx->framework_data;
     if (!st || !st->cg_ctx || !args[1].l || !tl_dex_native(args[1].l)) return true;
     tl_framework_bitmap *bmp = tl_dex_native(args[1].l);
-    if (!bmp->cg_image || !args[2].l || !tl_dex_native(args[2].l)) return true;
+    if (!args[2].l || !tl_dex_native(args[2].l)) return true;
 
-    tl_framework_matrix *mat = tl_dex_native(args[2].l);
+    const tl_framework_matrix *mat = tl_dex_native(args[2].l);
+    const tl_framework_paint *paint = (nargs >= 4 && args[3].l) ? tl_dex_native(args[3].l) : NULL;
+
+    /* A matrix with no skew terms is a scale and a translation, so it is a
+     * rectangle: the bitmap's corners mapped through it. Only a rotated sprite --
+     * the bird, as it tilts -- needs CoreGraphics. */
+    if (fabsf(mat->m[1]) < 1e-6f && fabsf(mat->m[3]) < 1e-6f && mat->m[0] > 0 && mat->m[4] > 0) {
+        float l = mat->m[2], t = mat->m[5];
+        float r = l + mat->m[0] * (float)bmp->width, b = t + mat->m[4] * (float)bmp->height;
+        if (blit_bitmap(ctx, st, bmp, paint, 0, 0, (float)bmp->width, (float)bmp->height, l, t, r, b)) return true;
+    }
+    if (!bmp->cg_image) return true;
+
     CGContextSaveGState(st->cg_ctx);
+    CGContextSetAlpha(st->cg_ctx, paint_draw_alpha(paint) / 255.0f);
+    CGContextSetInterpolationQuality(st->cg_ctx, (paint && paint->filter) ? kCGInterpolationMedium
+                                                                         : kCGInterpolationNone);
     CGAffineTransform t = CGAffineTransformMake(mat->m[0], mat->m[3],
                                                     mat->m[1], mat->m[4],
                                                     mat->m[2], mat->m[5]);
@@ -1392,17 +1485,17 @@ static bool canvas_drawBitmap_matrix(tl_dex_context *ctx, tl_dex_object *this_ob
     return true;
 }
 
-static bool canvas_drawBitmap_rect(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+static bool canvas_drawBitmap_rect_impl(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
 {
-    (void)this_obj; (void)nargs; (void)ret;
+    (void)this_obj; (void)ret;
     tl_framework_state *st = ctx->framework_data;
     if (!st || !st->cg_ctx || !args[1].l || !tl_dex_native(args[1].l)) return true;
     tl_framework_bitmap *bmp = tl_dex_native(args[1].l);
-    if (!bmp->cg_image) return true;
 
     tl_framework_rect *src = (args[2].l) ? tl_dex_native(args[2].l) : NULL;
     tl_framework_rect *dst = (args[3].l) ? tl_dex_native(args[3].l) : NULL;
     if (!dst) return true;
+    const tl_framework_paint *paint = (nargs >= 5 && args[4].l) ? tl_dex_native(args[4].l) : NULL;
 
     float dst_x = dst->left;
     float dst_y = dst->top;
@@ -1410,29 +1503,38 @@ static bool canvas_drawBitmap_rect(tl_dex_context *ctx, tl_dex_object *this_obj,
     float dst_h = dst->bottom - dst->top;
 #ifdef TL_DEX_TRACE
     if (ctx->trace)
-        fprintf(stderr, "        drawBitmap %dx%d src=%s(%g,%g,%g,%g) dst=(%g,%g,%g,%g)%s\n",
+        fprintf(stderr, "        drawBitmap %dx%d src=%s(%g,%g,%g,%g) dst=(%g,%g,%g,%g)%s filter=%d alpha=%d\n",
                 bmp->width, bmp->height, src ? "" : "none",
                 src ? src->left : 0, src ? src->top : 0, src ? src->right : 0, src ? src->bottom : 0,
                 dst->left, dst->top, dst->right, dst->bottom,
-                (dst_w <= 0 || dst_h <= 0) ? "  [EMPTY dst: skipped]" : "");
+                (dst_w <= 0 || dst_h <= 0) ? "  [EMPTY dst: skipped]" : "",
+                paint ? paint->filter : -1, paint ? paint->alpha : -1);
 #endif
     if (dst_w <= 0 || dst_h <= 0) return true;
 
+    /* The whole image unless a usable source rectangle was given. */
+    float sx0 = 0, sy0 = 0, sx1 = (float)bmp->width, sy1 = (float)bmp->height;
+    if (src && src->right > src->left && src->bottom > src->top) {
+        sx0 = src->left; sy0 = src->top; sx1 = src->right; sy1 = src->bottom;
+    }
+
+    if (blit_bitmap(ctx, st, bmp, paint, sx0, sy0, sx1, sy1,
+                    dst->left, dst->top, dst->right, dst->bottom)) return true;
+    if (!bmp->cg_image) return true;
+
     CGImageRef img_to_draw = bmp->cg_image;
     bool need_release = false;
-    if (src) {
-        float sx = src->left;
-        float sy = src->top;
-        float sw = src->right - src->left;
-        float sh = src->bottom - src->top;
-        if (sw > 0 && sh > 0) {
-            img_to_draw = CGImageCreateWithImageInRect(bmp->cg_image, CGRectMake(sx, sy, sw, sh));
-            need_release = true;
-        }
+    if (src && src->right > src->left && src->bottom > src->top) {
+        img_to_draw = CGImageCreateWithImageInRect(bmp->cg_image,
+                          CGRectMake(sx0, sy0, sx1 - sx0, sy1 - sy0));
+        need_release = true;
     }
 
     if (img_to_draw) {
         CGContextSaveGState(st->cg_ctx);
+        CGContextSetAlpha(st->cg_ctx, paint_draw_alpha(paint) / 255.0f);
+        CGContextSetInterpolationQuality(st->cg_ctx, (paint && paint->filter) ? kCGInterpolationMedium
+                                                                             : kCGInterpolationNone);
         CGContextTranslateCTM(st->cg_ctx, dst_x, dst_y + dst_h);
         CGContextScaleCTM(st->cg_ctx, 1.0, -1.0);
         CGContextDrawImage(st->cg_ctx, CGRectMake(0, 0, dst_w, dst_h), img_to_draw);
@@ -1443,46 +1545,61 @@ static bool canvas_drawBitmap_rect(tl_dex_context *ctx, tl_dex_object *this_obj,
 }
 
 
-static bool canvas_drawRect(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+static bool canvas_drawRect_impl(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
 {
     (void)this_obj; (void)ret;
     tl_framework_state *st = ctx->framework_data;
     if (!st || !st->cg_ctx) return true;
 
-    float l = 0, t = 0, w = 0, h = 0;
-    tl_framework_paint *paint = NULL;
+    float l = 0, t = 0, r = 0, b = 0;
+    const tl_framework_paint *paint = NULL;
 
     if (nargs >= 6) {
         /* drawRect(float left, float top, float right, float bottom, Paint paint) */
-        l = args[1].f;
-        t = args[2].f;
-        w = args[3].f - args[1].f;
-        h = args[4].f - args[2].f;
-        if (args[5].l && tl_dex_native(args[5].l)) {
-            paint = tl_dex_native(args[5].l);
-        }
+        l = args[1].f; t = args[2].f; r = args[3].f; b = args[4].f;
+        if (args[5].l) paint = tl_dex_native(args[5].l);
     } else if (nargs >= 3 && args[1].l && tl_dex_native(args[1].l)) {
         /* drawRect(Rect/RectF rect, Paint paint) */
-        tl_framework_rect *r = tl_dex_native(args[1].l);
-        l = r->left;
-        t = r->top;
-        w = r->right - r->left;
-        h = r->bottom - r->top;
-        if (args[2].l && tl_dex_native(args[2].l)) {
-            paint = tl_dex_native(args[2].l);
-        }
+        const tl_framework_rect *rc = tl_dex_native(args[1].l);
+        l = rc->left; t = rc->top; r = rc->right; b = rc->bottom;
+        if (args[2].l) paint = tl_dex_native(args[2].l);
     }
 
-    if (paint) {
-        float a = (((paint->color >> 24) & 0xff) / 255.0f) * (paint->alpha / 255.0f);
-        float r_col = ((paint->color >> 16) & 0xff) / 255.0f;
-        float g_col = ((paint->color >> 8) & 0xff) / 255.0f;
-        float b_col = (paint->color & 0xff) / 255.0f;
-        CGContextSetRGBFillColor(st->cg_ctx, r_col, g_col, b_col, a);
+    /* The colour's own alpha channel IS the paint's alpha -- every setter keeps
+     * the two equal -- so it is applied once. This used to multiply them, which
+     * squares it: a fade at half alpha drew at a quarter. */
+    uint32_t argb = paint ? ((paint->color & 0x00ffffffu) | ((uint32_t)paint_draw_alpha(paint) << 24))
+                          : 0xff000000u;
+
+    float dx0, dy0, dx1, dy1;
+    if (canvas_device_rect(ctx, st, l, t, r, b, &dx0, &dy0, &dx1, &dy1)) {
+        tl_blit_target target = { ctx->framebuffer, ctx->fb_width, ctx->fb_height, ctx->fb_width };
+        tl_blit_fill(&target, dx0, dy0, dx1, dy1, argb);
+        return true;
     }
-    CGContextFillRect(st->cg_ctx, CGRectMake(l, t, w, h));
+
+    CGContextSetRGBFillColor(st->cg_ctx, ((argb >> 16) & 0xff) / 255.0f, ((argb >> 8) & 0xff) / 255.0f,
+                             (argb & 0xff) / 255.0f, (argb >> 24) / 255.0f);
+    CGContextFillRect(st->cg_ctx, CGRectMake(l, t, r - l, b - t));
     return true;
 }
+
+/*
+ * Draw calls, timed.
+ *
+ * Whether a frame is slow because of the interpreter or because of CoreGraphics
+ * is the first thing to know and the last thing to guess, so every canvas draw
+ * adds its own duration to the frame's counters. Two clock reads a draw -- tens
+ * of nanoseconds -- against calls that cost microseconds.
+ */
+#define TIMED_DRAW(name) \
+    static bool timed_##name(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret) \
+    { uint64_t t0 = tl_dex_now_ns(); bool r = name##_impl(ctx, this_obj, args, nargs, ret); \
+      ctx->perf.ns_draw += tl_dex_now_ns() - t0; ctx->perf.draws++; return r; }
+TIMED_DRAW(canvas_drawBitmap_xy)
+TIMED_DRAW(canvas_drawBitmap_matrix)
+TIMED_DRAW(canvas_drawBitmap_rect)
+TIMED_DRAW(canvas_drawRect)
 
 /* android/view/View */
 static bool view_invalidate(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
@@ -2023,12 +2140,12 @@ static const tl_native_entry s_native_methods[] = {
     { "Landroid/graphics/Canvas;", "save", NULL, canvas_save },
     { "Landroid/graphics/Canvas;", "restore", NULL, canvas_restore },
     { "Landroid/graphics/Canvas;", "scale", NULL, canvas_scale },
-    { "Landroid/graphics/Canvas;", "drawBitmap", "VLFFL", canvas_drawBitmap_xy },
-    { "Landroid/graphics/Canvas;", "drawBitmap", "VLFF", canvas_drawBitmap_xy },
-    { "Landroid/graphics/Canvas;", "drawBitmap", "VLLL", canvas_drawBitmap_matrix },
-    { "Landroid/graphics/Canvas;", "drawBitmap", "VLLLL", canvas_drawBitmap_rect },
-    { "Landroid/graphics/Canvas;", "drawBitmap", NULL, canvas_drawBitmap_xy },
-    { "Landroid/graphics/Canvas;", "drawRect", NULL, canvas_drawRect },
+    { "Landroid/graphics/Canvas;", "drawBitmap", "VLFFL", timed_canvas_drawBitmap_xy },
+    { "Landroid/graphics/Canvas;", "drawBitmap", "VLFF", timed_canvas_drawBitmap_xy },
+    { "Landroid/graphics/Canvas;", "drawBitmap", "VLLL", timed_canvas_drawBitmap_matrix },
+    { "Landroid/graphics/Canvas;", "drawBitmap", "VLLLL", timed_canvas_drawBitmap_rect },
+    { "Landroid/graphics/Canvas;", "drawBitmap", NULL, timed_canvas_drawBitmap_xy },
+    { "Landroid/graphics/Canvas;", "drawRect", NULL, timed_canvas_drawRect },
 
     /* View */
     { "Landroid/view/View;", "<init>", NULL, noop_stub },
@@ -2287,6 +2404,10 @@ bool tl_framework_init(tl_dex_context *ctx)
                                            kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
         CGColorSpaceRelease(cs);
         if (st->cg_ctx) {
+            /* Pixel art is drawn without filtering unless a paint asks for it; the
+             * draw calls set this per draw, and this is what anything that does
+             * not goes through those gets. */
+            CGContextSetInterpolationQuality(st->cg_ctx, kCGInterpolationNone);
             /* Flip CoreGraphics to match Android top-left origin */
             CGContextTranslateCTM(st->cg_ctx, 0, ctx->fb_height);
             CGContextScaleCTM(st->cg_ctx, 1.0f, -1.0f);

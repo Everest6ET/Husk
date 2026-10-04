@@ -76,14 +76,33 @@ char *husk_tl_attempt_log(void);
 void husk_tl_attempt_stop(void);
 void husk_tl_attempt_reset(void);
 
-/* The frame the guest last posted, RGBX. Read between begin/end; the
- * pointer is stable until end. Width, height and stride are pixels. */
-void husk_tl_frame_begin_read(void);
-void husk_tl_frame_end_read(void);
-const uint8_t *husk_tl_frame_pixels(void);
-int  husk_tl_frame_width(void);
-int  husk_tl_frame_height(void);
-int  husk_tl_frame_stride(void);
+/*
+ * The frame the guest last finished, for the UI to show.
+ *
+ * Frames are handed over without a copy. husk_tl_frame_acquire() pins the newest
+ * finished frame and returns its generation (zero if there is none yet, and the
+ * same number as last time if nothing new has been posted); the pixels stay
+ * valid and untouched until husk_tl_frame_release(token). The producer never
+ * writes a frame that is pinned or is the newest, so a reader can hold one for as
+ * long as the display needs it -- a CGImage's whole lifetime -- and the guest
+ * keeps drawing meanwhile. Premultiplied RGBA, bytes in that order; width,
+ * height and stride are in pixels.
+ */
+uint64_t husk_tl_frame_acquire(const uint8_t **pixels, int *width, int *height,
+                               int *stride_pixels, int *token);
+void husk_tl_frame_release(int token);
+
+/* How the last couple of seconds went, from the frame pump's own counters. */
+typedef struct husk_tl_perf {
+    double fps;        /* frames the guest produced per second */
+    double logic_ms;   /* mean per frame: input, deferred tasks, the app's doFrame */
+    double render_ms;  /* mean per frame: the app's onDraw, draw calls included */
+    double draw_ms;    /* of which, inside the canvas draw calls */
+    double draws;      /* mean canvas draw calls per frame */
+    double late_pct;   /* percent of frames that missed their deadline */
+} husk_tl_perf;
+void husk_tl_perf_snapshot(husk_tl_perf *out);
+
 void husk_tl_send_touch(int action, float x, float y);
 
 void husk_tl_free(void *p);
