@@ -33,6 +33,7 @@ static struct {
     bool ready;
     char frame_dir[512];
     int frame_every;
+    bool latest_only;           /* overwrite latest.bmp instead of keeping every frame */
     atomic_ulong presented;
     EGLDisplay display;
     pthread_mutex_t lock;
@@ -95,7 +96,7 @@ bool tl_egl_init(const char *egl_path, const char *gles_path, const char *frame_
     a_glGetIntegerv = a_eglGetProcAddress("glGetIntegerv");
     a_glBindFramebuffer = a_eglGetProcAddress("glBindFramebuffer");
     a_glPixelStorei = a_eglGetProcAddress("glPixelStorei");
-    if (frame_dir) { snprintf(E.frame_dir, sizeof(E.frame_dir), "%s", frame_dir); E.frame_every = frame_every > 0 ? frame_every : 60; }
+    if (frame_dir) { snprintf(E.frame_dir, sizeof(E.frame_dir), "%s", frame_dir); E.latest_only = frame_every < 0; E.frame_every = frame_every != 0 ? (frame_every < 0 ? -frame_every : frame_every) : 60; }
     E.ready = true;
     pthread_mutex_unlock(&E.lock);
     tl_log_line("egl: ANGLE loaded%s%s", frame_dir ? ", off-screen, frames to " : "", frame_dir ? frame_dir : "");
@@ -174,7 +175,13 @@ static void save_frame(EGLDisplay d, EGLSurface s, unsigned long n)
     a_glReadPixels(0, 0, w, h, 0x1908 /* GL_RGBA */, 0x1401 /* GL_UNSIGNED_BYTE */, rgba);
     a_glPixelStorei(0x0D05, old_pack);
     a_glBindFramebuffer(0x8CA8, (unsigned)old_fb);
-    char path[700]; snprintf(path, sizeof(path), "%s/frame-%05lu.bmp", E.frame_dir, n);
+    char path[700], final_path[700] = "";
+    if (E.latest_only) {
+        snprintf(final_path, sizeof(final_path), "%s/latest.bmp", E.frame_dir);
+        snprintf(path, sizeof(path), "%s/latest.tmp", E.frame_dir);
+    } else {
+        snprintf(path, sizeof(path), "%s/frame-%05lu.bmp", E.frame_dir, n);
+    }
     FILE *f = fopen(path, "wb");
     if (f) {
         uint32_t rowbytes = ((uint32_t)w * 3 + 3) & ~3u, size = 54 + rowbytes * (uint32_t)h;
@@ -190,6 +197,7 @@ static void save_frame(EGLDisplay d, EGLSurface s, unsigned long n)
             fwrite(row, 1, rowbytes, f);
         }
         free(row); fclose(f);
+        if (final_path[0]) rename(path, final_path);
     }
     free(rgba);
 }

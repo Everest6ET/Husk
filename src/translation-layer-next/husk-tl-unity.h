@@ -37,6 +37,12 @@ bool tl_unity_run(void);
 /* Frames rendered so far. */
 unsigned long tl_unity_frames(void);
 
+/*
+ * A touch, in screen pixels with y down. phase 0 begins it, 1 moves it, 2 ends it (3 cancels all).
+ * `id` names the finger. Safe to call from any thread.
+ */
+void tl_unity_touch(int phase, int id, float x, float y);
+
 /* Send a signal to the UnityMain thread (diagnostics: a backtrace handler in the host). */
 void tl_unity_poke(int signo);
 

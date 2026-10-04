@@ -159,7 +159,7 @@ static void proto_sig(const dexfile *x, uint32_t pi, char *out, size_t n)
     out[k] = 0;
 }
 
-static bool scan_members(const char *cls, bool want_method, const char *name, const char *sig, bool *is_static)
+static bool scan_members(const char *cls, bool want_method, const char *name, const char *sig, bool *is_static, char *sig_out, size_t sig_n)
 {
     const cls_ref *r = lookup(cls);
     if (!r) return false;
@@ -182,11 +182,13 @@ static bool scan_members(const char *cls, bool want_method, const char *name, co
                 uint32_t nameidx = u32(x, mo + 4); uint16_t protoidx = u16(x, mo + 2);
                 if (strcmp(str_of(x, nameidx), name)) continue;
                 if (sig && *sig) { char ps[512]; proto_sig(x, protoidx, ps, sizeof(ps)); if (strcmp(ps, sig)) continue; }
+                if (sig_out) proto_sig(x, protoidx, sig_out, sig_n);
             } else {
                 size_t fo = x->field_off + 8u * idx;
                 uint16_t typeidx = u16(x, fo + 2); uint32_t nameidx = u32(x, fo + 4);
                 if (strcmp(str_of(x, nameidx), name)) continue;
                 if (sig && *sig && strcmp(type_of(x, typeidx), sig)) continue;
+                if (sig_out) snprintf(sig_out, sig_n, "%s", type_of(x, typeidx));
             }
             if (is_static) *is_static = (flags & 8) != 0;
             return true;
@@ -195,5 +197,77 @@ static bool scan_members(const char *cls, bool want_method, const char *name, co
     return false;
 }
 
-bool tl_dexidx_declares_method(const char *cls, const char *name, const char *sig, bool *st) { return scan_members(cls, true, name, sig, st); }
-bool tl_dexidx_declares_field(const char *cls, const char *name, const char *sig, bool *st) { return scan_members(cls, false, name, sig, st); }
+/* Split "(A B C)R" into parameter descriptors; returns the count and points `ret` at R. */
+static int split_sig(const char *sig, const char **params, int *plen, int max, const char **ret)
+{
+    int n = 0;
+    const char *p = sig;
+    if (*p != '(') return -1;
+    p++;
+    while (*p && *p != ')' && n < max) {
+        const char *start = p;
+        while (*p == '[') p++;
+        if (*p == 'L') { while (*p && *p != ';') p++; if (*p) p++; } else if (*p) p++;
+        params[n] = start; plen[n] = (int)(p - start); n++;
+    }
+    if (*p != ')') return -1;
+    *ret = p + 1;
+    return n;
+}
+static bool is_object_desc(const char *d) { return d[0] == 'L' || d[0] == '['; }
+
+/*
+ * A method by name and parameters, tolerant the way Unity's reflection helper is: an argument given as
+ * "Ljava/lang/Object;" (null, or an AndroidJavaObject) fits any object parameter, and any object return type
+ * fits any other. Writes the declared signature to `out`.
+ */
+bool tl_dexidx_find_method_lenient(const char *cls, const char *name, const char *want, char *out, size_t n, bool *is_static)
+{
+    const cls_ref *r = lookup(cls);
+    if (!r) return false;
+    const dexfile *x = &g_dex[r->dex - 1];
+    uint32_t cdata = u32(x, x->class_off + 32u * r->def + 24);
+    if (!cdata) return false;
+    const char *wp[40]; int wl[40]; const char *wret;
+    int wn = split_sig(want, wp, wl, 40, &wret);
+    if (wn < 0) return false;
+    size_t o = cdata;
+    uint32_t nsf = uleb(x, &o), nif = uleb(x, &o), ndm = uleb(x, &o), nvm = uleb(x, &o);
+    uint32_t counts[4] = { nsf, nif, ndm, nvm };
+    int best = -1;
+    for (int group = 0; group < 4; group++) {
+        uint32_t idx = 0;
+        for (uint32_t i = 0; i < counts[group]; i++) {
+            idx += uleb(x, &o);
+            uint32_t flags = uleb(x, &o);
+            if (group >= 2) uleb(x, &o);
+            if (group < 2) continue;
+            size_t mo = x->meth_off + 8u * idx;
+            if (strcmp(str_of(x, u32(x, mo + 4)), name)) continue;
+            char ps[512]; proto_sig(x, u16(x, mo + 2), ps, sizeof(ps));
+            const char *dp[40]; int dl[40]; const char *dret;
+            int dn = split_sig(ps, dp, dl, 40, &dret);
+            if (dn != wn) continue;
+            /* An object argument fits any object parameter (a subclass, or Object for a null); the most exact fit wins. */
+            bool ok = true; int exact = 0;
+            for (int k = 0; k < dn && ok; k++) {
+                bool same = dl[k] == wl[k] && !strncmp(dp[k], wp[k], (size_t)dl[k]);
+                if (same) exact++;
+                else ok = is_object_desc(dp[k]) && is_object_desc(wp[k]);
+            }
+            if (!ok) continue;
+            if (!(is_object_desc(dret) && is_object_desc(wret)) && strcmp(dret, wret)) continue;
+            if (exact > best) {
+                best = exact;
+                snprintf(out, n, "%s", ps);
+                if (is_static) *is_static = (flags & 8) != 0;
+            }
+        }
+    }
+    return best >= 0;
+}
+
+bool tl_dexidx_declares_method(const char *cls, const char *name, const char *sig, bool *st) { return scan_members(cls, true, name, sig, st, NULL, 0); }
+bool tl_dexidx_declares_field(const char *cls, const char *name, const char *sig, bool *st) { return scan_members(cls, false, name, sig, st, NULL, 0); }
+bool tl_dexidx_field_sig(const char *cls, const char *name, char *out, size_t n) { return scan_members(cls, false, name, "", NULL, out, n); }
+bool tl_dexidx_method_named(const char *cls, const char *name) { return scan_members(cls, true, name, "", NULL, NULL, 0); }

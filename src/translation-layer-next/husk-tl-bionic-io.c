@@ -156,18 +156,38 @@ static int b_open(const char *path, int flags, unsigned mode)
     }
     TL_ERRNO_BEGIN();
     int fd = open(real, oflags_to_darwin(flags), mode);
+    int e = errno;
     TL_ERRNO_END();
+    { static int tr = -1; if (tr < 0) tr = getenv("TL_FILE_TRACE") ? 1 : 0; if (tr) tl_log_line("file: open(%s, %#x) -> %d%s", path, flags, fd, fd < 0 ? (e == ENOENT ? " ENOENT" : " error") : ""); }
     return fd;
 }
 static int b___open_2(const char *path, int flags) { return b_open(path, flags, 0); }
 static int b_close(int fd) { TL_ERRNO_BEGIN(); int r = close(fd); TL_ERRNO_END(); return r; }
-static long b_read(int fd, void *p, size_t n) { TL_ERRNO_BEGIN(); long r = read(fd, p, n); TL_ERRNO_END(); return r; }
+static bool net_trace_fd(int fd)
+{
+    static int on = -1;
+    if (on < 0) on = getenv("TL_NET_TRACE") ? 1 : 0;
+    if (!on) return false;
+    struct stat st;
+    return fstat(fd, &st) == 0 && S_ISSOCK(st.st_mode);
+}
+static long b_read(int fd, void *p, size_t n)
+{
+    TL_ERRNO_BEGIN(); long r = read(fd, p, n); int e = errno; TL_ERRNO_END();
+    if (net_trace_fd(fd)) tl_log_line("net: read(fd %d, %zu) -> %ld errno %d", fd, n, r, r < 0 ? e : 0);
+    return r;
+}
 static long b___read_chk(int fd, void *p, size_t n, size_t bufsz)
 {
     if (n > bufsz) { tl_log_line("bionic: __read_chk overflow"); abort(); }
     return b_read(fd, p, n);
 }
-static long b_write(int fd, const void *p, size_t n) { TL_ERRNO_BEGIN(); long r = write(fd, p, n); TL_ERRNO_END(); return r; }
+static long b_write(int fd, const void *p, size_t n)
+{
+    TL_ERRNO_BEGIN(); long r = write(fd, p, n); int e = errno; TL_ERRNO_END();
+    if (net_trace_fd(fd)) tl_log_line("net: write(fd %d, %zu) -> %ld errno %d", fd, n, r, r < 0 ? e : 0);
+    return r;
+}
 static long b_writev(int fd, const struct iovec *v, int n) { TL_ERRNO_BEGIN(); long r = writev(fd, v, n); TL_ERRNO_END(); return r; }
 static long b_pread64(int fd, void *p, size_t n, long off) { TL_ERRNO_BEGIN(); long r = pread(fd, p, n, off); TL_ERRNO_END(); return r; }
 static long b_lseek(int fd, long off, int whence) { TL_ERRNO_BEGIN(); long r = lseek(fd, off, whence); TL_ERRNO_END(); return r; }
@@ -678,10 +698,18 @@ long tl_linux_syscall(long a0, long a1, long a2, long a3, long a4, long a5, long
 
 /* ------------------------------------------------------- poll, select, etc. */
 
-static int b_poll(struct pollfd *fds, unsigned long n, int timeout) { TL_ERRNO_BEGIN(); int r = poll(fds, (nfds_t)n, timeout); TL_ERRNO_END(); return r; }
+static int b_poll(struct pollfd *fds, unsigned long n, int timeout)
+{
+    TL_ERRNO_BEGIN(); int r = poll(fds, (nfds_t)n, timeout); TL_ERRNO_END();
+    for (unsigned long i = 0; i < n && i < 4; i++)
+        if (net_trace_fd(fds[i].fd)) { tl_log_line("net: poll(%lu fds, fd[%lu] %d ev %#x, timeout %d) -> %d rev %#x", n, i, fds[i].fd, fds[i].events, timeout, r, r > 0 ? fds[i].revents : 0); break; }
+    return r;
+}
 static int b_select(int n, fd_set *r, fd_set *w, fd_set *e, struct timeval *tv)
 {
-    TL_ERRNO_BEGIN(); int x = select(n, r, w, e, tv); TL_ERRNO_END(); return x;
+    TL_ERRNO_BEGIN(); int x = select(n, r, w, e, tv); TL_ERRNO_END();
+    if (net_trace_fd(n - 1)) tl_log_line("net: select(%d, %s%s) -> %d", n, r ? "r" : "", w ? "w" : "", x);
+    return x;
 }
 static void b___FD_SET_chk(int fd, uint64_t *set, size_t size)
 {
@@ -710,34 +738,6 @@ static int b_eventfd(unsigned a, int b) { (void)a; (void)b; return stub_enosys_i
 static int b_inotify_init(void) { return stub_enosys_i("inotify_init"); }
 static int b_inotify_add_watch(int a, const char *b, unsigned c) { (void)a; (void)b; (void)c; return stub_enosys_i("inotify_add_watch"); }
 
-/* Sockets: offline for now. A refused socket is a condition code already handles. */
-static int sock_down(const char *what) { char n[96]; snprintf(n, sizeof(n), "%s: networking is not provided (ENETDOWN)", what); tl_note_once(n); tl_set_guest_errno(100); return -1; }
-static int b_socket(int a, int b, int c) { (void)a; (void)b; (void)c; return sock_down("socket"); }
-static int b_bind(int a, const void *b, unsigned c) { (void)a; (void)b; (void)c; return sock_down("bind"); }
-static int b_connect(int a, const void *b, unsigned c) { (void)a; (void)b; (void)c; return sock_down("connect"); }
-static int b_listen(int a, int b) { (void)a; (void)b; return sock_down("listen"); }
-static int b_accept(int a, void *b, void *c) { (void)a; (void)b; (void)c; return sock_down("accept"); }
-static long b_send(int a, const void *b, size_t c, int d) { (void)a; (void)b; (void)c; (void)d; return sock_down("send"); }
-static long b_recv(int a, void *b, size_t c, int d) { (void)a; (void)b; (void)c; (void)d; return sock_down("recv"); }
-static long b_sendto(int a, const void *b, size_t c, int d, const void *e, unsigned f) { (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; return sock_down("sendto"); }
-static long b_recvfrom(int a, void *b, size_t c, int d, void *e, void *f) { (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; return sock_down("recvfrom"); }
-static long b_sendmsg(int a, const void *b, int c) { (void)a; (void)b; (void)c; return sock_down("sendmsg"); }
-static long b_recvmsg(int a, void *b, int c) { (void)a; (void)b; (void)c; return sock_down("recvmsg"); }
-static int b_shutdown(int a, int b) { (void)a; (void)b; return sock_down("shutdown"); }
-static int b_getsockname(int a, void *b, void *c) { (void)a; (void)b; (void)c; return sock_down("getsockname"); }
-static int b_getpeername(int a, void *b, void *c) { (void)a; (void)b; (void)c; return sock_down("getpeername"); }
-static int b_setsockopt(int a, int b, int c, const void *d, unsigned e) { (void)a; (void)b; (void)c; (void)d; (void)e; return sock_down("setsockopt"); }
-static int b_getsockopt(int a, int b, int c, void *d, void *e) { (void)a; (void)b; (void)c; (void)d; (void)e; return sock_down("getsockopt"); }
-static int b_getaddrinfo(const char *a, const char *b, const void *c, void **d) { (void)a; (void)b; (void)c; (void)d; return 8; /* EAI_NONAME */ }
-static void b_freeaddrinfo(void *a) { (void)a; }
-static int b_getnameinfo(const void *a, unsigned b, char *c, unsigned d, char *e, unsigned f, int g) { (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; (void)g; return 8; }
-static void *b_gethostbyname(const char *n) { (void)n; return NULL; }
-static void *b_gethostbyaddr(const void *a, unsigned b, int c) { (void)a; (void)b; (void)c; return NULL; }
-static unsigned b_if_nametoindex(const char *n) { (void)n; return 0; }
-static uint32_t b_inet_addr(const char *s) { return inet_addr(s); }
-static int b_inet_pton(int af, const char *src, void *dst) { return inet_pton(af == 10 ? AF_INET6 : af, src, dst); }
-static const char *b_inet_ntop(int af, const void *src, char *dst, unsigned size) { return inet_ntop(af == 10 ? AF_INET6 : af, src, dst, size); }
-
 const tl_bionic_entry tl_tab_io[] = {
     TL_WRAP("open", b_open), TL_WRAP("__open_2", b___open_2), TL_WRAP("close", b_close), TL_WRAP("read", b_read),
     TL_WRAP("__read_chk", b___read_chk), TL_WRAP("write", b_write), TL_WRAP("writev", b_writev),
@@ -765,13 +765,5 @@ const tl_bionic_entry tl_tab_io[] = {
     TL_WRAP("__FD_ISSET_chk", b___FD_ISSET_chk), TL_WRAP("__cmsg_nxthdr", b___cmsg_nxthdr),
     TL_WRAP("epoll_create1", b_epoll_create1), TL_WRAP("epoll_ctl", b_epoll_ctl), TL_WRAP("epoll_wait", b_epoll_wait),
     TL_WRAP("eventfd", b_eventfd), TL_WRAP("inotify_init", b_inotify_init), TL_WRAP("inotify_add_watch", b_inotify_add_watch),
-    TL_WRAP("socket", b_socket), TL_WRAP("bind", b_bind), TL_WRAP("connect", b_connect), TL_WRAP("listen", b_listen),
-    TL_WRAP("accept", b_accept), TL_WRAP("send", b_send), TL_WRAP("recv", b_recv), TL_WRAP("sendto", b_sendto),
-    TL_WRAP("recvfrom", b_recvfrom), TL_WRAP("sendmsg", b_sendmsg), TL_WRAP("recvmsg", b_recvmsg),
-    TL_WRAP("shutdown", b_shutdown), TL_WRAP("getsockname", b_getsockname), TL_WRAP("getpeername", b_getpeername),
-    TL_WRAP("setsockopt", b_setsockopt), TL_WRAP("getsockopt", b_getsockopt), TL_WRAP("getaddrinfo", b_getaddrinfo),
-    TL_WRAP("freeaddrinfo", b_freeaddrinfo), TL_WRAP("getnameinfo", b_getnameinfo), TL_WRAP("gethostbyname", b_gethostbyname),
-    TL_WRAP("gethostbyaddr", b_gethostbyaddr), TL_WRAP("if_nametoindex", b_if_nametoindex),
-    TL_WRAP("inet_addr", b_inet_addr), TL_WRAP("inet_pton", b_inet_pton), TL_WRAP("inet_ntop", b_inet_ntop),
     TL_END
 };

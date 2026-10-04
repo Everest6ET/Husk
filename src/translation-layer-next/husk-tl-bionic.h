@@ -41,6 +41,7 @@ typedef struct tl_bionic_entry {
 extern const tl_bionic_entry tl_tab_core[];
 extern const tl_bionic_entry tl_tab_str[];
 extern const tl_bionic_entry tl_tab_io[];
+extern const tl_bionic_entry tl_tab_net[];
 extern const tl_bionic_entry tl_tab_pthread[];
 extern const tl_bionic_entry tl_tab_ndk[];
 extern const tl_bionic_entry tl_tab_egl[];

@@ -278,6 +278,63 @@ static void install_probes(void)
     for (size_t i = 0; i < sizeof(ps) / sizeof(ps[0]); i++) if (!tl_ld_probe(L, ps[i].off, ps[i].cb)) fprintf(stderr, "probe at %#llx failed\n", (unsigned long long)ps[i].off);
 }
 
+/* TL_TOUCH="ms:phase:id:x,y;..." replays touches at those times (ms since start); phase 0 down, 1 move, 2 up. */
+static void *touch_script(void *arg)
+{
+    const char *p = arg;
+    struct timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0);
+    while (p && *p) {
+        long ms; int phase, id; float x, y; int n = 0;
+        if (sscanf(p, "%ld:%d:%d:%f,%f%n", &ms, &phase, &id, &x, &y, &n) < 5) break;
+        for (;;) {
+            struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
+            long el = (t.tv_sec - t0.tv_sec) * 1000 + (t.tv_nsec - t0.tv_nsec) / 1000000;
+            if (el >= ms) break;
+            usleep(5000);
+        }
+        fprintf(stderr, "touch: phase %d id %d at %.0f,%.0f\n", phase, id, x, y);
+        tl_unity_touch(phase, id, x, y);
+        p += n;
+        while (*p == ';' || *p == ' ') p++;
+    }
+    return NULL;
+}
+
+/* TL_CTL=/path/to/fifo: lines "tap X Y", "hold X Y MS", "swipe X1 Y1 X2 Y2 MS", "shot PNGPATH", "quit". */
+static const char *g_frame_dir;
+static void sleep_ms(long ms) { usleep((useconds_t)ms * 1000); }
+static void do_swipe(float x1, float y1, float x2, float y2, long ms)
+{
+    int steps = (int)(ms / 16); if (steps < 2) steps = 2;
+    tl_unity_touch(0, 0, x1, y1);
+    for (int i = 1; i <= steps; i++) { sleep_ms(ms / steps); tl_unity_touch(1, 0, x1 + (x2 - x1) * i / steps, y1 + (y2 - y1) * i / steps); }
+    tl_unity_touch(2, 0, x2, y2);
+}
+static void *control_thread(void *arg)
+{
+    const char *path = arg;
+    for (;;) {
+        FILE *f = fopen(path, "r");
+        if (!f) { sleep_ms(200); continue; }
+        char line[512];
+        while (fgets(line, sizeof(line), f)) {
+            float a, b, c, d; long ms; char p[400];
+            if (sscanf(line, "tap %f %f", &a, &b) == 2) { tl_unity_touch(0, 0, a, b); sleep_ms(60); tl_unity_touch(2, 0, a, b); }
+            else if (sscanf(line, "hold %f %f %ld", &a, &b, &ms) == 3) { tl_unity_touch(0, 0, a, b); sleep_ms(ms); tl_unity_touch(2, 0, a, b); }
+            else if (sscanf(line, "swipe %f %f %f %f %ld", &a, &b, &c, &d, &ms) == 5) do_swipe(a, b, c, d, ms);
+            else if (sscanf(line, "wait %ld", &ms) == 1) sleep_ms(ms);
+            else if (sscanf(line, "shot %399s", p) == 1) {
+                char cmd[900]; snprintf(cmd, sizeof(cmd), "sips -s format png '%s/latest.bmp' --out '%s' >/dev/null 2>&1", g_frame_dir, p);
+                if (system(cmd)) fprintf(stderr, "ctl: shot failed\n");
+                else fprintf(stderr, "ctl: shot %s (frame %lu)\n", p, tl_unity_frames());
+            }
+            else if (!strncmp(line, "quit", 4)) { fprintf(stderr, "ctl: quit\n"); fflush(stderr); _exit(0); }
+        }
+        fclose(f);
+    }
+    return NULL;
+}
+
 static int print_lib(uintptr_t bias, const char *name, const void *phdr, unsigned phnum, void *user)
 {
     (void)phdr; (void)phnum; (void)user;
@@ -307,13 +364,16 @@ int main(int argc, char **argv)
     fprintf(stderr, "frames: %s\n", frames);
     tl_unity_config cfg = { .apk_path = argv[1], .data_dir = tmp, .package_name = "com.kiloo.subwaysurf", .width = 540, .height = 1200,
                             .angle_egl = getenv("TL_ANGLE_EGL") ? getenv("TL_ANGLE_EGL") : egl, .angle_gles = getenv("TL_ANGLE_GLES") ? getenv("TL_ANGLE_GLES") : gles,
-                            .frame_dir = frames, .frame_every = 30 };
+                            .frame_dir = frames, .frame_every = getenv("TL_CTL") ? -6 : 30 };
+    g_frame_dir = frames;
     if (!tl_unity_start(&cfg)) { fprintf(stderr, "unity: start failed\n"); return 1; }
     if (getenv("TL_PROBES")) install_probes();
     if (getenv("TL_ICALL_PROBES")) install_icall_probes();
     if (getenv("TL_STOP_EARLY")) { tl_ld_iterate(print_lib, NULL); raise(SIGSTOP); }
     if (!tl_unity_run()) { fprintf(stderr, "unity: run failed\n"); return 1; }
     tl_ld_iterate(print_lib, NULL);
+    if (getenv("TL_CTL")) { static pthread_t ct; pthread_create(&ct, NULL, control_thread, getenv("TL_CTL")); }
+    if (getenv("TL_TOUCH")) { static pthread_t tt; pthread_create(&tt, NULL, touch_script, getenv("TL_TOUCH")); }
     if (getenv("TL_MONITOR")) { tl_ld_iterate(find_unity, NULL); pthread_t mt; pthread_create(&mt, NULL, monitor, NULL); }
     int secs = argc > 2 ? atoi(argv[2]) : 5;
     if (getenv("TL_STOP_AT")) { sleep((unsigned)atoi(getenv("TL_STOP_AT"))); raise(SIGSTOP); }

@@ -34,6 +34,11 @@ const char *tl_dexidx_super(const char *name, char *buf, size_t n);
 bool tl_dexidx_declares_method(const char *cls, const char *name, const char *sig, bool *is_static);
 bool tl_dexidx_declares_field(const char *cls, const char *name, const char *sig, bool *is_static);
 
+/* The declared signature of a field by name, or whether any method has this name, ignoring signatures. */
+bool tl_dexidx_field_sig(const char *cls, const char *name, char *out, size_t n);
+bool tl_dexidx_method_named(const char *cls, const char *name);
+bool tl_dexidx_find_method_lenient(const char *cls, const char *name, const char *want, char *out, size_t n, bool *is_static);
+
 #ifdef __cplusplus
 }
 #endif

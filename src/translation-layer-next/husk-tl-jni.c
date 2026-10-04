@@ -210,6 +210,32 @@ static tl_jhle_fn hle_find(const char *cls, const char *name, const char *sig)
     return NULL;
 }
 
+/* Whether two signatures differ only in which object types they name: what Unity's reflection fallback treats as the same call. */
+static bool sig_loosely_equal(const char *a, const char *b)
+{
+    if (*a != '(' || *b != '(') return false;
+    while (*a && *b) {
+        if ((*a == 'L' || *a == '[') && (*b == 'L' || *b == '[')) {
+            while (*a == '[') a++;
+            while (*b == '[') b++;
+            if (*a == 'L') { while (*a && *a != ';') a++; if (*a) a++; } else if (*a) a++;
+            if (*b == 'L') { while (*b && *b != ';') b++; if (*b) b++; } else if (*b) b++;
+            continue;
+        }
+        if (*a != *b) return false;
+        a++; b++;
+    }
+    return *a == *b;
+}
+
+static tl_jhle_fn hle_find_loose(const char *cls, const char *name, const char *sig)
+{
+    for (int t = 0; t < g_nhle; t++)
+        for (const tl_jhle *e = g_hle[t]; e->cls; e++)
+            if (!strcmp(e->cls, cls) && !strcmp(e->name, name) && e->sig && sig_loosely_equal(e->sig, sig)) return e->fn;
+    return NULL;
+}
+
 /* Find or make the method `name`/`sig`, walking superclasses for an implementation. */
 static tl_jmeth *lookup_method(tl_jclass *cls, const char *name, const char *sig, bool is_static)
 {
@@ -225,12 +251,17 @@ static tl_jmeth *lookup_method(tl_jclass *cls, const char *name, const char *sig
     tl_jhle_fn fn = NULL; bool dex_decl = false, framework = false;
     for (tl_jclass *c = cls; c; c = c->super) {
         if (!fn) fn = hle_find(c->name, name, sig);
+        if (!fn) fn = hle_find_loose(c->name, name, sig);
         if (c->in_dex) { if (!dex_decl && tl_dexidx_declares_method(c->name, name, sig, NULL)) dex_decl = true; }
         else if (strcmp(c->name, "java/lang/Object")) framework = true;
         else if (!strcmp(name, "<init>") || !strcmp(name, "toString") || !strcmp(name, "hashCode") || !strcmp(name, "equals")
                  || !strcmp(name, "getClass") || !strcmp(name, "notify") || !strcmp(name, "notifyAll") || !strcmp(name, "wait")) dex_decl = true;
     }
-    bool exists = fn || dex_decl || framework;
+    /* A class the APK defines that has a method of this name, but not with this signature, does not have
+     * this method: ART says NoSuchMethodError and Unity falls back to reflection, which is what is wanted. */
+    bool dex_other_sig = false;
+    if (!fn && !dex_decl) for (tl_jclass *c = cls; c; c = c->super) if (c->in_dex && tl_dexidx_method_named(c->name, name)) { dex_other_sig = true; break; }
+    bool exists = fn || dex_decl || (framework && !dex_other_sig);
 
     tl_jmeth *m = calloc(1, sizeof(*m));
     m->cls = cls; m->name = strdup(name); m->sig = strdup(sig); m->is_static = is_static;
@@ -241,6 +272,13 @@ static tl_jmeth *lookup_method(tl_jclass *cls, const char *name, const char *sig
     cls->meths[cls->nmeths++] = m;
     pthread_mutex_unlock(&g_lock);
     return m;
+}
+
+/* The signature the APK declares for a field of this name, anywhere up the chain of classes it defines. */
+static bool dex_field_real_sig(tl_jclass *cls, const char *name, char *out, size_t n)
+{
+    for (tl_jclass *c = cls; c; c = c->super) if (c->in_dex && tl_dexidx_field_sig(c->name, name, out, n)) return true;
+    return false;
 }
 
 static tl_jfield *lookup_field(tl_jclass *cls, const char *name, const char *sig, bool is_static, bool create)
@@ -576,7 +614,9 @@ static void *jni_GetFieldID_impl(jo cls, const char *name, const char *sig, bool
         tl_jni_throw("java/lang/NullPointerException", "class is null");
         return NULL;
     }
-    tl_jfield *f = lookup_field(cls->klass.jc, name, sig, is_static, false);
+    char real[200];
+    bool mismatch = dex_field_real_sig(cls->klass.jc, name, real, sizeof(real)) && strcmp(real, sig) != 0;
+    tl_jfield *f = mismatch ? NULL : lookup_field(cls->klass.jc, name, sig, is_static, false);
     TRACE("jni: Get%sFieldID(%s, %s %s) -> %s", is_static ? "Static" : "", cls->klass.jc->name, name, sig, f ? "ok" : "NOT FOUND");
     if (!f) { char msg[300]; snprintf(msg, sizeof(msg), "no field \"%s\" %s", name, sig); tl_jni_throw("java/lang/NoSuchFieldError", msg); }
     return f;
@@ -597,6 +637,15 @@ jobj *tl_jni_reflect_method(jobj *cls, const char *name, const char *sig, bool i
 {
     if (!cls || cls->kind != TL_K_CLASS) return NULL;
     tl_jmeth *m = lookup_method(cls->klass.jc, name, sig, is_static);
+    if (!m || !m->exists) {
+        /* The real helper matches by name and parameters, with an Object argument fitting any object parameter. */
+        char real[512]; bool st = false;
+        for (tl_jclass *c = cls->klass.jc; c; c = c->super)
+            if (c->in_dex && tl_dexidx_find_method_lenient(c->name, name, sig, real, sizeof(real), &st) && st == is_static) {
+                m = lookup_method(cls->klass.jc, name, real, is_static);
+                break;
+            }
+    }
     if (!m || !m->exists) return NULL;
     return reflected(!strcmp(name, "<init>") ? "java/lang/reflect/Constructor" : "java/lang/reflect/Method", m);
 }
@@ -604,6 +653,11 @@ jobj *tl_jni_reflect_method(jobj *cls, const char *name, const char *sig, bool i
 jobj *tl_jni_reflect_field(jobj *cls, const char *name, const char *sig, bool is_static)
 {
     if (!cls || cls->kind != TL_K_CLASS) return NULL;
+    /* The real helper finds a field by name; Unity passes "Ljava/lang/Object;" for any object-typed field. */
+    char real[200];
+    if (dex_field_real_sig(cls->klass.jc, name, real, sizeof(real)) && strcmp(real, sig) != 0
+        && (real[0] == 'L' || real[0] == '[') && (sig[0] == 'L' || sig[0] == '['))
+        sig = real;
     tl_jfield *f = lookup_field(cls->klass.jc, name, sig, is_static, false);
     return f ? reflected("java/lang/reflect/Field", f) : NULL;
 }
@@ -632,7 +686,8 @@ const char *tl_jni_reflected_sig(const jobj *member)
 static void *jni_FromReflectedMethod(void *env, jo m)
 {
     (void)env;
-    if (!m || !m->native) { tl_jni_throw("java/lang/NullPointerException", "reflected method is null"); return NULL; }
+    if (!m || !m->native) { TRACE("jni: FromReflectedMethod(%s) -> NPE", m ? "no member" : "NULL"); tl_jni_throw("java/lang/NullPointerException", "reflected method is null"); return NULL; }
+    TRACE("jni: FromReflectedMethod -> %s.%s%s", ((tl_jmeth *)m->native)->cls->name, ((tl_jmeth *)m->native)->name, ((tl_jmeth *)m->native)->sig);
     return m->native;
 }
 static void *jni_FromReflectedField(void *env, jo f)

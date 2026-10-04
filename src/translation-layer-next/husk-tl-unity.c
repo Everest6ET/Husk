@@ -142,6 +142,63 @@ bool tl_unity_run(void)
     return true;
 }
 
+/* ----------------------------------------------------------------- touch */
+
+extern jobj *tl_input_motion_event(int action, int count, const int *ids, const float *xs, const float *ys, int64_t down_ms, int64_t event_ms);
+
+static struct {
+    pthread_mutex_t lock;
+    int n, ids[10];
+    float x[10], y[10];
+    int64_t down_ms;
+} T = { .lock = PTHREAD_MUTEX_INITIALIZER };
+
+static int64_t uptime_ms(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000; }
+
+void tl_unity_touch(int phase, int id, float x, float y)
+{
+    typedef uint8_t (*inject_fn)(void *env, void *self, void *event, uintptr_t source);
+    inject_fn fn = (inject_fn)native_of("com/unity3d/player/UnityPlayer", "nativeInjectEvent", "(Landroid/view/InputEvent;I)Z");
+    if (!fn) return;
+    pthread_mutex_lock(&T.lock);
+    int idx = -1;
+    for (int i = 0; i < T.n; i++) if (T.ids[i] == id) idx = i;
+    int64_t now = uptime_ms();
+    int action;
+    if (phase == 0) {
+        if (idx < 0 && T.n < 10) { idx = T.n++; T.ids[idx] = id; }
+        if (idx < 0) { pthread_mutex_unlock(&T.lock); return; }
+        T.x[idx] = x; T.y[idx] = y;
+        if (T.n == 1) T.down_ms = now;
+        action = T.n == 1 ? 0 /* ACTION_DOWN */ : (5 /* ACTION_POINTER_DOWN */ | (idx << 8));
+    } else if (phase == 1) {
+        if (idx < 0) { pthread_mutex_unlock(&T.lock); return; }
+        T.x[idx] = x; T.y[idx] = y;
+        action = 2; /* ACTION_MOVE */
+    } else if (phase == 3) {
+        action = 3; /* ACTION_CANCEL */
+    } else {
+        if (idx < 0) { pthread_mutex_unlock(&T.lock); return; }
+        T.x[idx] = x; T.y[idx] = y;
+        action = T.n == 1 ? 1 /* ACTION_UP */ : (6 /* ACTION_POINTER_UP */ | (idx << 8));
+    }
+    jobj *ev = tl_input_motion_event(action, T.n, T.ids, T.x, T.y, T.down_ms, now);
+    /* An ended touch leaves the set after the event that reports it. */
+    if (phase == 2 && idx >= 0) {
+        float lx[10], ly[10]; int li[10];
+        memcpy(lx, T.x, sizeof(lx)); memcpy(ly, T.y, sizeof(ly)); memcpy(li, T.ids, sizeof(li));
+        int n = 0;
+        for (int i = 0; i < T.n; i++) if (i != idx) { T.ids[n] = li[i]; T.x[n] = lx[i]; T.y[n] = ly[i]; n++; }
+        T.n = n;
+    } else if (phase == 3) {
+        T.n = 0;
+    }
+    pthread_mutex_unlock(&T.lock);
+    fn(tl_jni_env(), U.player, ev, 0);
+    if (tl_jni_pending()) tl_jni_clear();
+    tl_jni_unref(ev);
+}
+
 unsigned long tl_unity_frames(void) { return atomic_load(&U.frames); }
 void tl_unity_poke(int signo) { if (U.thread_started) pthread_kill(U.thread, signo); }
 

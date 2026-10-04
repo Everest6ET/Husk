@@ -211,6 +211,18 @@ typedef jobj *(*bridge_invoke_fn)(void *env, void *cls, int64_t handle, void *if
 static jobj *proxy_call(jobj *proxy, const char *iface, const char *name, const char *sig, jobj **args, int nargs)
 {
     if (!proxy || strcmp(tl_jni_class_name(proxy), "java/lang/reflect/Proxy")) return NULL;
+    if (tl_jni_get_field(proxy, "style", "I").i == 2) {
+        typedef jobj *(*proxy_invoke_fn)(void *env, void *cls, int64_t handle, void *name, void *args);
+        proxy_invoke_fn pf = tl_jni_native("com/unity3d/player/ReflectionHelper", "nativeProxyInvoke", "(JLjava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;");
+        if (!pf) return NULL;
+        jobj *arr2 = tl_jni_new_obj_array(C("java/lang/Object"), (uint32_t)nargs);
+        for (int i = 0; i < nargs; i++) arr2->oarr.v[i] = tl_jni_ref(args[i]);
+        jobj *nm = tl_jni_new_string(name);
+        jobj *r2 = pf(tl_jni_env(), tl_jni_class_object("com/unity3d/player/ReflectionHelper"), tl_jni_get_field(proxy, "handle", "J").j, nm, arr2);
+        if (tl_jni_pending()) tl_jni_clear();
+        tl_jni_unref(nm); tl_jni_unref(arr2);
+        return r2;
+    }
     bridge_invoke_fn fn = tl_jni_native("bitter/jnibridge/JNIBridge", "invoke", "(JLjava/lang/Class;Ljava/lang/reflect/Method;[Ljava/lang/Object;)Ljava/lang/Object;");
     if (!fn) { tl_log_line("looper: JNIBridge.invoke is not registered; cannot call %s.%s", iface, name); return NULL; }
     jobj *icls = tl_jni_class_object(iface);

@@ -333,7 +333,9 @@ static void Reflection_getConstructorID(tl_jcall *c)
 static void Reflection_getMethodID(tl_jcall *c)
 {
     char b[400];
-    c->ret = vl(tl_jni_reflect_method(c->args[0].l, S(c->args[1].l), slashed(S(c->args[2].l), b, sizeof(b)), c->args[3].z != 0));
+    jobj *m = tl_jni_reflect_method(c->args[0].l, S(c->args[1].l), slashed(S(c->args[2].l), b, sizeof(b)), c->args[3].z != 0);
+    if (!m) tl_log_line("jni: reflection found no %smethod %s.%s%s", c->args[3].z ? "static " : "", tl_jni_class_name(c->args[0].l), S(c->args[1].l), b);
+    c->ret = vl(m);
 }
 static void Reflection_getFieldID(tl_jcall *c)
 {
@@ -347,6 +349,38 @@ static void Reflection_getFieldSignature(tl_jcall *c)
 }
 static void Member_getDeclaringClass(tl_jcall *c) { c->ret = vl(tl_jni_reflected_declaring_class(c->self)); }
 
+
+/* ------------------------------------------------- the app's own small Java classes */
+
+/* The DEX says getUserdataPath is currentActivity.getFilesDir().getAbsolutePath(). */
+static void Kiloo_getUserdataPath(tl_jcall *c) { c->ret = vl(STR(H.files)); }
+static void Locale_getDefault(tl_jcall *c) { c->ret = vl(make("java/util/Locale")); }
+static void Locale_toLanguageTag(tl_jcall *c) { c->ret = vl(STR("en-US")); }
+static void Locale_getLanguage(tl_jcall *c) { c->ret = vl(STR("en")); }
+static void Locale_getCountry(tl_jcall *c) { c->ret = vl(STR("US")); }
+static void PreciseLocale_getRegion(tl_jcall *c) { c->ret = vl(STR("US")); }
+static void Chipset_name(tl_jcall *c) { c->ret = vl(STR("Apple")); }
+static void Log_getStackTraceString(tl_jcall *c)
+{
+    const char *m = c->args[0].l ? S(tl_jni_get_field(c->args[0].l, "detailMessage", "Ljava/lang/String;").l) : "";
+    char buf[400]; snprintf(buf, sizeof(buf), "%s: %s", c->args[0].l ? tl_jni_class_name(c->args[0].l) : "null", m);
+    c->ret = vl(STR(buf));
+}
+static void DiskUtils_availableSpace(tl_jcall *c) { c->ret = vi(20000); }     /* megabytes free */
+/* Unity's notifications package asks its Java manager for an instance and calls methods on it; a manager whose methods do nothing is enough. */
+static void NotificationManager_get(tl_jcall *c) { c->ret = vl(make("com/unity/androidnotifications/UnityNotificationManager")); }
+/* The newer proxy path: ReflectionHelper builds a java.lang.reflect.Proxy whose calls go to nativeProxyInvoke(handle, name, args). */
+static void Reflection_newProxyInstance(tl_jcall *c)
+{
+    jobj *p = make("java/lang/reflect/Proxy");
+    jvalue h; h.j = c->args[1].j;
+    tl_jni_set_field(p, "handle", "J", h);
+    tl_jni_set_field(p, "style", "I", vi(2));
+    c->ret = vl(p);
+}
+static void Activity_getApplication(tl_jcall *c) { static jobj *app; if (!app) app = make("android/app/Application"); c->ret = vl(app); }
+static void Zero_int(tl_jcall *c) { c->ret = vi(0); }
+static void Unity_getNetworkConnectivity(tl_jcall *c) { c->ret = vi(0); }     /* NotReachable: sockets are not implemented */
 
 /* ------------------------------------------------- dialogs: say what they say */
 
@@ -561,7 +595,7 @@ static const struct { const char *name, *super; } k_classes[] = {
     { "android/os/Build", "java/lang/Object" }, { "android/os/Build$VERSION", "java/lang/Object" },
     { "android/os/Environment", "java/lang/Object" }, { "android/os/Process", "java/lang/Object" },
     { "android/content/SharedPreferences", "java/lang/Object" }, { "android/content/Intent", "java/lang/Object" },
-    { "bitter/jnibridge/JNIBridge", "java/lang/Object" },
+    { "bitter/jnibridge/JNIBridge", "java/lang/Object" }, { "java/util/Locale", "java/lang/Object" }, { "android/app/Application", "android/content/Context" },
     { "com/unity3d/player/ReflectionHelper", "java/lang/Object" }, { "java/lang/reflect/Member", "java/lang/Object" },
     { "java/lang/reflect/Method", "java/lang/Object" }, { "java/lang/reflect/Constructor", "java/lang/Object" }, { "java/lang/reflect/Field", "java/lang/Object" },
     { "java/lang/StringBuilder", "java/lang/Object" }, { "java/io/InputStream", "java/lang/Object" },
@@ -578,6 +612,24 @@ static const struct { const char *name, *super; } k_classes[] = {
 static const tl_jhle k_hle[] = {
     M("java/lang/System", "load", "(Ljava/lang/String;)V", System_load),
     M("java/lang/System", "loadLibrary", "(Ljava/lang/String;)V", System_loadLibrary),
+    M("com/sybogames/chili/migration/KilooPlatformAndroidBridge", "<init>", "()V", Noop),
+    M("com/sybogames/chili/migration/KilooPlatformAndroidBridge", "getUserdataPath", "()Ljava/lang/String;", Kiloo_getUserdataPath),
+    M("java/util/Locale", "getDefault", "()Ljava/util/Locale;", Locale_getDefault),
+    M("java/util/Locale", "toLanguageTag", "()Ljava/lang/String;", Locale_toLanguageTag),
+    M("java/util/Locale", "getLanguage", "()Ljava/lang/String;", Locale_getLanguage),
+    M("java/util/Locale", "getCountry", "()Ljava/lang/String;", Locale_getCountry),
+    M("com/kokosoft/preciselocale/PreciseLocale", "getLanguage", "()Ljava/lang/String;", Locale_getLanguage),
+    M("com/kokosoft/preciselocale/PreciseLocale", "getLanguageID", "()Ljava/lang/String;", Locale_getLanguage),
+    M("com/kokosoft/preciselocale/PreciseLocale", "getRegion", "()Ljava/lang/String;", PreciseLocale_getRegion),
+    M("com/sybo/analytics/ChipsetUtils", "GetChipsetName", "()Ljava/lang/String;", Chipset_name),
+    M("com/unity/androidnotifications/UnityNotificationManager", "getNotificationManagerImpl", "(Ljava/lang/Object;Lcom/unity/androidnotifications/NotificationCallback;)Ljava/lang/Object;", NotificationManager_get),
+    M("com/unity3d/player/ReflectionHelper", "newProxyInstance", "(Lcom/unity3d/player/UnityPlayer;JLjava/lang/Class;)Ljava/lang/Object;", Reflection_newProxyInstance),
+    M("android/app/Activity", "getApplication", "()Landroid/app/Application;", Activity_getApplication),
+    M("android/app/Activity", "getApplication", "()Ljava/lang/Object;", Activity_getApplication),
+    M("com/dikra/diskutils/DiskUtils", "availableSpace", "(Z)I", DiskUtils_availableSpace),
+    M("com/sybogames/chili/SidekickHelper", "getSidekickExperimentInfo", "()I", Zero_int),
+    M("android/util/Log", "getStackTraceString", "(Ljava/lang/Throwable;)Ljava/lang/String;", Log_getStackTraceString),
+    M("com/unity3d/player/UnityPlayer", "getNetworkConnectivity", "()I", Unity_getNetworkConnectivity),
     M("java/lang/Object", "toString", "()Ljava/lang/String;", Object_toString),
     M("java/lang/Object", "hashCode", "()I", Object_hashCode),
     M("java/lang/Object", "equals", "(Ljava/lang/Object;)Z", Object_equals),
@@ -745,12 +797,16 @@ void tl_hle_configure(const char *pkg, const char *apk, const char *data, int w,
 jobj *tl_hle_activity(void) { return H.activity; }
 
 extern void tl_loop_install(void);
+extern void tl_input_install(void);
+extern void tl_tls_install(void);
 void tl_jni_hle_install(void)
 {
     for (size_t i = 0; i < sizeof(k_classes) / sizeof(k_classes[0]); i++) tl_jni_declare(k_classes[i].name, k_classes[i].super);
     tl_jni_register_hle(k_hle);
     install_build();
     tl_loop_install();
+    tl_input_install();
+    tl_tls_install();
 
     H.activity = make("android/app/Activity");
     H.resources = make("android/content/res/Resources");
