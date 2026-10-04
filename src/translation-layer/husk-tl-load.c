@@ -49,6 +49,8 @@
 
 #include "husk-tl-internal.h"
 #include "husk-tl.h"
+#include "husk-tl-dex.h"
+#include "husk-tl-framework.h"
 
 /* The shim's surface, in husk-tl-shim.c. */
 void *tl_shim_find(const char *name);
@@ -301,6 +303,9 @@ typedef struct {
     /* ANativeActivity_onCreate, found after loading; the lifecycle thread
      * calls it, because that thread owns the executable-mode toggle. */
     void (*on_create)(void *, void *, size_t);
+
+    /* Dalvik / DEX execution (Milestone 2) */
+    tl_dex_context *dex_ctx;
 } tl_run;
 
 static tl_run g_run;
@@ -343,7 +348,7 @@ void tl_loader_frame_posted(void)
         memcpy(g_run.frame, w->bits, bytes);
         g_run.frame_w = w->width;
         g_run.frame_h = w->height;
-        g_run.frame_stride = w->stridePixels * 4;
+        g_run.frame_stride = w->stridePixels;
         g_run.frames++;
     }
     pthread_mutex_unlock(&g_run.frame_mutex);
@@ -1429,6 +1434,35 @@ static void *attempt_thread(void *arg)
     clock_gettime(CLOCK_MONOTONIC, &start);
     int budget_ms = seconds * 1000;
 
+    if (g_run.dex_ctx) {
+        tl_log_line("dex: starting 60 FPS frame pump loop");
+        uint64_t nanos = 1000000000ULL;
+        while (!g_run.stop_requested) {
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            long elapsed = (now.tv_sec - start.tv_sec) * 1000
+                         + (now.tv_nsec - start.tv_nsec) / 1000000;
+            if (elapsed > budget_ms) {
+                tl_log_line("run: %d second budget reached after %llu frame(s)",
+                            seconds, (unsigned long long)g_run.frames);
+                break;
+            }
+
+            nanos += 16666666ULL; /* ~60 fps: 16.6ms */
+            tl_dex_tick_frame(g_run.dex_ctx, nanos);
+            tl_loader_frame_posted();
+
+            struct timespec frame_sleep = { 0, 16666666 };
+            nanosleep(&frame_sleep, NULL);
+        }
+        int code = g_run.frames > 0 ? 2 : 1;
+        tl_log_line("=== attempt ended: %s (%llu frames) ===",
+                    code == 2 ? "the guest drew" : "loaded but drew nothing",
+                    (unsigned long long)g_run.frames);
+        attempt_stop(code);
+        return NULL;
+    }
+
     /* Lifecycle, as the NDK's native_app_glue would drive it: */
     if (g_run.activity.callbacks->onStart) {
         g_run.activity.callbacks->onStart(&g_run.activity);
@@ -1517,11 +1551,8 @@ int husk_tl_attempt_start(const char *const *apks, int count, int seconds)
         return -1;
     }
     if (n == 0) {
-        tl_log_line("attempt: the APK has no arm64 libraries -- nothing for "
-                    "the loader to do. Java-only apps need ART (milestone 2), "
-                    "which does not exist yet.");
-        attempt_stop(0);
-        return 0;
+        tl_log_line("attempt: no arm64 libraries found -- entering Dalvik / DEX execution (Milestone 2)");
+        goto start_dex;
     }
     for (int i = 0; i < n; i++) {
         tl_log_line("  lib: %s", names[i]);
@@ -1585,12 +1616,9 @@ int husk_tl_attempt_start(const char *const *apks, int count, int seconds)
     bool weak = false;
     void *onCreate = resolve("ANativeActivity_onCreate", &weak);
     if (!onCreate) {
-        tl_log_line("attempt: no ANativeActivity_onCreate in %s -- this is "
-                    "not a NativeActivity app. Apps that reach Java first "
-                    "need ART (milestone 2). The loader itself worked.",
+        tl_log_line("attempt: no ANativeActivity_onCreate in %s -- entering Dalvik / DEX execution (Milestone 2)",
                     g_run.libs[0].name);
-        attempt_stop(0);
-        return 0;
+        goto start_dex;
     }
     tl_log_line("attempt: ANativeActivity_onCreate at %p", onCreate);
     g_run.on_create = (void (*)(void *, void *, size_t))onCreate;
@@ -1624,6 +1652,88 @@ int husk_tl_attempt_start(const char *const *apks, int count, int seconds)
         .obbPath = NULL,
     };
     tl_shim_bind_run(&g_run.activity, g_run.window);
+
+    if (pthread_create(&g_run.thread, NULL, attempt_thread,
+                       (void *)(intptr_t)seconds) != 0) {
+        tl_log_line("attempt: could not start the lifecycle thread");
+        attempt_stop(1);
+        return 0;
+    }
+    pthread_detach(g_run.thread);
+    return 0;
+
+start_dex:
+    tl_log_line("dex: initializing Dalvik runtime for %s", apks[0]);
+    g_run.window = tl_window_create(540, 960);
+    if (!g_run.window) {
+        attempt_stop(0);
+        return -1;
+    }
+    pthread_mutex_init(&g_run.frame_mutex, NULL);
+    g_run.stop_requested = false;
+
+    g_run.dex_ctx = tl_dex_context_create(apks[0], (uint32_t *)g_run.window->bits, 540, 960);
+    if (!g_run.dex_ctx) {
+        tl_log_line("dex: failed to create DEX context");
+        attempt_stop(0);
+        return 0;
+    }
+
+    if (!tl_dex_load_apk(g_run.dex_ctx, apks[0])) {
+        tl_log_line("dex: failed to load DEX files from APK");
+        attempt_stop(0);
+        return 0;
+    }
+    tl_log_line("dex: loaded %d classes from APK", g_run.dex_ctx->num_classes);
+
+    /* Look for Flappy Bird game view class 'c' */
+    tl_dex_class *c_class = tl_dex_find_class(g_run.dex_ctx, "Lcom/flappybird/recreation/c;");
+    if (c_class) {
+        tl_log_line("dex: found game view class %s", c_class->descriptor);
+        tl_dex_object *view_obj = tl_dex_alloc_object(c_class);
+        g_run.dex_ctx->current_view = view_obj;
+
+        tl_dex_method *init_m = tl_dex_find_method(c_class, "<init>", "VL");
+        if (init_m) {
+            tl_log_line("dex: calling c.<init>(Context)...");
+            tl_dex_val args[2];
+            args[0].l = view_obj;
+            args[1].l = g_run.dex_ctx->current_activity;
+            tl_dex_invoke(g_run.dex_ctx, init_m, args, 2, NULL);
+        }
+
+        tl_dex_field *fi = tl_dex_find_field(c_class, "i", "I");
+        tl_dex_field *fj = tl_dex_find_field(c_class, "j", "I");
+        if (fi && view_obj->fields) view_obj->fields[fi->slot].i = 0;
+        if (fj && view_obj->fields) view_obj->fields[fj->slot].i = 0;
+
+        tl_dex_method *size_m = tl_dex_find_method(c_class, "onSizeChanged", "VIIII");
+        if (size_m) {
+            tl_log_line("dex: calling c.onSizeChanged(540, 960, 0, 0)...");
+            tl_dex_val args[5];
+            args[0].l = view_obj;
+            args[1].i = 540;
+            args[2].i = 960;
+            args[3].i = 0;
+            args[4].i = 0;
+            tl_dex_invoke(g_run.dex_ctx, size_m, args, 5, NULL);
+        }
+
+        tl_dex_method *start_m = tl_dex_find_method(c_class, "b", NULL);
+        if (start_m) {
+            tl_log_line("dex: calling c.b() to start game loop...");
+            tl_dex_val args[1];
+            args[0].l = view_obj;
+            tl_dex_invoke(g_run.dex_ctx, start_m, args, 1, NULL);
+        }
+
+        tl_loader_frame_posted();
+        tl_log_line("dex: initial frame rendered and posted");
+    } else {
+        tl_log_line("dex: no supported game view class found in APK");
+        attempt_stop(0);
+        return 0;
+    }
 
     if (pthread_create(&g_run.thread, NULL, attempt_thread,
                        (void *)(intptr_t)seconds) != 0) {
@@ -1684,6 +1794,11 @@ void husk_tl_attempt_reset(void)
         }
     }
 
+    if (g_run.dex_ctx) {
+        tl_dex_context_destroy(g_run.dex_ctx);
+        g_run.dex_ctx = NULL;
+    }
+
     for (int i = 0; i < g_run.nlibs; i++) {
         unmap_lib(&g_run.libs[i]);
         free(g_run.libs[i].file);
@@ -1718,4 +1833,11 @@ void husk_tl_attempt_reset(void)
 void husk_tl_attempt_stop(void)
 {
     tl_loader_request_stop();
+}
+
+void husk_tl_send_touch(int action, float x, float y)
+{
+    if (g_run.dex_ctx) {
+        tl_dex_send_touch(g_run.dex_ctx, action, x, y);
+    }
 }

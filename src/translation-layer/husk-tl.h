@@ -84,6 +84,7 @@ const uint8_t *husk_tl_frame_pixels(void);
 int  husk_tl_frame_width(void);
 int  husk_tl_frame_height(void);
 int  husk_tl_frame_stride(void);
+void husk_tl_send_touch(int action, float x, float y);
 
 void husk_tl_free(void *p);
 
