@@ -194,7 +194,9 @@ int main(int argc, char **argv)
         args[2].i = height;
         args[3].i = 0;
         args[4].i = 0;
+        ctx->trace = getenv("TL_TRACE_SETUP") != NULL;   /* layout is where rects get their values */
         tl_dex_invoke(ctx, size_m, args, 5, NULL);
+        ctx->trace = 0;
         printf("c.onSizeChanged completed!\n");
     }
 

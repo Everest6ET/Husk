@@ -395,6 +395,21 @@ static float *rect_field_ptr(tl_framework_rect *r, const char *name)
     return NULL;
 }
 
+/*
+ * Copy one rectangle's four edges into another. Rect and RectF both have a copy
+ * form -- `set(Rect)` and `new RectF(Rect)` -- and a game uses it to turn a hit
+ * box into the rectangle it draws into. Handling only the four-number form left
+ * every copied rectangle at zero, which draw calls then skip as empty: the
+ * buttons were drawn every frame, into nothing.
+ */
+static bool rect_copy_from(tl_framework_rect *dst, const tl_dex_object *src_obj)
+{
+    const tl_framework_rect *src = tl_dex_native(src_obj);
+    if (!dst || !src) return false;
+    *dst = *src;
+    return true;
+}
+
 static bool is_rect_class(const char *owner)
 {
     return owner && (!strcmp(owner, "Landroid/graphics/Rect;") ||
@@ -413,6 +428,7 @@ static bool rect_init_int(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_v
 {
     (void)ctx; (void)ret;
     tl_framework_rect *r = calloc(1, sizeof(*r));
+    if (nargs == 2) rect_copy_from(r, args[1].l);   /* the copy constructor */
     if (nargs >= 5) {
         r->left = (float)args[1].i;
         r->top = (float)args[2].i;
@@ -427,6 +443,7 @@ static bool rect_init_float(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex
 {
     (void)ctx; (void)ret;
     tl_framework_rect *r = calloc(1, sizeof(*r));
+    if (nargs == 2) rect_copy_from(r, args[1].l);   /* the copy constructor */
     if (nargs >= 5) {
         r->left = args[1].f;
         r->top = args[2].f;
@@ -440,6 +457,7 @@ static bool rect_init_float(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex
 static bool rect_set_int(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
 {
     (void)ctx; (void)nargs; (void)ret;
+    if (nargs == 2) { rect_copy_from(tl_dex_native(this_obj), args[1].l); return true; }
     if (this_obj && tl_dex_native(this_obj) && nargs >= 5) {
         tl_framework_rect *r = tl_dex_native(this_obj);
         r->left   = (float)args[1].i;
@@ -453,6 +471,7 @@ static bool rect_set_int(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_va
 static bool rect_set_float(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
 {
     (void)ctx; (void)nargs; (void)ret;
+    if (nargs == 2) { rect_copy_from(tl_dex_native(this_obj), args[1].l); return true; }
     if (this_obj && tl_dex_native(this_obj) && nargs >= 5) {
         tl_framework_rect *r = tl_dex_native(this_obj);
         r->left   = args[1].f;
@@ -1389,6 +1408,14 @@ static bool canvas_drawBitmap_rect(tl_dex_context *ctx, tl_dex_object *this_obj,
     float dst_y = dst->top;
     float dst_w = dst->right - dst->left;
     float dst_h = dst->bottom - dst->top;
+#ifdef TL_DEX_TRACE
+    if (ctx->trace)
+        fprintf(stderr, "        drawBitmap %dx%d src=%s(%g,%g,%g,%g) dst=(%g,%g,%g,%g)%s\n",
+                bmp->width, bmp->height, src ? "" : "none",
+                src ? src->left : 0, src ? src->top : 0, src ? src->right : 0, src ? src->bottom : 0,
+                dst->left, dst->top, dst->right, dst->bottom,
+                (dst_w <= 0 || dst_h <= 0) ? "  [EMPTY dst: skipped]" : "");
+#endif
     if (dst_w <= 0 || dst_h <= 0) return true;
 
     CGImageRef img_to_draw = bmp->cg_image;
