@@ -31,6 +31,46 @@
 #include <libkern/OSCacheControl.h>
 #include <sys/ucontext.h>   /* not <ucontext.h>: that one #errors without _XOPEN_SOURCE */
 #include <unistd.h>
+#include <fcntl.h>
+
+/*
+ * Provide pipe2 for iOS systems where libc does not export it.
+ */
+__attribute__((visibility("default")))
+int pipe2(int fds[2], int flags)
+{
+    if (!fds) {
+        errno = EFAULT;
+        return -1;
+    }
+    if (pipe(fds) < 0) {
+        return -1;
+    }
+    if (flags & O_CLOEXEC) {
+        if (fcntl(fds[0], F_SETFD, FD_CLOEXEC) < 0 ||
+            fcntl(fds[1], F_SETFD, FD_CLOEXEC) < 0) {
+            int err = errno;
+            close(fds[0]);
+            close(fds[1]);
+            errno = err;
+            return -1;
+        }
+    }
+    if (flags & O_NONBLOCK) {
+        int f0 = fcntl(fds[0], F_GETFL);
+        int f1 = fcntl(fds[1], F_GETFL);
+        if (f0 < 0 || f1 < 0 ||
+            fcntl(fds[0], F_SETFL, f0 | O_NONBLOCK) < 0 ||
+            fcntl(fds[1], F_SETFL, f1 | O_NONBLOCK) < 0) {
+            int err = errno;
+            close(fds[0]);
+            close(fds[1]);
+            errno = err;
+            return -1;
+        }
+    }
+    return 0;
+}
 
 /* TCG's own W^X toggle. pthread_jit_write_protect_np() is marked unavailable in
  * the iOS SDK -- the symbol exists but the header refuses it -- so QEMU pokes
