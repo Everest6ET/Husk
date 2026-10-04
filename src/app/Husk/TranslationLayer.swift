@@ -762,6 +762,9 @@ struct TLAttemptView: View {
     let app: TLApp
     @StateObject private var runner = TLAttemptRunner()
     @Environment(\.dismiss) private var dismiss
+    /// Whether the log is open. Remembered, so a game opened again comes back the
+    /// way it was left.
+    @AppStorage("husk.tl.showLog") private var showLog = true
 
     var body: some View {
         NavigationStack {
@@ -794,29 +797,53 @@ struct TLAttemptView: View {
 
                 Divider()
 
+                // The game takes whatever the log leaves. With the log open it is a
+                // fixed 380 points; closed, it fills the rest of the screen.
                 if runner.isRunning || runner.frameCount > 0 {
                     TLScreenView()
-                        .frame(height: 380)
+                        .frame(maxWidth: .infinity, maxHeight: showLog ? 380 : .infinity)
                         .background(Color.black)
                     Divider()
                 }
 
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Text("ATTEMPT LOG")
-                            .font(.technical(11, weight: .bold))
-                            .foregroundStyle(Theme.textDim)
-                        Spacer()
+                // The log's bar, always there: it is the way back in once the log
+                // is closed, so it cannot be part of what closes.
+                HStack(spacing: 10) {
+                    Button {
+                        withAnimation(.snappy(duration: 0.25)) { showLog.toggle() }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: showLog ? "chevron.down" : "chevron.right")
+                                .font(.system(size: 11, weight: .bold))
+                                .frame(width: 12)
+                            Text("ATTEMPT LOG")
+                                .font(.technical(11, weight: .bold))
+                        }
+                        .foregroundStyle(Theme.textDim)
+                    }
+                    .buttonStyle(.plain)
+                    Spacer()
+                    if showLog {
                         Button {
                             UIPasteboard.general.string = runner.logText
                         } label: {
                             Label("Copy", systemImage: "doc.on.doc")
                                 .font(.system(size: 12))
                         }
+                    } else {
+                        Text("tap to show")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.textDim.opacity(0.7))
                     }
-                    .padding(.horizontal)
-                    .padding(.top, 8)
+                }
+                .padding(.horizontal)
+                .padding(.vertical, 8)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    if !showLog { withAnimation(.snappy(duration: 0.25)) { showLog = true } }
+                }
 
+                if showLog {
                     ScrollViewReader { proxy in
                         ScrollView {
                             Text(runner.logText.isEmpty ? "Starting attempt..." : runner.logText)
@@ -832,6 +859,7 @@ struct TLAttemptView: View {
                             proxy.scrollTo("bottom", anchor: .bottom)
                         }
                     }
+                    .transition(.opacity)
                 }
             }
             .navigationTitle(app.label)

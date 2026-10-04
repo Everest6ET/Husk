@@ -15,6 +15,7 @@
  *   TL_FRAMES=N         frames to run (default 90; 600+ is real gameplay)
  *   TL_AUTOPILOT=1      flap like a player instead of on a fixed beat;
  *   TL_LINE=Y             ... when the bird sinks below this height
+ *   TL_SEEK=1             ... or, better, below the next gap's centre, as seen in the draws
  *   TL_FLAP_EVERY=N     fixed-beat flaps, every N frames (default 22)
  *   TL_BUTTON=0|1|2     which title button to tap (default 0, the first)
  *   TL_SAVE_EVERY=N     save a frame PNG every N frames past 120 (default 60)
@@ -28,6 +29,7 @@
  *   TL_TRACE_FRAME=a-b  print every instruction run in those frames. Needs a
  *                       build with -DTL_DEX_TRACE; the shipping build has none.
  */
+#include <math.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <unistd.h>
@@ -101,6 +103,62 @@ static void *hammer(void *arg)
     return NULL;
 }
 
+/* The pipes drawn in the frame just ticked: 97x937 sprites, top and bottom. */
+#define PIPE_W 97
+#define PIPE_H 937
+static struct { float x, y; } g_pipes[32];
+static int g_npipes;
+static void observe_draw(void *user, int w, int h, float x, float y)
+{
+    (void)user;
+    if (w == PIPE_W && h == PIPE_H && g_npipes < 32) { g_pipes[g_npipes].x = x; g_pipes[g_npipes].y = y; g_npipes++; }
+}
+
+/*
+ * Where the next gap's centre is, from the pipes just drawn. A pipe is two
+ * sprites at the same x -- the top one hanging from above, the bottom one
+ * standing up -- so the gap is between the top sprite's lower edge and the
+ * bottom sprite's top. Returns false if no pipe is still ahead of the bird.
+ */
+/* Vertical drift: the same pipe, a frame apart, should be at the same height.
+ * A pipe scrolls left a few pixels a frame, so last frame's sprite for it is the
+ * one a little to the right of this frame's. Any difference in height between
+ * the two is the pipe moving up or down -- which these pipes must not do. */
+static float g_prev_x[32], g_prev_y[32];
+static int g_prev_n;
+static int g_wobbles;
+static float g_max_wobble;
+static void track_pipe_drift(void)
+{
+    for (int i = 0; i < g_npipes; i++) {
+        for (int j = 0; j < g_prev_n; j++) {
+            float dx = g_prev_x[j] - g_pipes[i].x;
+            bool same_kind = (g_prev_y[j] < 0) == (g_pipes[i].y < 0);
+            if (same_kind && dx > 0.2f && dx < 15.0f) {
+                float dy = fabsf(g_prev_y[j] - g_pipes[i].y);
+                if (dy > 0.5f) { g_wobbles++; if (dy > g_max_wobble) g_max_wobble = dy; }
+                break;
+            }
+        }
+    }
+    g_prev_n = g_npipes;
+    for (int i = 0; i < g_npipes; i++) { g_prev_x[i] = g_pipes[i].x; g_prev_y[i] = g_pipes[i].y; }
+}
+
+static bool next_gap_centre(float bird_left, float *centre)
+{
+    float best_x = 1e9f, top = 0, bottom = 0;
+    for (int i = 0; i < g_npipes; i++) {
+        if (g_pipes[i].x + PIPE_W <= bird_left) continue;           /* already behind it */
+        if (g_pipes[i].x > best_x + 0.5f) continue;
+        if (g_pipes[i].x < best_x - 0.5f) { best_x = g_pipes[i].x; top = -1e9f; bottom = 1e9f; }
+        if (g_pipes[i].y < 0) top = g_pipes[i].y + PIPE_H; else bottom = g_pipes[i].y;
+    }
+    if (best_x > 1e8f || top < -1e8f || bottom > 1e8f) return false;
+    *centre = (top + bottom) / 2;
+    return true;
+}
+
 static float g_touch_x = 270.0f, g_touch_y = 480.0f;
 
 static void pick_touch(tl_dex_class *c_class, tl_dex_object *view_obj, int which,
@@ -155,6 +213,7 @@ int main(int argc, char **argv)
 
     /* TL_SEED=n replays a run -- the same pipes -- and TL_CG=1 draws through
      * CoreGraphics only, so the two renderers can be compared on the same game. */
+    ctx->draw_observer = observe_draw;
     if (getenv("TL_SEED")) tl_dex_seed(ctx, (uint64_t)strtoull(getenv("TL_SEED"), NULL, 10));
     if (getenv("TL_CG")) ctx->use_cg_only = 1;
     printf("Total classes loaded: %d\n", ctx->num_classes);
@@ -181,7 +240,9 @@ int main(int argc, char **argv)
         tl_dex_val args[2];
         args[0].l = view_obj;
         args[1].l = ctx->current_activity;
+        ctx->trace = getenv("TL_TRACE_INIT") != NULL;     /* the constructor reads the saved settings */
         tl_dex_invoke(ctx, init_m, args, 2, NULL);
+        ctx->trace = 0;
         printf("c.<init> completed successfully!\n");
     }
 
@@ -313,6 +374,7 @@ int main(int argc, char **argv)
             if (dash) hi = atoi(dash + 1);
             ctx->trace = (f >= lo && f <= hi);
         }
+        g_npipes = 0;
         struct tl_dex_perf before = ctx->perf;
         int state_before = 7;
         if (state_field && view_obj->nfields > state_field->slot) {
@@ -320,6 +382,7 @@ int main(int argc, char **argv)
             if (st0 && st0->nfields > TL_ENUM_SLOT_ORDINAL) state_before = st0->fields[TL_ENUM_SLOT_ORDINAL].i & 7;
         }
         tl_dex_tick_frame(ctx, nanos);
+        track_pipe_drift();
         cost[state_before].n++;
         cost[state_before].logic  += ctx->perf.ns_logic  - before.ns_logic;
         cost[state_before].render += ctx->perf.ns_render - before.ns_render;
@@ -380,11 +443,17 @@ int main(int argc, char **argv)
             float y = 0;
             /* Starting is a tap too: on Get Ready the bird only hovers, and
              * below the flap line a bot that waits for a reason never begins. */
+            float gap_y;
+            float line = autopilot_line;
+            /* Aim a little below the gap's centre: after a flap the bird keeps
+             * rising for several frames, so the line it flaps at is not where
+             * it ends up. */
+            if (getenv("TL_SEEK") && next_gap_centre(150.0f, &gap_y)) line = gap_y + 18.0f;
             if (!started && f >= 96) { started = 1; flapping = 0; last_flap = f;
                 tl_dex_send_touch(ctx, 0, 270.0f, 480.0f); flapping = 1; flaps++; goto after_touch; }
             if (bird_y && bird_y->slot < view_obj->nfields) y = view_obj->fields[bird_y->slot].f;
             if (flapping) { tl_dex_send_touch(ctx, 1, 270.0f, 480.0f); flapping = 0; }
-            else if (y > autopilot_line && f - last_flap > 12) {
+            else if (y > line && f - last_flap > 14) {
                 tl_dex_send_touch(ctx, 0, 270.0f, 480.0f);
                 flapping = 1; last_flap = f; flaps++;
             }
@@ -449,9 +518,45 @@ int main(int argc, char **argv)
         failures++;
     }
     if (!responded) { printf("FAIL: the touch changed nothing\n"); failures++; }
+
+    /*
+     * Two things the game once got wrong because a preference read back as zero.
+     * The score multiplier came back 0, so passing a pipe scored nothing; the
+     * thresholds at which pipes begin to move came back 0, so they bobbed from
+     * the first frame. Neither shows in a screenshot of one moment, and neither
+     * made the harness fail -- so both are asserted now.
+     */
+    printf("pipe drift:              %d frame-to-frame changes in height (largest %.1f px)\n",
+           g_wobbles, g_max_wobble);
+    if (g_wobbles > 0) {
+        printf("FAIL: pipes moved vertically -- they are static in the real game\n");
+        failures++;
+    }
+    if (getenv("TL_SEEK")) {
+        tl_dex_field *score_f = tl_dex_find_field(c_class, "at", "I");
+        int score = (score_f && score_f->slot < view_obj->nfields) ? view_obj->fields[score_f->slot].i : -1;
+        printf("score reached:           %d\n", score);
+        /* A bot that threads the gaps passes a pipe about every 1.3 seconds. */
+        int expect = FRAMES >= 700 ? (FRAMES - 250) / 150 / 2 : 0;
+        if (FRAMES >= 700 && score < (expect > 3 ? expect : 3)) {
+            printf("FAIL: the score is %d after %d frames of flying through the gaps; it should be climbing\n",
+                   score, FRAMES);
+            failures++;
+        }
+    }
 verdict:
 
     if (hammering) { atomic_store(&g_hammer_stop, 1); pthread_join(hammer_thread, NULL); }
+    if (getenv("TL_DUMP_INTS")) {     /* every int field of the view, to find a value by its number */
+        printf("int fields of the view at the end:");
+        for (tl_dex_class *k = c_class; k; k = k->super_class)
+            for (int i = 0; i < k->num_fields; i++) {
+                tl_dex_field *fl = &k->fields[i];
+                if (fl->is_static || !fl->type || strcmp(fl->type, "I") || fl->slot >= view_obj->nfields) continue;
+                printf(" %s=%d", fl->name, view_obj->fields[fl->slot].i);
+            }
+        printf("\n");
+    }
     free(hashes);
     tl_dex_context_destroy(ctx);
     free(fb);

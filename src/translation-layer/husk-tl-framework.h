@@ -30,6 +30,13 @@ bool tl_framework_field_get(tl_dex_context *ctx, tl_dex_object *obj, const tl_de
 bool tl_framework_field_set(tl_dex_context *ctx, tl_dex_object *obj, const tl_dex_field *f, tl_dex_val value);
 bool tl_framework_static_get(tl_dex_context *ctx, const tl_dex_field *f, tl_dex_val *out);
 
+/*
+ * Keep the app's SharedPreferences in a file, loading what is there. Without
+ * this they live in memory for the life of the context, so call it for a real
+ * run -- a high score is only worth saving if it is still there next launch.
+ */
+bool tl_framework_attach_prefs(tl_dex_context *ctx, const char *path);
+
 /* Framework initialisation and asset loading */
 bool tl_framework_init(tl_dex_context *ctx);
 void tl_framework_cleanup(tl_dex_context *ctx);

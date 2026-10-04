@@ -829,12 +829,47 @@ bool tl_dex_invoke(tl_dex_context *ctx, tl_dex_method *method, tl_dex_val *args,
     const uint16_t *insns = method->insns;
     uint32_t pc = 0;
     bool success = true;
+#ifdef TL_DEX_TRACE
+    int trace_dest = -1;          /* the register the previous instruction wrote */
+    int trace_prev_op = -1;       /* ... and what that instruction was */
+#endif
 
     while (pc < method->insns_size) {
         uint16_t inst = insns[pc];
         uint8_t opcode = inst & 0xff;
         uint8_t op_b = (inst >> 8) & 0xff;
 #ifdef TL_DEX_TRACE
+        if (ctx->trace && trace_dest >= 0) {
+            /* The previous instruction's result, as every type it might be: the
+             * instruction says which register it wrote, never what is in it. */
+            float tf; memcpy(&tf, &v[trace_dest].raw64, 4);
+            if (trace_prev_op == 0x1a || trace_prev_op == 0x1b) {
+                /* A string constant: show the string, which is the whole point of it. */
+                const char *str = tl_dex_string(v[trace_dest].l);
+                fprintf(stderr, "          -> v%d = \"%s\"\n", trace_dest, str ? str : "(null)");
+            } else {
+                fprintf(stderr, "          -> v%d = 0x%llx  (int %d, float %g, double %g)\n", trace_dest,
+                        (unsigned long long)v[trace_dest].raw64, v[trace_dest].i, (double)tf, v[trace_dest].d);
+            }
+        }
+        trace_dest = -1;
+        trace_prev_op = opcode;
+        if (ctx->trace) {
+            /* Which register this instruction writes, for the line above next time. */
+            if ((opcode >= 0x90 && opcode <= 0xaf) || (opcode >= 0xd8 && opcode <= 0xe2) ||
+                (opcode >= 0x44 && opcode <= 0x4a) || opcode == 0x13 || opcode == 0x14 ||
+                opcode == 0x15 || opcode == 0x16 || opcode == 0x17 || opcode == 0x18 ||
+                opcode == 0x19 || opcode == 0x0a || opcode == 0x0b || opcode == 0x0c ||
+                opcode == 0x1a || opcode == 0x1b) {
+                trace_dest = op_b;
+            } else if ((opcode >= 0xb0 && opcode <= 0xcf) || (opcode >= 0x7b && opcode <= 0x8f) ||
+                       (opcode >= 0xd0 && opcode <= 0xd7) || (opcode >= 0x52 && opcode <= 0x58) ||
+                       opcode == 0x12 || opcode == 0x01 || opcode == 0x04 || opcode == 0x07) {
+                trace_dest = op_b & 0x0f;
+            } else if (opcode >= 0x60 && opcode <= 0x66) {
+                trace_dest = op_b;
+            }
+        }
         if (ctx->trace) {
             /* Name what the instruction touches, not just its opcode: a field
              * or method index is meaningless to read, and which field was read

@@ -1849,6 +1849,14 @@ start_dex:
         return 0;
     }
 
+    /* The app's settings and best score live next to its APK, so they are still
+     * there the next time it is opened. */
+    {
+        char prefs_path[1100];
+        snprintf(prefs_path, sizeof(prefs_path), "%s.prefs", apks[0]);
+        tl_framework_attach_prefs(g_run.dex_ctx, prefs_path);
+    }
+
     if (!tl_dex_load_apk(g_run.dex_ctx, apks[0])) {
         tl_log_line("dex: failed to load DEX files from APK");
         attempt_stop(0);

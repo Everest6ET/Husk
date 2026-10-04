@@ -2,6 +2,7 @@
 #include "husk-tl-framework.h"
 #include "husk-tl-res.h"
 #include "husk-tl-blit.h"
+#include "husk-tl-prefs.h"
 #include "husk-tl-dex.h"
 #include "husk-tl-internal.h"
 #include <stdio.h>
@@ -54,10 +55,6 @@ typedef struct {
 } tl_framework_iterator;
 
 typedef struct {
-    int high_score;
-} tl_framework_prefs;
-
-typedef struct {
     CGContextRef cg_ctx;
     /* The app's resource table, and the buffer it reads from. Loaded on first
      * use: most frames never ask for a resource, and parsing a 1.4 MB table
@@ -70,7 +67,8 @@ typedef struct {
     tl_dex_object *resources_obj;
     tl_dex_object *choreographer_obj;
     tl_dex_object *prefs_obj;
-    tl_framework_prefs prefs;
+    tl_dex_object *editor_obj;
+    tl_prefs *prefs;            /* what SharedPreferences reads and the Editor writes */
 } tl_framework_state;
 
 static void matrix_identity(tl_framework_matrix *mat)
@@ -1434,6 +1432,11 @@ static bool canvas_drawBitmap_xy_impl(tl_dex_context *ctx, tl_dex_object *this_o
     float w = bmp->width;
     float h = bmp->height;
     const tl_framework_paint *paint = (nargs >= 5 && args[4].l) ? tl_dex_native(args[4].l) : NULL;
+    if (ctx->draw_observer) ctx->draw_observer(ctx->draw_observer_user, bmp->width, bmp->height, x, y);
+#ifdef TL_DEX_TRACE
+    if (ctx->trace)
+        fprintf(stderr, "        drawBitmapXY %dx%d at (%g,%g)\n", bmp->width, bmp->height, x, y);
+#endif
 
     if (blit_bitmap(ctx, st, bmp, paint, 0, 0, w, h, x, y, x + w, y + h)) return true;
     if (!bmp->cg_image) return true;
@@ -1459,6 +1462,11 @@ static bool canvas_drawBitmap_matrix_impl(tl_dex_context *ctx, tl_dex_object *th
 
     const tl_framework_matrix *mat = tl_dex_native(args[2].l);
     const tl_framework_paint *paint = (nargs >= 4 && args[3].l) ? tl_dex_native(args[3].l) : NULL;
+#ifdef TL_DEX_TRACE
+    if (ctx->trace)
+        fprintf(stderr, "        drawBitmapMatrix %dx%d m=[%g %g %g | %g %g %g]\n", bmp->width, bmp->height,
+                mat->m[0], mat->m[1], mat->m[2], mat->m[3], mat->m[4], mat->m[5]);
+#endif
 
     /* A matrix with no skew terms is a scale and a translation, so it is a
      * rectangle: the bitmap's corners mapped through it. Only a rotated sprite --
@@ -1640,42 +1648,163 @@ static bool activity_getPackageName(tl_dex_context *ctx, tl_dex_object *this_obj
     return true;
 }
 
+/*
+ * SharedPreferences and its Editor, over one typed store (husk-tl-prefs.c).
+ *
+ * The reads used to be a stand-in: getInt ignored the key and the default and
+ * returned the high score for every call, and the rest ignored the key and
+ * returned the default. An app that asks for "score multiplier, default 1"
+ * got 0 back, so Flappy Bird never scored; it asked for the score at which its
+ * pipes start moving, default 2000, and got 0, so they moved from the first
+ * frame. A preference is read by key, with the app's default as the answer when
+ * nothing is stored, and that is all these do.
+ *
+ * One store serves every name an app passes to getSharedPreferences. An app
+ * that keeps two files with colliding keys would notice; none seen so far does.
+ */
+static const char *pref_key(const tl_dex_val *args, int nargs)
+{
+    return nargs > 1 ? tl_dex_string(args[1].l) : NULL;
+}
+
+static tl_prefs *prefs_of(tl_dex_context *ctx)
+{
+    tl_framework_state *st = ctx ? ctx->framework_data : NULL;
+    return st ? st->prefs : NULL;
+}
+
 static bool sharedPrefs_getInt(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
 {
-    (void)this_obj; (void)nargs;
-    tl_framework_state *st = ctx->framework_data;
-    int val = args[2].i; /* defValue */
-    if (st) val = st->prefs.high_score;
-    if (ret) ret->i = val;
+    (void)this_obj;
+    int32_t def = nargs >= 3 ? args[2].i : 0;
+    if (ret) { ret->raw64 = 0; ret->i = tl_prefs_get_int(prefs_of(ctx), pref_key(args, nargs), def); }
     return true;
 }
 
 static bool sharedPrefs_getBoolean(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
 {
-    (void)ctx; (void)this_obj; (void)nargs;
-    if (ret) ret->i = (nargs >= 3) ? args[2].i : 0;
+    (void)this_obj;
+    bool def = nargs >= 3 ? (args[2].i != 0) : false;
+    if (ret) { ret->raw64 = 0; ret->i = tl_prefs_get_bool(prefs_of(ctx), pref_key(args, nargs), def) ? 1 : 0; }
     return true;
 }
 
 static bool sharedPrefs_getFloat(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
 {
-    (void)ctx; (void)this_obj; (void)nargs;
-    if (ret) ret->f = (nargs >= 3) ? args[2].f : 0.0f;
-    return true;
-}
-
-static bool sharedPrefs_getString(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
-{
-    (void)ctx; (void)this_obj; (void)nargs;
-    if (ret) ret->l = (nargs >= 3) ? args[2].l : NULL;
+    (void)this_obj;
+    float def = nargs >= 3 ? args[2].f : 0.0f;
+    if (ret) { ret->raw64 = 0; ret->f = tl_prefs_get_float(prefs_of(ctx), pref_key(args, nargs), def); }
     return true;
 }
 
 static bool sharedPrefs_getLong(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
 {
-    (void)ctx; (void)this_obj; (void)nargs;
-    if (ret) ret->j = (nargs >= 3) ? args[2].j : 0;
+    (void)this_obj;
+    int64_t def = nargs >= 3 ? args[2].j : 0;      /* a long is one slot, at index 2 */
+    if (ret) { ret->raw64 = 0; ret->j = tl_prefs_get_long(prefs_of(ctx), pref_key(args, nargs), def); }
     return true;
+}
+
+static bool sharedPrefs_getString(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{
+    (void)this_obj;
+    if (!ret) return true;
+    ret->raw64 = 0;
+    const char *key = pref_key(args, nargs);
+    tl_prefs *p = prefs_of(ctx);
+    if (p && key && tl_prefs_contains(p, key)) {
+        const char *stored = tl_prefs_get_string(p, key, NULL);
+        if (stored) { ret->l = tl_dex_alloc_string(ctx, stored); return true; }
+    }
+    ret->l = nargs >= 3 ? args[2].l : NULL;
+    return true;
+}
+
+static bool sharedPrefs_contains(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{
+    (void)this_obj;
+    if (ret) { ret->raw64 = 0; ret->i = tl_prefs_contains(prefs_of(ctx), pref_key(args, nargs)) ? 1 : 0; }
+    return true;
+}
+
+static bool sharedPrefs_edit(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{
+    (void)this_obj; (void)args; (void)nargs;
+    tl_framework_state *st = ctx->framework_data;
+    if (ret) { ret->raw64 = 0; ret->l = st ? st->editor_obj : NULL; }
+    return true;
+}
+
+/*
+ * The Editor. Android batches edits until apply() or commit(); these write
+ * straight into the store, and apply() and commit() save it. The one difference
+ * an app could see is reading its own edit back before applying it, which
+ * would see the new value here a moment before Android would show it.
+ */
+static bool editor_return_this(tl_dex_object *this_obj, tl_dex_val *ret)
+{
+    if (ret) { ret->raw64 = 0; ret->l = this_obj; }
+    return true;
+}
+
+static bool editor_putInt(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{
+    if (nargs >= 3) tl_prefs_put_int(prefs_of(ctx), pref_key(args, nargs), args[2].i);
+    return editor_return_this(this_obj, ret);
+}
+static bool editor_putLong(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{
+    if (nargs >= 3) tl_prefs_put_long(prefs_of(ctx), pref_key(args, nargs), args[2].j);
+    return editor_return_this(this_obj, ret);
+}
+static bool editor_putFloat(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{
+    if (nargs >= 3) tl_prefs_put_float(prefs_of(ctx), pref_key(args, nargs), args[2].f);
+    return editor_return_this(this_obj, ret);
+}
+static bool editor_putBoolean(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{
+    if (nargs >= 3) tl_prefs_put_bool(prefs_of(ctx), pref_key(args, nargs), args[2].i != 0);
+    return editor_return_this(this_obj, ret);
+}
+static bool editor_putString(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{
+    if (nargs >= 3) tl_prefs_put_string(prefs_of(ctx), pref_key(args, nargs), tl_dex_string(args[2].l));
+    return editor_return_this(this_obj, ret);
+}
+static bool editor_remove(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{
+    tl_prefs_remove(prefs_of(ctx), pref_key(args, nargs));
+    return editor_return_this(this_obj, ret);
+}
+static bool editor_clear(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{
+    (void)args; (void)nargs;
+    tl_prefs_clear(prefs_of(ctx));
+    return editor_return_this(this_obj, ret);
+}
+static bool editor_apply(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{
+    (void)this_obj; (void)args; (void)nargs;
+    tl_prefs_save(prefs_of(ctx));
+    if (ret) ret->raw64 = 0;
+    return true;
+}
+static bool editor_commit(tl_dex_context *ctx, tl_dex_object *this_obj, tl_dex_val *args, int nargs, tl_dex_val *ret)
+{
+    (void)this_obj; (void)args; (void)nargs;
+    bool ok = tl_prefs_save(prefs_of(ctx));
+    if (ret) { ret->raw64 = 0; ret->i = ok ? 1 : 0; }
+    return true;
+}
+
+/* Keep the app's settings in a file. Opt-in: a context starts with them in
+ * memory, which is what a test wants; the app that runs real games attaches a
+ * path next to the APK so a high score survives the relaunch. */
+bool tl_framework_attach_prefs(tl_dex_context *ctx, const char *path)
+{
+    tl_framework_state *st = ctx ? ctx->framework_data : NULL;
+    return st && st->prefs && tl_prefs_attach(st->prefs, path);
 }
 
 /* android/content/res/Resources */
@@ -2161,6 +2290,19 @@ static const tl_native_entry s_native_methods[] = {
     { "Landroid/content/Context;", "getSharedPreferences", NULL, activity_getSharedPreferences },
     { "Landroid/content/Context;", "getPackageName", NULL, activity_getPackageName },
     { "Landroid/content/Context;", "startActivity", NULL, noop_stub },
+    { "Landroid/content/SharedPreferences;", "contains", NULL, sharedPrefs_contains },
+    { "Landroid/content/SharedPreferences;", "edit", NULL, sharedPrefs_edit },
+    { "Landroid/content/SharedPreferences$Editor;", "putInt", NULL, editor_putInt },
+    { "Landroid/content/SharedPreferences$Editor;", "putLong", NULL, editor_putLong },
+    { "Landroid/content/SharedPreferences$Editor;", "putFloat", NULL, editor_putFloat },
+    { "Landroid/content/SharedPreferences$Editor;", "putBoolean", NULL, editor_putBoolean },
+    { "Landroid/content/SharedPreferences$Editor;", "putString", NULL, editor_putString },
+    { "Landroid/content/SharedPreferences$Editor;", "remove", NULL, editor_remove },
+    { "Landroid/content/SharedPreferences$Editor;", "clear", NULL, editor_clear },
+    { "Landroid/content/SharedPreferences$Editor;", "apply", NULL, editor_apply },
+    { "Landroid/content/SharedPreferences$Editor;", "commit", NULL, editor_commit },
+    { "Landroid/preference/PreferenceManager;", "getDefaultSharedPreferences", NULL, activity_getSharedPreferences },
+    { "Landroidx/preference/PreferenceManager;", "getDefaultSharedPreferences", NULL, activity_getSharedPreferences },
     { "Landroid/content/SharedPreferences;", "getInt", NULL, sharedPrefs_getInt },
     { "Landroid/content/SharedPreferences;", "getBoolean", NULL, sharedPrefs_getBoolean },
     { "Landroid/content/SharedPreferences;", "getFloat", NULL, sharedPrefs_getFloat },
@@ -2429,6 +2571,8 @@ bool tl_framework_init(tl_dex_context *ctx)
 
     tl_dex_class *c_pref = tl_dex_find_class(ctx, "Landroid/content/SharedPreferences;");
     st->prefs_obj = tl_dex_alloc_object(c_pref);
+    st->editor_obj = tl_dex_alloc_object(tl_dex_find_class(ctx, "Landroid/content/SharedPreferences$Editor;"));
+    st->prefs = tl_prefs_create();
 
     return true;
 }
@@ -2442,6 +2586,7 @@ void tl_framework_cleanup(tl_dex_context *ctx)
 #endif
     tl_res_destroy(st->res);
     free(st->arsc);
+    tl_prefs_destroy(st->prefs);
     free(st);
     ctx->framework_data = NULL;
 }

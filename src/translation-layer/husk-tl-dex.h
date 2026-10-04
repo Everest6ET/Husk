@@ -171,6 +171,12 @@ struct tl_dex_context {
      */
     int trace;
 
+    /* Told about every bitmap drawn at a position, if set. A test that plays the
+     * game needs to know where its sprites are, and the draws are the one place
+     * that is certain -- the game's own fields have obfuscated names. */
+    void (*draw_observer)(void *user, int bitmap_w, int bitmap_h, float x, float y);
+    void *draw_observer_user;
+
     /* 0: draw through CoreGraphics only. Used to compare the two renderers on
      * real frames, and as the way back if the blitter ever disagrees. */
     int use_cg_only;
