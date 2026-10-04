@@ -567,6 +567,51 @@ static void check_place(tl_json *j, size_t page)
 
 #endif /* __aarch64__ */
 
+#if defined(__aarch64__)
+static void check_dualmap(tl_json *j, size_t page, tl_dual_mapping *stik)
+{
+    static const char *title = "Code beside data, in debugger-granted memory";
+    if (!stik || !stik->rw_addr || !stik->rx_addr || stik->size < 2 * page) {
+        result(j, "dualmap", title, "skip",
+               "No debugger-granted dual mapping is active in this process.");
+        return;
+    }
+    starting("dualmap");
+    size_t test_off = stik->size - 2 * page;
+    uint8_t *rw = stik->rw_addr + test_off;
+    uint8_t *rx = stik->rx_addr + test_off;
+
+    uint32_t code[2] = { 0x52800540u, 0xD65F03C0u }; /* movz w0, #42; ret */
+    memcpy(rw, code, sizeof(code));
+    sys_icache_invalidate(rx, sizeof(code));
+
+    guard_arm();
+    const char *status = "fail";
+    char why[200] = "";
+    if (sigsetjmp(g_guard_jump, 1) == 0) {
+        int (*fn)(void) = (int (*)(void))(void *)rx;
+        int ans = fn();
+        if (ans == 42) {
+            status = "pass";
+        } else {
+            snprintf(why, sizeof(why), "Code executed through RX alias but returned %d instead of 42.", ans);
+        }
+    } else {
+        snprintf(why, sizeof(why), "Faulted executing code from the RX alias.");
+    }
+    guard_disarm();
+
+    if (!strcmp(status, "pass")) {
+        result(j, "dualmap", title, "pass",
+               "StikDebug dual-mapped JIT memory is live (rw=%p, rx=%p, size=%zu MiB). "
+               "Generated code written to the RW alias executed cleanly from the RX alias.",
+               (void *)stik->rw_addr, (void *)stik->rx_addr, stik->size / (1024 * 1024));
+    } else {
+        result(j, "dualmap", title, "fail", "%s", why);
+    }
+}
+#endif
+
 static void check_memory(tl_json *j, bool may_execute, size_t page)
 {
 #if defined(__aarch64__)
@@ -575,25 +620,26 @@ static void check_memory(tl_json *j, bool may_execute, size_t page)
         check_carve(j, page);
         check_place(j, page);
     } else {
-        const char *why = "Skipped: this process cannot execute memory it writes right "
-                          "now. Enable JIT and run the checks again.";
+        const char *why = "Skipped on TXM devices (A17 Pro and newer) or where unprivileged "
+                          "MAP_JIT is blocked. StikDebug dual mapping is used instead.";
         result(j, "carve", "Code beside data, carved from JIT memory", "skip", "%s", why);
         result(j, "place", "Code placed in front of data", "skip", "%s", why);
+    }
+
+    tl_dual_mapping *stik = tl_find_stikdebug_prewarmed();
+    if (stik && stik->rw_addr && stik->rx_addr) {
+        check_dualmap(j, page, stik);
+    } else {
+        result(j, "dualmap", "Code beside data, in debugger-granted memory", "skip",
+               "StikDebug JIT region has not been claimed yet. Start QEMU or run an attempt with StikDebug attached.");
     }
 #else
     (void)may_execute;
     (void)page;
-    result(j, "carve", "Code beside data, carved from JIT memory", "skip",
-           "Only meaningful on arm64.");
+    result(j, "carve", "Code beside data, carved from JIT memory", "skip", "Only meaningful on arm64.");
     result(j, "place", "Code placed in front of data", "skip", "Only meaningful on arm64.");
+    result(j, "dualmap", "Code beside data, in debugger-granted memory", "skip", "Only meaningful on arm64.");
 #endif
-    /* The other source of executable memory, the region a trap-servicing
-     * debugger grants, belongs to the allocator inside the QEMU library. */
-    result(j, "dualmap", "Code beside data, in debugger-granted memory", "skip",
-           "Not measured yet. Where only a trap-servicing debugger grants executable "
-           "memory, the region comes from the JIT allocator inside the QEMU library, "
-           "and the translation layer cannot borrow it until that allocator is its "
-           "own library.");
 }
 
 char *husk_tl_run_checks(bool may_execute)

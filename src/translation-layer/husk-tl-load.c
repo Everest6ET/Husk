@@ -262,7 +262,9 @@ typedef struct {
     char      name[96];
     uint8_t  *file;          /* the whole .so, kept for the file-relative reads */
     size_t    file_len;
-    uint8_t  *base;          /* where it was mapped */
+    uint8_t  *base;          /* where it was mapped (executable view) */
+    uint8_t  *base_rw;       /* writable mirror for dual mapping, or base if MAP_JIT */
+    bool      is_stikdebug;
     size_t    npages;
     uint8_t  *page_flags;
     uint64_t  base_vaddr;
@@ -382,6 +384,51 @@ static void jit_icache(void *p, size_t n)
 }
 #endif
 
+static size_t g_prewarmed_used = 0;
+
+tl_dual_mapping *tl_find_stikdebug_prewarmed(void)
+{
+    /* Ensure prewarm has been called in case this attempt ran before QEMU. */
+    bool (*prewarm_fn)(size_t) = (bool (*)(size_t))dlsym(RTLD_DEFAULT, "husk_ios_jit_prewarm");
+    if (prewarm_fn) {
+        prewarm_fn(256 * 1024 * 1024);
+    }
+
+    void *fn = dlsym(RTLD_DEFAULT, "husk_ios_jit_prewarm");
+    if (!fn) return NULL;
+
+    const uint32_t *p = (const uint32_t *)fn;
+    for (int i = 0; i < 60; i++) {
+        uint32_t insn = p[i];
+        if ((insn & 0x9F000000u) == 0x90000000u) { /* adrp */
+            uint32_t next = p[i + 1];
+            if ((next & 0xFFC00000u) == 0xF9400000u) { /* ldr Xt, [Xn, #imm] */
+                uint32_t rd = insn & 0x1Fu;
+                uint32_t rn = (next >> 5) & 0x1Fu;
+                if (rd == rn) {
+                    uint64_t immlo = (insn >> 29) & 3u;
+                    uint64_t immhi = (insn >> 5) & 0x7FFFFu;
+                    int64_t imm = (int64_t)((immhi << 2) | immlo);
+                    if (imm & 0x100000) imm -= 0x200000;
+                    uintptr_t pc = (uintptr_t)&p[i];
+                    uintptr_t page = (pc & ~0xFFFull) + (imm << 12);
+                    uint64_t pimm = ((next >> 10) & 0xFFFu) << 3;
+                    tl_dual_mapping *m = (tl_dual_mapping *)(page + pimm);
+                    if (m && m->rw_addr && m->rx_addr && m->size >= 1024 * 1024) {
+                        return m;
+                    }
+                }
+            }
+        }
+    }
+    /* Fallback to static offset in libqemu-aarch64-softmmu.dylib */
+    tl_dual_mapping *fallback = (tl_dual_mapping *)((uintptr_t)fn + 0x1989198);
+    if (fallback && fallback->rw_addr && fallback->rx_addr && fallback->size >= 1024 * 1024) {
+        return fallback;
+    }
+    return NULL;
+}
+
 /* ------------------------------------------------------------------ ELF  */
 
 static uint32_t ld32(const uint8_t *p)
@@ -492,7 +539,9 @@ static void unmap_lib(tl_lib *L)
             munmap(L->base + i * TL_PAGE, TL_PAGE);
         }
     }
-    munmap(L->base, L->npages * TL_PAGE);
+    if (!L->is_stikdebug) {
+        munmap(L->base, L->npages * TL_PAGE);
+    }
     free(L->page_flags);
 }
 
@@ -598,7 +647,11 @@ static int64_t rd_sleb(sleb_r *s)
 static bool reloc_one(uint64_t off_in_image, uint32_t type, uint32_t symidx,
                       int64_t addend, tl_lib *L)
 {
-    uint8_t *place = L->base + (off_in_image - L->base_vaddr);
+    uint64_t offset = off_in_image - L->base_vaddr;
+    size_t page_idx = (size_t)(offset / TL_PAGE);
+    uint8_t *place = (page_idx < L->npages && (L->page_flags[page_idx] & TL_PAGE_W))
+                   ? (L->base + offset)
+                   : (L->base_rw ? L->base_rw + offset : L->base + offset);
 
     switch (type) {
     case R_AARCH64_NONE:
@@ -956,18 +1009,40 @@ static bool load_library(const char *name, const uint8_t *file, size_t flen)
         return false;
     }
 
-    /* One MAP_JIT region for the whole image; writable pages carved out
-     * of it as ordinary memory -- the layout the probe measures. */
-    jit_init();
-    uint8_t *base = mmap(NULL, npages * TL_PAGE,
-                         PROT_READ | PROT_WRITE | PROT_EXEC,
-                         MAP_PRIVATE | MAP_ANON | MAP_JIT, -1, 0);
-    if (base == MAP_FAILED) {
-        tl_log_line("load: MAP_JIT failed (%s); executable memory is the one "
-                    "thing this cannot run without", strerror(errno));
-        free(flags);
-        return false;
+    /* Allocate executable memory: try StikDebug prewarmed dual mapping first
+     * (required on TXM devices), falling back to plain MAP_JIT. */
+    tl_dual_mapping *stik = tl_find_stikdebug_prewarmed();
+    uint8_t *base = NULL;
+    uint8_t *base_rw = NULL;
+    bool is_stikdebug = false;
+
+    if (stik && stik->rw_addr && stik->rx_addr) {
+        size_t need = npages * TL_PAGE;
+        if (g_prewarmed_used + need <= stik->size) {
+            base = stik->rx_addr + g_prewarmed_used;
+            base_rw = stik->rw_addr + g_prewarmed_used;
+            g_prewarmed_used += need;
+            is_stikdebug = true;
+            tl_log_line("jit: using StikDebug dual mapping (rx=%p rw=%p, %zu KiB)",
+                        base, base_rw, need / 1024);
+        }
     }
+
+    if (!base) {
+        jit_init();
+        base = mmap(NULL, npages * TL_PAGE,
+                    PROT_READ | PROT_WRITE | PROT_EXEC,
+                    MAP_PRIVATE | MAP_ANON | MAP_JIT, -1, 0);
+        if (base == MAP_FAILED) {
+            tl_log_line("load: JIT allocation failed (MAP_JIT %s, StikDebug %s); "
+                        "executable memory is the one thing this cannot run without",
+                        strerror(errno), stik ? "exhausted" : "not answering");
+            free(flags);
+            return false;
+        }
+        base_rw = base;
+    }
+
     size_t carved = 0;
     for (size_t i = 0; i < npages; i++) {
         if (flags[i] & TL_PAGE_W) {
@@ -975,17 +1050,19 @@ static bool load_library(const char *name, const uint8_t *file, size_t flen)
                            MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0);
             if (r == MAP_FAILED) {
                 tl_log_line("load: carving page %zu failed (%s)", i, strerror(errno));
-                munmap(base, npages * TL_PAGE);
+                if (!is_stikdebug) munmap(base, npages * TL_PAGE);
                 free(flags);
                 return false;
             }
             carved++;
         }
     }
+    if (carved > 0) {
+        tl_log_line("load: carved %zu writable page(s) beside executable memory", carved);
+    }
 
-    /* Copy the segments in. Every destination byte is in ordinary memory
-     * (carved pages) or in the fresh MAP_JIT region while it is still
-     * writable, so no window is needed yet. */
+    /* Copy the segments in. Executable segments copy through base_rw;
+     * carved writable segments copy through base. */
     bool ok = true;
     for (int i = 0; i < nloads && ok; i++) {
         const uint8_t *ph = (const uint8_t *)loads[i];
@@ -996,27 +1073,32 @@ static bool load_library(const char *name, const uint8_t *file, size_t flen)
             ok = false;
             break;
         }
-        uint8_t *dst = base + (v - base_vaddr);
+        uint64_t seg_off = v - base_vaddr;
+        size_t start_page = (size_t)(seg_off / TL_PAGE);
+        uint8_t *dst = (flags[start_page] & TL_PAGE_W)
+                     ? (base + seg_off)
+                     : (base_rw + seg_off);
         memcpy(dst, file + fo, fs);
         if (ms > fs) {
             memset(dst + fs, 0, (size_t)(ms - fs));
         }
     }
     if (!ok) {
-        unmap_lib(&(tl_lib){ .base = base, .npages = npages, .page_flags = flags });
+        unmap_lib(&(tl_lib){ .base = base, .npages = npages, .page_flags = flags, .is_stikdebug = is_stikdebug });
         return false;
     }
+    jit_icache(base, npages * TL_PAGE);
 
     ldyn d;
     if (!lex_dynamic(&e, &d)) {
         tl_log_line("load: %s has an unreadable dynamic table", name);
-        unmap_lib(&(tl_lib){ .base = base, .npages = npages, .page_flags = flags });
+        unmap_lib(&(tl_lib){ .base = base, .npages = npages, .page_flags = flags, .is_stikdebug = is_stikdebug });
         return false;
     }
     if (d.textrel) {
         tl_log_line("load: %s needs TEXTREL (code patched in place), which "
                     "W^X pages forbid -- refusing", name);
-        unmap_lib(&(tl_lib){ .base = base, .npages = npages, .page_flags = flags });
+        unmap_lib(&(tl_lib){ .base = base, .npages = npages, .page_flags = flags, .is_stikdebug = is_stikdebug });
         return false;
     }
 
@@ -1026,7 +1108,7 @@ static bool load_library(const char *name, const uint8_t *file, size_t flen)
     uint64_t sym_off = 0, str_off = 0;
     if (!d.symtab || !d.strtab || !lex_seg(&e, d.strtab, d.strsz, &str_off)) {
         tl_log_line("load: %s has an unreadable string table", name);
-        unmap_lib(&(tl_lib){ .base = base, .npages = npages, .page_flags = flags });
+        unmap_lib(&(tl_lib){ .base = base, .npages = npages, .page_flags = flags, .is_stikdebug = is_stikdebug });
         return false;
     }
     if (!lex_seg(&e, d.symtab, 24 * 1024 * 1024, &sym_off)) {
@@ -1040,6 +1122,8 @@ static bool load_library(const char *name, const uint8_t *file, size_t flen)
     snprintf(L->name, sizeof(L->name), "%s", name);
     L->file = NULL;
     L->base = base;
+    L->base_rw = base_rw;
+    L->is_stikdebug = is_stikdebug;
     L->npages = npages;
     L->page_flags = flags;
     L->base_vaddr = base_vaddr;
@@ -1428,6 +1512,7 @@ void husk_tl_attempt_reset(void)
         unmap_lib(&g_run.libs[i]);
         free(g_run.libs[i].file);
     }
+    g_prewarmed_used = 0;
     tl_window_release(g_run.window);
     tl_shim_free(g_run.queue);
     tl_shim_free(g_run.assets);

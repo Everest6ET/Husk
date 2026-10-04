@@ -56,8 +56,17 @@ void  tl_json_key(tl_json *j, const char *key);
 void  tl_json_string(tl_json *j, const char *s);   /* NULL writes null */
 void  tl_json_int(tl_json *j, long long v);
 void  tl_json_bool(tl_json *j, bool v);
-/* Hands over the buffer; NULL only if not even an error object fits in memory. */
 char *tl_json_finish(tl_json *j);
+
+/* ------------------------------------------------------------- JIT Memory */
+
+typedef struct tl_dual_mapping {
+    uint8_t *rw_addr;
+    uint8_t *rx_addr;
+    size_t   size;
+} tl_dual_mapping;
+
+tl_dual_mapping *tl_find_stikdebug_prewarmed(void);
 
 /* ------------------------------------------------------------------- ZIP */
 
