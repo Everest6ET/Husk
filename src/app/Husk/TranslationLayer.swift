@@ -470,6 +470,7 @@ struct TLAppReportView: View {
     @ObservedObject private var store = TranslationLayerStore.shared
     @Environment(\.dismiss) private var dismiss
     @State private var confirmRemove = false
+    @State private var showAttempt = false
 
     var body: some View {
         let verdict = TLVerdict(app.report)
@@ -493,6 +494,25 @@ struct TLAppReportView: View {
                         .foregroundStyle(Theme.text)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+            }
+
+            Section {
+                Button {
+                    showAttempt = true
+                } label: {
+                    HStack {
+                        Label("Run Translation Layer Attempt", systemImage: "play.circle.fill")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(Theme.accent)
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.caption.bold())
+                            .foregroundStyle(Theme.textDim.opacity(0.5))
+                    }
+                }
+            } footer: {
+                Text("Loads arm64 native code into JIT memory on Apple Silicon and drives "
+                   + "a NativeActivity lifecycle. Apps with Java/Dex require ART (milestone 2).")
             }
 
             if let report = app.report {
@@ -550,6 +570,9 @@ struct TLAppReportView: View {
                 dismiss()
             }
             Button("Cancel", role: .cancel) { }
+        }
+        .sheet(isPresented: $showAttempt) {
+            TLAttemptView(app: app)
         }
     }
 
@@ -617,3 +640,260 @@ private struct TLLibraryRows: View {
         }
     }
 }
+
+// MARK: - Live Attempt Execution & Screen
+
+@MainActor
+final class TLAttemptRunner: ObservableObject {
+    @Published var isRunning = false
+    @Published var isDone = false
+    @Published var exitCode: Int? = nil
+    @Published var frameCount = 0
+    @Published var logText: String = ""
+    @Published var currentFrame: UIImage? = nil
+
+    private var timer: Timer?
+
+    var statusText: String {
+        if isRunning { return "Running Attempt..." }
+        guard let code = exitCode else { return "Ready" }
+        switch code {
+        case 2:  return "Success: The guest drew frames!"
+        case 1:  return "Loaded: Native libraries loaded (no draw)"
+        default: return "Refused: Could not execute"
+        }
+    }
+
+    var statusColor: Color {
+        if isRunning { return Theme.accent }
+        guard let code = exitCode else { return Theme.textDim }
+        switch code {
+        case 2:  return Theme.good
+        case 1:  return .orange
+        default: return .red
+        }
+    }
+
+    var subStatusText: String {
+        if isRunning {
+            return "\(frameCount) frame(s) posted · driving lifecycle"
+        }
+        if let code = exitCode {
+            return "Exit code \(code) · \(frameCount) frame(s) drawn"
+        }
+        return "Not started"
+    }
+
+    func start(apks: [String], seconds: Int = 10) {
+        guard !isRunning else { return }
+        isRunning = true
+        isDone = false
+        exitCode = nil
+        frameCount = 0
+        currentFrame = nil
+        logText = ""
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let owned = apks.map { strdup($0) }
+            defer { owned.forEach { free($0) } }
+            let pointers = owned.map { UnsafePointer<CChar>($0) }
+            let rc = pointers.withUnsafeBufferPointer {
+                husk_tl_attempt_start($0.baseAddress, Int32($0.count), Int32(seconds))
+            }
+            if rc != 0 {
+                Task { @MainActor in
+                    self.isRunning = false
+                    self.isDone = true
+                    self.exitCode = -1
+                    self.poll()
+                }
+                return
+            }
+
+            Task { @MainActor in
+                self.timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+                    self?.poll()
+                }
+            }
+        }
+    }
+
+    func stop() {
+        husk_tl_attempt_stop()
+        poll()
+    }
+
+    private func poll() {
+        updateLog()
+        updateFrames()
+
+        var code: Int32 = 0
+        if husk_tl_attempt_done(&code) {
+            timer?.invalidate()
+            timer = nil
+            isRunning = false
+            isDone = true
+            exitCode = Int(code)
+            updateLog()
+            updateFrames()
+        }
+    }
+
+    private func updateLog() {
+        if let cLog = husk_tl_attempt_log() {
+            let text = String(cString: cLog)
+            free(cLog)
+            if text != self.logText {
+                self.logText = text
+            }
+        }
+    }
+
+    private func updateFrames() {
+        let n = Int(husk_tl_attempt_frames())
+        if n != frameCount || currentFrame == nil {
+            frameCount = n
+            husk_tl_frame_begin_read()
+            defer { husk_tl_frame_end_read() }
+            if let ptr = husk_tl_frame_pixels() {
+                let w = Int(husk_tl_frame_width())
+                let h = Int(husk_tl_frame_height())
+                let stride = Int(husk_tl_frame_stride())
+                if w > 0, h > 0, stride > 0 {
+                    self.currentFrame = makeImage(from: ptr, width: w, height: h, stride: stride)
+                }
+            }
+        }
+    }
+
+    private func makeImage(from pixels: UnsafePointer<UInt8>, width: Int, height: Int, stride: Int) -> UIImage? {
+        let bytesPerRow = stride * 4
+        let totalBytes = bytesPerRow * height
+        guard let dataProvider = CGDataProvider(data: Data(bytes: pixels, count: totalBytes) as CFData) else {
+            return nil
+        }
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue)
+        guard let cgImage = CGImage(
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bitsPerPixel: 32,
+            bytesPerRow: bytesPerRow,
+            space: colorSpace,
+            bitmapInfo: bitmapInfo,
+            provider: dataProvider,
+            decode: nil,
+            shouldInterpolate: false,
+            intent: .defaultIntent
+        ) else { return nil }
+        return UIImage(cgImage: cgImage)
+    }
+}
+
+struct TLAttemptView: View {
+    let app: TLApp
+    @StateObject private var runner = TLAttemptRunner()
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(runner.statusText)
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(runner.statusColor)
+                        Text(runner.subStatusText)
+                            .font(.system(size: 12))
+                            .foregroundStyle(Theme.textDim)
+                    }
+                    Spacer()
+                    if runner.isRunning {
+                        Button("Stop") {
+                            runner.stop()
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(.red)
+                    } else {
+                        Button("Rerun") {
+                            runner.start(apks: app.apks)
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                }
+                .padding()
+                .background(Theme.surface)
+
+                Divider()
+
+                if let frame = runner.currentFrame {
+                    Image(uiImage: frame)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(maxWidth: .infinity, maxHeight: 280)
+                        .background(Color.black)
+                        .overlay(alignment: .bottomTrailing) {
+                            Text("\(runner.frameCount) frames")
+                                .font(.caption2.monospaced())
+                                .padding(4)
+                                .background(.ultraThinMaterial)
+                                .cornerRadius(4)
+                                .padding(6)
+                        }
+                    Divider()
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("ATTEMPT LOG")
+                            .font(.technical(11, weight: .bold))
+                            .foregroundStyle(Theme.textDim)
+                        Spacer()
+                        Button {
+                            UIPasteboard.general.string = runner.logText
+                        } label: {
+                            Label("Copy", systemImage: "doc.on.doc")
+                                .font(.system(size: 12))
+                        }
+                    }
+                    .padding(.horizontal)
+                    .padding(.top, 8)
+
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                            Text(runner.logText.isEmpty ? "Starting attempt..." : runner.logText)
+                                .font(.technical(11))
+                                .foregroundStyle(Theme.text)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(12)
+                                .textSelection(.enabled)
+                                .id("bottom")
+                        }
+                        .background(Theme.bg)
+                        .onChange(of: runner.logText) { _ in
+                            proxy.scrollTo("bottom", anchor: .bottom)
+                        }
+                    }
+                }
+            }
+            .navigationTitle(app.label)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") {
+                        runner.stop()
+                        dismiss()
+                    }
+                }
+            }
+            .onAppear {
+                runner.start(apks: app.apks)
+            }
+            .onDisappear {
+                runner.stop()
+            }
+        }
+    }
+}
+

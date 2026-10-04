@@ -1306,7 +1306,13 @@ int husk_tl_attempt_start(const char *const *apks, int count, int seconds)
     g_run.assets = tl_shim_new_asset_manager();
     g_run.stop_requested = false;
     memset(&g_run.callbacks, 0, sizeof(g_run.callbacks));
-    static const char data_path[] = "/var/mobile/Containers/Data/Application/husk/Documents";
+    char data_path[1024];
+    const char *home = getenv("HOME");
+    if (home) {
+        snprintf(data_path, sizeof(data_path), "%s/Documents", home);
+    } else {
+        snprintf(data_path, sizeof(data_path), "/tmp");
+    }
     g_run.activity = (tl_activity){
         .callbacks = &g_run.callbacks,
         .vm = tl_shim_vm(),
