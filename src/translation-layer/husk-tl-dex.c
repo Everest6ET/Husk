@@ -530,8 +530,6 @@ bool tl_dex_invoke(tl_dex_context *ctx, tl_dex_method *method, tl_dex_val *args,
 
     if (!method->insns || method->insns_size == 0) return true;
 
-    dex_log("invoke: %s->%s (pc_max=%d)", method->clazz ? method->clazz->descriptor : "unknown", method->name, method->insns_size);
-
     tl_dex_file *dex = method->clazz->dex;
     uint16_t reg_count = method->registers_size;
     if (reg_count < method->ins_size) reg_count = method->ins_size;
@@ -552,9 +550,6 @@ bool tl_dex_invoke(tl_dex_context *ctx, tl_dex_method *method, tl_dex_val *args,
         uint16_t inst = insns[pc];
         uint8_t opcode = inst & 0xff;
         uint8_t op_b = (inst >> 8) & 0xff;
-        if (pc < 30 || pc % 50 == 0) {
-            dex_log("  pc=%d op=0x%02x", pc, opcode);
-        }
 
         switch (opcode) {
             case 0x00: /* nop */
@@ -970,12 +965,6 @@ bool tl_dex_invoke(tl_dex_context *ctx, tl_dex_method *method, tl_dex_val *args,
                     call_args[i] = v[reg_list[i]];
                 }
 
-                if (!target) {
-                    dex_log("  invoke target NULL for idx=%d", m_idx);
-                } else {
-                    dex_log("  invoke %s->%s (native=%p)", target->clazz ? target->clazz->descriptor : "?", target->name, target->native_func);
-                }
-
                 tl_dex_invoke(ctx, target, call_args, count, &last_result);
                 pc += 3;
                 break;
@@ -1186,7 +1175,6 @@ bool tl_dex_invoke(tl_dex_context *ctx, tl_dex_method *method, tl_dex_val *args,
     }
 
 done:
-    dex_log("return: %s->%s", method->clazz ? method->clazz->descriptor : "unknown", method->name);
     free(v);
     return success;
 }
