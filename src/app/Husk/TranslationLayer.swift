@@ -47,6 +47,25 @@ struct TLReport: Decodable {
     let libraries: [TLLibrary]
 }
 
+extension TLReport {
+    /// Unity (IL2CPP) games run through the native runtime, which handles what the scan flags per library
+    /// (raw system calls, thread-register use, pages shared between segments). A report made before that
+    /// runtime existed still says "needs work", so the app judges by the engine, not by the stored words.
+    var runsOnNativeRuntime: Bool { ok && (engine?.hasPrefix("Unity") ?? false) && !abis.isEmpty && abis.contains("arm64-v8a") }
+
+    var displaySummary: String {
+        guard runsOnNativeRuntime else { return summary }
+        let flagged = libraries.filter { $0.abi == "arm64-v8a" && $0.status != "ok" }.count
+        let total = libraries.filter { $0.abi == "arm64-v8a" }.count
+        var text = "A Unity game. It runs through Husk's native runtime, which loads its \(total) arm64 libraries itself."
+        if flagged > 0 {
+            text += " \(flagged) of them use tricks the older loader could not handle; the native runtime handles those too, "
+                  + "except for optional anti-tamper code, which it leaves out."
+        }
+        return text
+    }
+}
+
 /// One arm64 library. Everything past `notes` is absent when the file could
 /// not be read as an arm64 library at all.
 struct TLLibrary: Decodable, Identifiable {
@@ -305,8 +324,8 @@ struct TranslationLayerSettings: View {
                 Text("Runs an app's own code directly, against a rewrite of Android's "
                    + "framework, instead of booting a whole Android system -- the "
                    + "approach of Android Translation Layer on Linux, rebuilt for iOS. "
-                   + "It cannot open apps yet. For now it reports what each app would "
-                   + "need, and checks this iPhone for what the design depends on. "
+                   + "It can run Unity games (experimental) and reports what other apps "
+                   + "would need, and checks this iPhone for what the design depends on. "
                    + "Android itself is unaffected either way.")
             }
 
@@ -402,9 +421,9 @@ struct TranslationLayerSettings: View {
         Section {
             DetailRow(label: "App reports", value: "working", mono: false)
             DetailRow(label: "Device checks", value: "working", mono: false)
-            DetailRow(label: "Library loader", value: "not started", mono: false)
-            DetailRow(label: "Android runtime", value: "not started", mono: false)
-            DetailRow(label: "Opening apps", value: "not yet", mono: false)
+            DetailRow(label: "Library loader", value: "working", mono: false)
+            DetailRow(label: "Android runtime", value: "Unity games", mono: false)
+            DetailRow(label: "Opening apps", value: "Unity games (experimental)", mono: false)
         } header: {
             Text("Where it stands")
         } footer: {
@@ -419,6 +438,10 @@ struct TLVerdict {
     let tint: Color
 
     init(_ report: TLReport?) {
+        if report?.runsOnNativeRuntime == true {
+            title = "Unity: native runtime"; tint = Theme.good
+            return
+        }
         switch report?.verdict {
         case "java"?:           title = "Java only";                    tint = Theme.good
         case "native"?:         title = "Native code, maps cleanly";    tint = Theme.good
@@ -489,7 +512,7 @@ struct TLAppReportView: View {
                 }
                 .padding(.vertical, 4)
                 if let report = app.report {
-                    Text(report.summary)
+                    Text(report.displaySummary)
                         .font(.system(size: 14))
                         .foregroundStyle(Theme.text)
                         .fixedSize(horizontal: false, vertical: true)

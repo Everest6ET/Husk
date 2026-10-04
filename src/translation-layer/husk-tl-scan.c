@@ -312,6 +312,11 @@ char *husk_tl_scan(const char *const *paths, int count)
         verdict = "java";
         snprintf(summary, sizeof(summary), "No native code. Only the Java side of the "
                  "translation layer is needed to run it.");
+    } else if (abis[ABI_ARM64] && arm64_trouble > 0 && engine_name(&eng) && !strncmp(engine_name(&eng), "Unity", 5)) {
+        /* The native runtime (src/translation-layer-next) handles what the per-library check flags. */
+        verdict = "native";
+        snprintf(summary, sizeof(summary), "A Unity game: Husk's native runtime loads its %d arm64 libraries itself, "
+                 "including the %d that use tricks the older loader could not handle.", arm64_libs, arm64_trouble);
     } else if (abis[ABI_ARM64] && arm64_trouble == 0) {
         verdict = "native";
         snprintf(summary, sizeof(summary), "arm64 native code, and every library maps "

@@ -311,6 +311,8 @@ typedef struct {
 
 static tl_run g_run;
 
+int tl_log_sink_fd = -1;
+
 void tl_log_line(const char *fmt, ...)
 {
     char line[512];
@@ -327,6 +329,8 @@ void tl_log_line(const char *fmt, ...)
     line[w] = '\n';
     line[w + 1] = '\0';
     fputs(line, stderr);
+    /* A file written line by line with write(2): what a process killed without warning still leaves behind. */
+    if (tl_log_sink_fd >= 0) { ssize_t ignored = write(tl_log_sink_fd, line, strlen(line)); (void)ignored; }
     pthread_mutex_lock(&g_log_mutex);
     tl_log_put(&g_run.log, line, (size_t)w + 1);
     pthread_mutex_unlock(&g_log_mutex);

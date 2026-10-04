@@ -2,6 +2,7 @@
 #define _DARWIN_C_SOURCE
 #include "husk-tl-unity-app.h"
 
+#include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdatomic.h>
@@ -22,6 +23,7 @@
 #include "husk-tl-unity.h"
 
 void tl_hle_set_ca_bundle(const char *path);
+extern int tl_log_sink_fd;
 
 static struct {
     atomic_int state;
@@ -123,7 +125,7 @@ static void *heartbeat_thread(void *arg)
     pthread_setname_np("husk-unity-hb");
     unsigned long last = 0;
     for (int tick = 0;; tick++) {
-        sleep(3);
+        if (tick < 40) usleep(500000); else sleep(3);          /* twice a second for the first twenty seconds */
         unsigned long f = tl_unity_frames();
 #if TARGET_OS_IPHONE
         tl_log_line("unity: alive: %lu frames (+%lu), %zu MiB left before jetsam", f, f - last, os_proc_available_memory() >> 20);
@@ -140,6 +142,11 @@ static void *launch_thread(void *arg)
     (void)arg;
     pthread_setname_np("husk-unity-start");
     tl_guest_exit_hook = guest_exit;
+    {
+        char path[1100];
+        snprintf(path, sizeof(path), "%s/unity-run.log", A.data);
+        tl_log_sink_fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_APPEND, 0644);
+    }
     install_crash_reporter();
     tl_hle_set_ca_bundle(A.ca);
 

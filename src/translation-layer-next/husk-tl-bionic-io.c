@@ -566,7 +566,11 @@ static int b_sigaltstack(const guest_stack_t *ss, guest_stack_t *old)
     if (old && r == 0) { old->ss_sp = od.ss_sp; old->ss_size = od.ss_size; old->ss_flags = od.ss_flags & SS_DISABLE ? 2 : 0; }
     return r;
 }
-static int b_raise(int sig) { int d = tl_signal_to_darwin(sig); if (d < 0) { tl_set_guest_errno(22); return -1; } return raise(d); }
+static void note_signal(const char *how, int sig)
+{
+    if (sig == 6 || sig == 9 || sig == 11 || sig == 15 || sig == 3) tl_log_line("bionic: guest asked for signal %d (%s)", sig, how);
+}
+static int b_raise(int sig) { note_signal("raise", sig); int d = tl_signal_to_darwin(sig); if (d < 0) { tl_set_guest_errno(22); return -1; } return raise(d); }
 
 
 /* ------------------------------------------------- raw Linux system calls */
@@ -672,6 +676,7 @@ long tl_linux_syscall(long a0, long a1, long a2, long a3, long a4, long a5, long
     case 129: case 130: case 131: {                                                     /* kill, tkill, tgkill */
         int sig = nr == 131 ? (int)a2 : (int)a1;
         if (sig == 0) return 0;
+        note_signal("kill/tgkill system call", sig);
         int d = tl_signal_to_darwin(sig);
         if (d < 0) return -22;
         return raise(d) == 0 ? 0 : -3;
