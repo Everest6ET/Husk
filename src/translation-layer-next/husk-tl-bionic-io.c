@@ -48,11 +48,18 @@ static char g_data_dir[512];
 void tl_set_data_dir(const char *dir) { snprintf(g_data_dir, sizeof(g_data_dir), "%s", dir ? dir : ""); }
 const char *tl_data_dir(void) { return g_data_dir[0] ? g_data_dir : "/tmp"; }
 
+/* A file holding `content`, already unlinked. Where it can be made depends on the host: iOS gives an app no /tmp. */
 static int synth_file(const char *content)
 {
-    char tmpl[] = "/tmp/husk-synth-XXXXXX";
-    int fd = mkstemp(tmpl);
-    if (fd < 0) return -1;
+    const char *dirs[3] = { g_data_dir[0] ? g_data_dir : NULL, getenv("TMPDIR"), "/tmp" };
+    char tmpl[1100];
+    int fd = -1;
+    for (int i = 0; i < 3 && fd < 0; i++) {
+        if (!dirs[i]) continue;
+        snprintf(tmpl, sizeof(tmpl), "%s/husk-synth-XXXXXX", dirs[i]);
+        fd = mkstemp(tmpl);
+    }
+    if (fd < 0) { tl_log_line("bionic: no writable directory for a synthetic file (%s)", strerror(errno)); return -1; }
     unlink(tmpl);
     size_t n = strlen(content);
     if (write(fd, content, n) != (ssize_t)n) { close(fd); return -1; }

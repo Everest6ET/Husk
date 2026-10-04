@@ -155,7 +155,10 @@ static EGLSurface w_eglCreateWindowSurface(EGLDisplay d, EGLConfig cfg, void *wi
         tl_log_line("egl: window %dx%d -> off-screen surface %p", pb[1], pb[3], s);
         return s;
     }
-    return a_eglCreateWindowSurface(d, cfg, tl_nwindow_native(win), at);
+    void *layer = tl_nwindow_native(win);
+    EGLSurface s = a_eglCreateWindowSurface(d, cfg, layer, at);
+    tl_log_line("egl: window surface %p on layer %p (%dx%d), eglGetError %#x", s, layer, tl_nwindow_width(win), tl_nwindow_height(win), a_eglGetError());
+    return s;
 }
 static EGLSurface w_eglCreatePbufferSurface(EGLDisplay d, EGLConfig c, const EGLint *at) { return a_eglCreatePbufferSurface(d, c, at); }
 
@@ -205,6 +208,7 @@ static void save_frame(EGLDisplay d, EGLSurface s, unsigned long n)
 static EGLBoolean w_eglSwapBuffers(EGLDisplay d, EGLSurface s)
 {
     unsigned long n = atomic_fetch_add(&E.presented, 1) + 1;
+    if (n <= 3 || n % 600 == 0) tl_log_line("egl: swap #%lu", n);
     if (E.frame_dir[0] && (n % (unsigned long)E.frame_every == 0 || n <= 3)) save_frame(d, s, n);
     return E.frame_dir[0] ? EGL_TRUE : a_eglSwapBuffers(d, s);
 }

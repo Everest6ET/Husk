@@ -10,6 +10,10 @@
 #include <string.h>
 #include <sys/ucontext.h>
 #include <unistd.h>
+#include <TargetConditionals.h>
+#if TARGET_OS_IPHONE
+#include <os/proc.h>
+#endif
 
 #include "husk-tl-bionic.h"
 #include "husk-tl-internal.h"
@@ -111,6 +115,26 @@ static void guest_exit(int status)
     pthread_exit(NULL);
 }
 
+/* Says every few seconds that the engine is alive, and how much memory the phone says is left: a silent death
+ * leaves nothing else to tell a frozen game from a killed one, or a jetsam kill from a crash. */
+static void *heartbeat_thread(void *arg)
+{
+    (void)arg;
+    pthread_setname_np("husk-unity-hb");
+    unsigned long last = 0;
+    for (int tick = 0;; tick++) {
+        sleep(3);
+        unsigned long f = tl_unity_frames();
+#if TARGET_OS_IPHONE
+        tl_log_line("unity: alive: %lu frames (+%lu), %zu MiB left before jetsam", f, f - last, os_proc_available_memory() >> 20);
+#else
+        tl_log_line("unity: alive: %lu frames (+%lu)", f, f - last);
+#endif
+        last = f;
+        if (atomic_load(&A.state) == HUSK_UNITY_ENDED || atomic_load(&A.state) == HUSK_UNITY_FAILED) return NULL;
+    }
+}
+
 static void *launch_thread(void *arg)
 {
     (void)arg;
@@ -130,6 +154,8 @@ static void *launch_thread(void *arg)
         return NULL;
     }
     atomic_store(&A.state, HUSK_UNITY_RUNNING);
+    pthread_t hb;
+    if (pthread_create(&hb, NULL, heartbeat_thread, NULL) == 0) pthread_detach(hb);
     return NULL;
 }
 
