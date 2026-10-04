@@ -12,6 +12,7 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <stdbool.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <arpa/inet.h>
@@ -31,6 +32,8 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/uio.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
 #include <time.h>
 #include <unistd.h>
 #include <utime.h>
@@ -62,7 +65,7 @@ static const char *synth_content(const char *path, char *buf, size_t n)
 {
     if (!strcmp(path, "/proc/cpuinfo")) {
         buf[0] = 0;
-        long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+        long ncpu = getenv("TL_NCPU") ? atol(getenv("TL_NCPU")) : sysconf(_SC_NPROCESSORS_ONLN);
         for (long i = 0; i < ncpu; i++) {
             size_t l = strlen(buf);
             snprintf(buf + l, n - l, "processor\t: %ld\nBogoMIPS\t: 48.00\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\n"
@@ -75,7 +78,7 @@ static const char *synth_content(const char *path, char *buf, size_t n)
         return buf;
     }
     if (!strncmp(path, "/sys/devices/system/cpu/", 24) && (strstr(path, "/present") || strstr(path, "/possible") || strstr(path, "/online"))) {
-        snprintf(buf, n, "0-%ld\n", sysconf(_SC_NPROCESSORS_ONLN) - 1);
+        snprintf(buf, n, "0-%ld\n", (getenv("TL_NCPU") ? atol(getenv("TL_NCPU")) : sysconf(_SC_NPROCESSORS_ONLN)) - 1);
         return buf;
     }
     if (!strcmp(path, "/proc/self/status")) {
@@ -83,6 +86,14 @@ static const char *synth_content(const char *path, char *buf, size_t n)
         return buf;
     }
     return NULL;
+}
+
+/* A file for a path whose contents are made up (/proc/cpuinfo ...), or -1 when the path is real. */
+int tl_synth_open(const char *path)
+{
+    char content[8192];
+    const char *s = synth_content(path, content, sizeof(content));
+    return s ? synth_file(s) : -1;
 }
 
 const char *tl_path_resolve(const char *path, char *buf, size_t n)
@@ -332,32 +343,85 @@ static int prot_filter(int prot, const char *what)
     return prot;
 }
 
+/*
+ * Anonymous mappings the guest made, so madvise(MADV_DONTNEED) can do what Linux does to them:
+ * throw the pages away so the next touch finds zeros. Allocators lean on that -- they release a range
+ * and expect it to come back clean. Darwin's MADV_DONTNEED keeps the contents, so the pages are
+ * replaced with fresh ones at the same protection instead.
+ */
+#define MAX_ANON 4096
+static struct { uintptr_t addr; size_t len; } g_anon[MAX_ANON];
+static int g_nanon;
+static pthread_mutex_t g_anon_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void anon_add(void *addr, size_t len)
+{
+    pthread_mutex_lock(&g_anon_lock);
+    for (int i = 0; i < g_nanon; i++) {                      /* replace anything this overlaps */
+        uintptr_t a = g_anon[i].addr, e = a + g_anon[i].len;
+        if ((uintptr_t)addr < e && (uintptr_t)addr + len > a) { g_anon[i] = g_anon[--g_nanon]; i--; }
+    }
+    if (g_nanon < MAX_ANON) { g_anon[g_nanon].addr = (uintptr_t)addr; g_anon[g_nanon].len = len; g_nanon++; }
+    pthread_mutex_unlock(&g_anon_lock);
+}
+
+static void anon_zap(uintptr_t addr, size_t len)
+{
+    uintptr_t end = addr + len;
+    pthread_mutex_lock(&g_anon_lock);
+    for (int i = 0; i < g_nanon; i++) {
+        uintptr_t a = g_anon[i].addr > addr ? g_anon[i].addr : addr;
+        uintptr_t e = g_anon[i].addr + g_anon[i].len < end ? g_anon[i].addr + g_anon[i].len : end;
+        if (a >= e) continue;
+        for (uintptr_t p = a & ~(uintptr_t)16383; p < e;) {           /* walk the regions in the range */
+            mach_vm_address_t ra = p; mach_vm_size_t rs = 0;
+            vm_region_basic_info_data_64_t info; mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj;
+            if (mach_vm_region(mach_task_self(), &ra, &rs, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &cnt, &obj) != KERN_SUCCESS) break;
+            if (ra > p) { p = ra; continue; }
+            uintptr_t re = ra + rs < e ? ra + rs : e;
+            int prot = (info.protection & VM_PROT_READ ? PROT_READ : 0) | (info.protection & VM_PROT_WRITE ? PROT_WRITE : 0);
+            mmap((void *)p, re - p, prot, MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0);
+            p = re;
+        }
+    }
+    pthread_mutex_unlock(&g_anon_lock);
+}
+
+static int g_mm_trace = -1;
+static void mm_trace(const char *what, void *a, size_t l, long x, long y)
+{
+    if (g_mm_trace < 0) g_mm_trace = getenv("TL_MM_TRACE") ? 1 : 0;
+    if (g_mm_trace) tl_log_line("mm: %s addr=%p len=%#zx %#lx %#lx", what, a, l, x, y);
+}
+
 static void *b_mmap(void *addr, size_t len, int prot, int flags, int fd, long off)
 {
     int df = flags & 0x3;                                   /* MAP_SHARED / MAP_PRIVATE */
     if (flags & 0x10)   df |= MAP_FIXED;
     if (flags & 0x20)   df |= MAP_ANON;
-    if (flags & 0x4000) df |= MAP_NOCACHE & 0;              /* MAP_NORESERVE: no equivalent needed */
     TL_ERRNO_BEGIN();
     void *r = mmap(addr, len, prot_filter(prot, "mmap"), df, (flags & 0x20) ? -1 : fd, off);
     TL_ERRNO_END();
+    if (r != MAP_FAILED && (flags & 0x20)) anon_add(r, len);
+    mm_trace("mmap", r, len, prot, flags);
+    if (r == MAP_FAILED) tl_log_line("mm: mmap FAILED len=%#zx prot=%d flags=%#x errno=%d", len, prot, flags, errno);
     return r;
 }
-static int b_munmap(void *a, size_t l) { TL_ERRNO_BEGIN(); int r = munmap(a, l); TL_ERRNO_END(); return r; }
-static int b_mprotect(void *a, size_t l, int prot) { TL_ERRNO_BEGIN(); int r = mprotect(a, l, prot_filter(prot, "mprotect")); TL_ERRNO_END(); return r; }
+static int b_munmap(void *a, size_t l) { TL_ERRNO_BEGIN(); int r = munmap(a, l); TL_ERRNO_END(); mm_trace("munmap", a, l, r, errno); return r; }
+static int b_mprotect(void *a, size_t l, int prot) { TL_ERRNO_BEGIN(); int r = mprotect(a, l, prot_filter(prot, "mprotect")); int e = errno; TL_ERRNO_END(); mm_trace("mprotect", a, l, prot, r ? e : 0); return r; }
 static int b_madvise(void *a, size_t l, int adv)
 {
-    /* MADV_DONTNEED (4) on Linux zeroes private pages; Darwin's keeps them. Zero them
-     * explicitly where it is safe to: the pages must be mapped writable. */
-    if (adv == 4) { return 0; }
-    if (adv == 8) return madvise(a, l, MADV_FREE);          /* MADV_FREE */
-    return 0;
+    mm_trace("madvise", a, l, adv, 0);
+    if (adv == 4) { anon_zap((uintptr_t)a, l); return 0; }  /* MADV_DONTNEED: zero-fill on next touch */
+    return 0;                                                /* the rest are hints */
 }
 static void *b_mremap(void *old, size_t olds, size_t news, int flags, void *newaddr)
 {
+    mm_trace("mremap", old, olds, (long)news, flags);
     (void)flags; (void)newaddr;
     void *n = mmap(NULL, news, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
     if (n == MAP_FAILED) { tl_set_guest_errno(12); return (void *)-1; }
+    anon_add(n, news);
     memcpy(n, old, olds < news ? olds : news);
     munmap(old, olds);
     return n;
@@ -396,9 +460,19 @@ typedef void (*guest_handler)(int, void *, void *);
 
 static struct { void *handler; int flags; } g_guest_sig[32];
 
+static int g_sig_trace = -1;
+static void sig_trace(const char *what, int g)
+{
+    if (g_sig_trace < 0) g_sig_trace = getenv("TL_SIGNAL_TRACE") ? 1 : 0;
+    if (!g_sig_trace) return;
+    char nm[32] = ""; pthread_getname_np(pthread_self(), nm, sizeof(nm));
+    tl_log_line("signal[%s]: %s %d", nm, what, g);
+}
+
 static void host_signal_entry(int dsig, siginfo_t *info, void *uctx)
 {
     int gsig = tl_signal_from_darwin(dsig);
+    sig_trace("delivered", gsig);
     void *h = g_guest_sig[gsig < 32 ? gsig : 0].handler;
     if (!h || h == (void *)1) return;
     ((guest_handler)h)(gsig, info, uctx);
@@ -452,7 +526,9 @@ static int b_sigsuspend(const uint64_t *mask)
     uint32_t m = 0;
     for (int s = 1; s < 32; s++) if (*mask & (1ull << (s - 1))) { int d = tl_signal_to_darwin(s); if (d > 0) m |= 1u << (d - 1); }
     sigset_t ds; memcpy(&ds, &m, sizeof(m));
+    sig_trace("sigsuspend begins, mask", (int)*mask);
     TL_ERRNO_BEGIN(); int r = sigsuspend(&ds); TL_ERRNO_END();
+    sig_trace("sigsuspend returned", 0);
     return r;
 }
 typedef struct { void *ss_sp; int ss_flags; int pad; size_t ss_size; } guest_stack_t;
@@ -473,42 +549,85 @@ static int b_raise(int sig) { int d = tl_signal_to_darwin(sig); if (d < 0) { tl_
  * What `svc #0` and syscall() mean here: the arm64 Linux numbers a guest actually uses,
  * answered with Darwin's equivalents. Returns the result, or -errno in Linux numbering.
  */
-#define FUT_BUCKETS 64
-static struct { pthread_mutex_t m; pthread_cond_t c; } g_fut[FUT_BUCKETS] = {
-#define B { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER }
-    B,B,B,B,B,B,B,B,B,B,B,B,B,B,B,B, B,B,B,B,B,B,B,B,B,B,B,B,B,B,B,B,
-    B,B,B,B,B,B,B,B,B,B,B,B,B,B,B,B, B,B,B,B,B,B,B,B,B,B,B,B,B,B,B,B,
+#define FUT_BUCKETS 256
+
+/*
+ * A futex wakes exactly the threads waiting on the address it is given. Waking a whole hash bucket
+ * instead would wake waiters on unrelated addresses, and primitives built on futexes -- Unity's
+ * semaphores and job queues among them -- are allowed to rely on that: a thread that returns from
+ * FUTEX_WAIT has been woken for *its* word. So each waiter queues itself with its address and its
+ * own condition variable, and a wake picks the matching ones, oldest first.
+ */
+typedef struct fut_waiter { uint32_t *addr; bool woken; pthread_cond_t cv; struct fut_waiter *next; } fut_waiter;
+static struct { pthread_mutex_t m; fut_waiter *head, *tail; } g_fut[FUT_BUCKETS] = {
+#define B { PTHREAD_MUTEX_INITIALIZER, NULL, NULL }
+#define B8 B,B,B,B,B,B,B,B
+#define B64 B8,B8,B8,B8,B8,B8,B8,B8
+    B64, B64, B64, B64,
+#undef B64
+#undef B8
 #undef B
 };
 
-static long futex_call(uint32_t *addr, int op, uint32_t val, const struct timespec *to)
+static int g_futex_trace = -1;
+
+static void fut_unlink(size_t h, fut_waiter *w)
 {
+    fut_waiter **pp = &g_fut[h].head, *prev = NULL;
+    while (*pp && *pp != w) { prev = *pp; pp = &(*pp)->next; }
+    if (!*pp) return;
+    *pp = w->next;
+    if (g_fut[h].tail == w) g_fut[h].tail = prev;
+}
+
+static long futex_call(uint32_t *addr, int op, uint32_t val, const struct timespec *to, uint32_t bitset_val)
+{
+    (void)bitset_val;
     int cmd = op & 127;
+    if (g_futex_trace < 0) g_futex_trace = getenv("TL_FUTEX_TRACE") ? 1 : 0;
     size_t h = ((uintptr_t)addr >> 2) % FUT_BUCKETS;
     if (cmd == 1 || cmd == 10) {                                  /* FUTEX_WAKE / WAKE_BITSET */
+        long woken = 0;
         pthread_mutex_lock(&g_fut[h].m);
-        pthread_cond_broadcast(&g_fut[h].c);
+        fut_waiter *w = g_fut[h].head, *next;
+        for (; w && woken < (long)(int32_t)val; w = next) {
+            next = w->next;
+            if (w->addr != addr) continue;
+            fut_unlink(h, w);
+            w->woken = true;
+            pthread_cond_signal(&w->cv);
+            woken++;
+        }
         pthread_mutex_unlock(&g_fut[h].m);
-        return val ? 1 : 0;
+        if (g_futex_trace) { char nm[32] = ""; pthread_getname_np(pthread_self(), nm, sizeof(nm)); tl_log_line("futex[%s]: WAKE addr=%p n=%d woke %ld", nm, (void *)addr, (int)val, woken); }
+        return woken;
     }
     if (cmd == 0 || cmd == 9) {                                   /* FUTEX_WAIT / WAIT_BITSET */
         pthread_mutex_lock(&g_fut[h].m);
         if (__atomic_load_n(addr, __ATOMIC_SEQ_CST) != val) { pthread_mutex_unlock(&g_fut[h].m); return -11; }
+        fut_waiter me = { .addr = addr, .woken = false, .cv = PTHREAD_COND_INITIALIZER, .next = NULL };
+        if (g_fut[h].tail) g_fut[h].tail->next = &me; else g_fut[h].head = &me;
+        g_fut[h].tail = &me;
+        if (g_futex_trace) { char nm[32] = ""; pthread_getname_np(pthread_self(), nm, sizeof(nm)); tl_log_line("futex[%s]: WAIT addr=%p val=%#x", nm, (void *)addr, val); }
         long r = 0;
-        if (!to) {
-            pthread_cond_wait(&g_fut[h].c, &g_fut[h].m);
-        } else {
-            struct timespec rel = *to;
-            if (cmd == 9) {                                       /* absolute: against CLOCK_MONOTONIC unless the realtime flag is set */
+        struct timespec rel = {0};
+        if (to) {
+            rel = *to;
+            if (cmd == 9) {                                       /* absolute: CLOCK_MONOTONIC unless the realtime flag is set */
                 struct timespec now;
                 clock_gettime((op & 256) ? CLOCK_REALTIME : CLOCK_MONOTONIC, &now);
                 rel.tv_sec = to->tv_sec - now.tv_sec; rel.tv_nsec = to->tv_nsec - now.tv_nsec;
                 if (rel.tv_nsec < 0) { rel.tv_sec--; rel.tv_nsec += 1000000000L; }
                 if (rel.tv_sec < 0) { rel.tv_sec = 0; rel.tv_nsec = 0; }
             }
-            if (pthread_cond_timedwait_relative_np(&g_fut[h].c, &g_fut[h].m, &rel) == ETIMEDOUT) r = -110;
+        }
+        while (!me.woken) {
+            if (!to) { pthread_cond_wait(&me.cv, &g_fut[h].m); continue; }
+            if (pthread_cond_timedwait_relative_np(&me.cv, &g_fut[h].m, &rel) == ETIMEDOUT && !me.woken) { fut_unlink(h, &me); r = -110; break; }
+            if (!me.woken) { rel.tv_sec = 0; rel.tv_nsec = 0; }   /* a spurious wake with a deadline: do not wait again past it */
         }
         pthread_mutex_unlock(&g_fut[h].m);
+        pthread_cond_destroy(&me.cv);
         return r;
     }
     return -38;
@@ -523,7 +642,7 @@ long tl_linux_syscall(long a0, long a1, long a2, long a3, long a4, long a5, long
     case 173: return getppid();
     case 174: case 175: return getuid();
     case 176: case 177: return getgid();
-    case 98:  return futex_call((uint32_t *)a0, (int)a1, (uint32_t)a2, (const struct timespec *)a3);
+    case 98:  return futex_call((uint32_t *)a0, (int)a1, (uint32_t)a2, (const struct timespec *)a3, (uint32_t)a5);
     case 129: case 130: case 131: {                                                     /* kill, tkill, tgkill */
         int sig = nr == 131 ? (int)a2 : (int)a1;
         if (sig == 0) return 0;
@@ -546,6 +665,7 @@ long tl_linux_syscall(long a0, long a1, long a2, long a3, long a4, long a5, long
     case 283: return 0;                                                                 /* membarrier */
     case 134: case 135: return 0;                                                       /* rt_sigaction, rt_sigprocmask: accepted */
     case 233: return 0;                                                                 /* madvise */
+    case 122: case 123: return 0;                                                       /* sched_setaffinity / getaffinity */
     case 167: return 0;                                                                 /* prctl */
     case 160: return 0;                                                                 /* uname */
     default: break;

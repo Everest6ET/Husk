@@ -43,6 +43,8 @@ extern const tl_bionic_entry tl_tab_str[];
 extern const tl_bionic_entry tl_tab_io[];
 extern const tl_bionic_entry tl_tab_pthread[];
 extern const tl_bionic_entry tl_tab_ndk[];
+extern const tl_bionic_entry tl_tab_egl[];
+void *tl_egl_resolve(const char *name);   /* husk-tl-egl.c: GLES by name, through ANGLE */
 
 void *tl_bionic_find(const char *name);
 bool  tl_bionic_is_system_lib(const char *soname);

@@ -127,6 +127,12 @@ bool tl_xmem_contains(const void *p)
                      || (b >= g_x.rw && b < g_x.rw + g_x.size));
 }
 
+bool tl_xmem_is_rx(const void *p)
+{
+    const uint8_t *b = p;
+    return g_x.open && b >= g_x.rx && b < g_x.rx + g_x.size;
+}
+
 void tl_xmem_flush(const void *rx, size_t bytes)
 {
 #if defined(__APPLE__)

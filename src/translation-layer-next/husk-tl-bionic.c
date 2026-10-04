@@ -356,7 +356,7 @@ static long bionic_sysconf(int name)
     case 37:   return 2147483647;                            /* _SC_ATEXIT_MAX */
     case 38:   return 1024;                                  /* _SC_IOV_MAX */
     case 39: case 40: return 16384;                          /* _SC_PAGESIZE / _SC_PAGE_SIZE */
-    case 96: case 97: return (long)sysconf(_SC_NPROCESSORS_ONLN);   /* _SC_NPROCESSORS_CONF / ONLN */
+    case 96: case 97: return getenv("TL_NCPU") ? atol(getenv("TL_NCPU")) : (long)sysconf(_SC_NPROCESSORS_ONLN);   /* _SC_NPROCESSORS_CONF / ONLN */
     case 98: { uint64_t m = 0; size_t l = sizeof(m); sysctlbyname("hw.memsize", &m, &l, NULL, 0); return (long)(m / 16384); }
     case 99: { uint64_t m = 0; size_t l = sizeof(m); sysctlbyname("hw.memsize", &m, &l, NULL, 0); return (long)(m / 16384 / 2); }
     case 100:  return 200809;                                /* _SC_MONOTONIC_CLOCK */
@@ -598,7 +598,7 @@ const tl_bionic_entry tl_tab_core[] = {
 
 /* ----------------------------------------------------------------- lookup */
 
-static const tl_bionic_entry *const k_tables[] = { tl_tab_core, tl_tab_str, tl_tab_io, tl_tab_pthread, tl_tab_ndk };
+static const tl_bionic_entry *const k_tables[] = { tl_tab_core, tl_tab_str, tl_tab_io, tl_tab_pthread, tl_tab_ndk, tl_tab_egl };
 
 typedef struct { const char *name; void *addr; } slot;
 static slot *g_slots;
@@ -636,6 +636,9 @@ void *tl_bionic_find(const char *name)
         if (!strcmp(g_slots[i].name, name)) return g_slots[i].addr;
         i = (i + 1) & (g_nslots - 1);
     }
+    /* OpenGL ES entry points are not in a table: they come from ANGLE, by name. */
+    if (name[0] == 'g' && name[1] == 'l' && name[2] >= 'A' && name[2] <= 'Z') return tl_egl_resolve(name);
+    if (!strncmp(name, "egl", 3)) return tl_egl_resolve(name);
     return NULL;
 }
 

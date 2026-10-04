@@ -49,6 +49,9 @@ ptrdiff_t tl_xmem_delta(void);
 /* Whether an address is inside the region, in either view. */
 bool tl_xmem_contains(const void *p);
 
+/* Whether an address is in the executable view specifically. */
+bool tl_xmem_is_rx(const void *p);
+
 /* Make bytes written through the RW view visible to instruction fetch. */
 void tl_xmem_flush(const void *rx, size_t bytes);
 

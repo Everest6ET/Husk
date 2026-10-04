@@ -27,6 +27,7 @@
 #include "husk-tl-va.h"
 
 const char *tl_path_resolve(const char *path, char *buf, size_t n);   /* husk-tl-bionic-io.c */
+int tl_synth_open(const char *path);
 
 /* --------------------------------------------------------------- the stdio */
 
@@ -192,6 +193,8 @@ static int b_vsscanf(const char *s, const char *fmt, tl_va_list *ap) { return tl
 static void *b_fopen(const char *path, const char *mode)
 {
     char buf[1024];
+    int sfd = tl_synth_open(path);
+    if (sfd >= 0) return fdopen(sfd, mode[0] == 'r' ? "r" : "r");
     TL_ERRNO_BEGIN();
     FILE *f = fopen(tl_path_resolve(path, buf, sizeof(buf)), mode);
     TL_ERRNO_END();

@@ -331,11 +331,22 @@ static int b_getattr_np(pthread_t t, guest_attr *a)
 
 typedef struct { void *(*fn)(void *); void *arg; } start_ctx;
 
+const char *tl_ld_symbol_at(const void *addr, const char **lib_name, const void **sym_addr);
+
+static int g_thread_trace = -1;
 static void *start_thunk(void *p)
 {
     start_ctx c = *(start_ctx *)p;
     free(p);
-    return c.fn(c.arg);
+    if (g_thread_trace < 0) g_thread_trace = getenv("TL_THREAD_TRACE") ? 1 : 0;
+    if (g_thread_trace) {
+        const char *ln = NULL; const void *sa = NULL;
+        const char *sym = tl_ld_symbol_at((const void *)c.fn, &ln, &sa);
+        tl_log_line("thread: started, entry %s %s+%#lx", ln ? ln : "?", sym ? sym : "?", sa ? (unsigned long)((const char *)c.fn - (const char *)sa) : 0ul);
+    }
+    void *r = c.fn(c.arg);
+    if (g_thread_trace) { char nm[32] = ""; pthread_getname_np(pthread_self(), nm, sizeof(nm)); tl_log_line("thread: '%s' EXITED", nm); }
+    return r;
 }
 
 static int b_create(pthread_t *out, const guest_attr *attr, void *(*fn)(void *), void *arg)
@@ -359,6 +370,7 @@ static int b_create(pthread_t *out, const guest_attr *attr, void *(*fn)(void *),
 
 static int b_kill(pthread_t t, int sig)
 {
+    if (getenv("TL_SIGNAL_TRACE")) { char nm[32] = "", tn[32] = ""; pthread_getname_np(pthread_self(), nm, sizeof(nm)); pthread_getname_np(t, tn, sizeof(tn)); tl_log_line("signal[%s]: pthread_kill(%s, %d)", nm, tn, sig); }
     int d = tl_signal_to_darwin(sig);
     if (d < 0) return 22;
     return rc(pthread_kill(t, d));

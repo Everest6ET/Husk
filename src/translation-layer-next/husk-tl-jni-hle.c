@@ -1,0 +1,705 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+/*
+ * The Java world: the parts of Android's framework (and of the APK's own Java) that native
+ * code reaches through JNI, implemented in C. What is here is what Unity actually asked
+ * for; everything else logs once as UNIMPLEMENTED and returns zero.
+ */
+#define _DARWIN_C_SOURCE
+#include "husk-tl-jni.h"
+
+#include <dirent.h>
+#include <errno.h>
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <time.h>
+#include <unistd.h>
+
+#include "husk-tl-bionic.h"
+#include "husk-tl-internal.h"
+#include "husk-tl-ld.h"
+
+/* ------------------------------------------------------------------ state */
+
+static struct {
+    char pkg[128], apk[1024], data[512], files[600], cache[600], ext_files[700], ext_cache[700], native_lib[64];
+    int width, height;
+    float density;
+    jobj *activity, *resources, *assets, *appinfo, *pm, *display, *metrics, *config, *window, *wm, *looper, *handler;
+} H;
+
+static jvalue vl(void *p) { jvalue v; v.j = 0; v.l = p; return v; }
+static jvalue vi(int i) { jvalue v; v.j = 0; v.i = i; return v; }
+static jvalue vz(int z) { jvalue v; v.j = 0; v.z = z != 0; return v; }
+static jvalue vf(float f) { jvalue v; v.j = 0; v.f = f; return v; }
+
+static void mkdirs(const char *path)
+{
+    char tmp[1024]; snprintf(tmp, sizeof(tmp), "%s", path);
+    for (char *p = tmp + 1; *p; p++) if (*p == '/') { *p = 0; mkdir(tmp, 0755); *p = '/'; }
+    mkdir(tmp, 0755);
+}
+
+#define C(name) tl_jni_class(name)
+#define STR(s) tl_jni_new_string(s)
+static const char *S(const jobj *o) { const char *s = tl_jni_string(o); return s ? s : ""; }
+static void set_str(jobj *o, const char *f, const char *v) { tl_jni_set_field(o, f, "Ljava/lang/String;", vl(STR(v))); }
+static void set_int(jobj *o, const char *f, int v) { tl_jni_set_field(o, f, "I", vi(v)); }
+static void set_float(jobj *o, const char *f, float v) { tl_jni_set_field(o, f, "F", vf(v)); }
+static jobj *make(const char *cls) { return tl_jni_new_object(C(cls)); }
+
+/* -------------------------------------------------------------- java.io.File */
+
+static jobj *new_file(const char *path)
+{
+    jobj *f = make("java/io/File");
+    set_str(f, "path", path);
+    return f;
+}
+static const char *file_path(const jobj *f) { return S(tl_jni_get_field((jobj *)f, "path", "Ljava/lang/String;").l); }
+
+static void File_init_s(tl_jcall *c) { set_str(c->self, "path", S(c->args[0].l)); }
+static void File_init_fs(tl_jcall *c)
+{
+    char p[1100]; snprintf(p, sizeof(p), "%s/%s", file_path(c->args[0].l), S(c->args[1].l));
+    set_str(c->self, "path", p);
+}
+static void File_getPath(tl_jcall *c) { c->ret = vl(STR(file_path(c->self))); }
+static void File_getName(tl_jcall *c)
+{
+    const char *p = file_path(c->self), *s = strrchr(p, '/');
+    c->ret = vl(STR(s ? s + 1 : p));
+}
+static void File_getParent(tl_jcall *c)
+{
+    char p[1100]; snprintf(p, sizeof(p), "%s", file_path(c->self));
+    char *s = strrchr(p, '/');
+    if (!s) { c->ret = vl(NULL); return; }
+    if (s == p) s[1] = 0; else *s = 0;
+    c->ret = vl(STR(p));
+}
+static void File_getParentFile(tl_jcall *c)
+{
+    char p[1100]; snprintf(p, sizeof(p), "%s", file_path(c->self));
+    char *s = strrchr(p, '/');
+    if (!s) { c->ret = vl(NULL); return; }
+    if (s == p) s[1] = 0; else *s = 0;
+    c->ret = vl(new_file(p));
+}
+static void File_exists(tl_jcall *c) { struct stat st; c->ret = vz(stat(file_path(c->self), &st) == 0); }
+static void File_isDirectory(tl_jcall *c) { struct stat st; c->ret = vz(stat(file_path(c->self), &st) == 0 && S_ISDIR(st.st_mode)); }
+static void File_isFile(tl_jcall *c) { struct stat st; c->ret = vz(stat(file_path(c->self), &st) == 0 && S_ISREG(st.st_mode)); }
+static void File_canRead(tl_jcall *c) { c->ret = vz(access(file_path(c->self), R_OK) == 0); }
+static void File_canWrite(tl_jcall *c) { c->ret = vz(access(file_path(c->self), W_OK) == 0); }
+static void File_mkdirs(tl_jcall *c) { mkdirs(file_path(c->self)); struct stat st; c->ret = vz(stat(file_path(c->self), &st) == 0); }
+static void File_mkdir(tl_jcall *c) { c->ret = vz(mkdir(file_path(c->self), 0755) == 0); }
+static void File_delete(tl_jcall *c) { c->ret = vz(unlink(file_path(c->self)) == 0 || rmdir(file_path(c->self)) == 0); }
+static void File_length(tl_jcall *c) { struct stat st; jvalue v; v.j = stat(file_path(c->self), &st) == 0 ? st.st_size : 0; c->ret = v; }
+static void File_toString(tl_jcall *c) { c->ret = vl(STR(file_path(c->self))); }
+
+/* --------------------------------------------------------------- java.lang */
+
+static void Object_toString(tl_jcall *c)
+{
+    char b[200]; snprintf(b, sizeof(b), "%s@%p", c->self ? tl_jni_class_name(c->self) : "null", (void *)c->self);
+    c->ret = vl(STR(b));
+}
+static void Object_hashCode(tl_jcall *c) { c->ret = vi((int)((uintptr_t)c->self >> 4)); }
+static void Object_equals(tl_jcall *c) { c->ret = vz(c->self == c->args[0].l); }
+static void String_equals(tl_jcall *c) { const char *a = tl_jni_string(c->self), *b = tl_jni_string(c->args[0].l); c->ret = vz(a && b && !strcmp(a, b)); }
+static void String_toString(tl_jcall *c) { c->ret = vl(tl_jni_ref(c->self)); }
+static void String_length(tl_jcall *c) { c->ret = vi((int)strlen(S(c->self))); }
+static void String_isEmpty(tl_jcall *c) { c->ret = vz(S(c->self)[0] == 0); }
+static void String_hashCode(tl_jcall *c) { int h = 0; for (const unsigned char *p = (const unsigned char *)S(c->self); *p; p++) h = h * 31 + *p; c->ret = vi(h); }
+
+/* --------------------------------------------------------------- Context */
+
+static void Context_getPackageName(tl_jcall *c) { c->ret = vl(STR(H.pkg)); }
+static void Context_getPackageCodePath(tl_jcall *c) { c->ret = vl(STR(H.apk)); }
+static void Context_getPackageResourcePath(tl_jcall *c) { c->ret = vl(STR(H.apk)); }
+static void Context_getFilesDir(tl_jcall *c) { c->ret = vl(new_file(H.files)); }
+static void Context_getCacheDir(tl_jcall *c) { c->ret = vl(new_file(H.cache)); }
+static void Context_getExternalFilesDir(tl_jcall *c) { c->ret = vl(new_file(H.ext_files)); }
+static void Context_getExternalCacheDir(tl_jcall *c) { c->ret = vl(new_file(H.ext_cache)); }
+static void Context_getDir(tl_jcall *c) { char p[700]; snprintf(p, sizeof(p), "%s/app_%s", H.data, S(c->args[0].l)); mkdirs(p); c->ret = vl(new_file(p)); }
+static void Context_getResources(tl_jcall *c) { c->ret = vl(H.resources); }
+static void Context_getAssets(tl_jcall *c) { c->ret = vl(H.assets); }
+static void Context_getApplicationInfo(tl_jcall *c) { c->ret = vl(H.appinfo); }
+static void Context_getPackageManager(tl_jcall *c) { c->ret = vl(H.pm); }
+static void Context_getApplicationContext(tl_jcall *c) { c->ret = vl(H.activity); }
+static void Context_getMainLooper(tl_jcall *c) { c->ret = vl(H.looper); }
+static void Context_getContentResolver(tl_jcall *c) { c->ret = vl(make("android/content/ContentResolver")); }
+static void Context_getClassLoader(tl_jcall *c) { c->ret = vl(make("dalvik/system/PathClassLoader")); }
+static void Context_getSharedPreferences(tl_jcall *c)
+{
+    jobj *p = make("android/content/SharedPreferences");
+    set_str(p, "name", S(c->args[0].l));
+    c->ret = vl(p);
+}
+static void Context_checkCallingOrSelfPermission(tl_jcall *c) { c->ret = vi(0); }   /* PERMISSION_GRANTED */
+static void Context_checkSelfPermission(tl_jcall *c) { c->ret = vi(0); }
+
+/* getSystemService(name): one object per kind of service. */
+static void Context_getSystemService(tl_jcall *c)
+{
+    const char *n = S(c->args[0].l);
+    static const struct { const char *name, *cls; } svc[] = {
+        { "window", "android/view/WindowManager" }, { "audio", "android/media/AudioManager" },
+        { "connectivity", "android/net/ConnectivityManager" }, { "sensor", "android/hardware/SensorManager" },
+        { "power", "android/os/PowerManager" }, { "vibrator", "android/os/Vibrator" },
+        { "display", "android/hardware/display/DisplayManager" }, { "location", "android/location/LocationManager" },
+        { "input", "android/hardware/input/InputManager" }, { "input_method", "android/view/inputmethod/InputMethodManager" },
+        { "phone", "android/telephony/TelephonyManager" }, { "clipboard", "android/content/ClipboardManager" },
+        { "wifi", "android/net/wifi/WifiManager" }, { "media_router", "android/media/MediaRouter" },
+        { "activity", "android/app/ActivityManager" }, { "layout_inflater", "android/view/LayoutInflater" },
+        { "accessibility", "android/view/accessibility/AccessibilityManager" }, { "uimode", "android/app/UiModeManager" },
+    };
+    for (size_t i = 0; i < sizeof(svc) / sizeof(svc[0]); i++) {
+        if (!strcmp(n, svc[i].name)) {
+            static jobj *cache[32];
+            if (!cache[i]) cache[i] = make(svc[i].cls);
+            if (!strcmp(n, "window")) { c->ret = vl(H.wm); return; }
+            c->ret = vl(cache[i]);
+            return;
+        }
+    }
+    char note[160]; snprintf(note, sizeof(note), "getSystemService(\"%s\") is not provided (returning null)", n);
+    tl_note_once(note);
+    c->ret = vl(NULL);
+}
+
+/* --------------------------------------------------------------- Activity */
+
+static void Activity_getWindow(tl_jcall *c) { c->ret = vl(H.window); }
+static void Activity_getWindowManager(tl_jcall *c) { c->ret = vl(H.wm); }
+static void Activity_getRequestedOrientation(tl_jcall *c) { c->ret = vi(-1); }
+static void Activity_getIntent(tl_jcall *c) { c->ret = vl(make("android/content/Intent")); }
+static void Activity_isFinishing(tl_jcall *c) { c->ret = vz(0); }
+static void Activity_runOnUiThread(tl_jcall *c) { (void)c; /* the Runnable would run on the UI thread */ }
+static void Activity_getComponentName(tl_jcall *c) { c->ret = vl(make("android/content/ComponentName")); }
+
+/* ---------------------------------------------------- Resources, metrics */
+
+static void Resources_getAssets(tl_jcall *c) { c->ret = vl(H.assets); }
+static void Resources_getConfiguration(tl_jcall *c) { c->ret = vl(H.config); }
+static void Resources_getDisplayMetrics(tl_jcall *c) { c->ret = vl(H.metrics); }
+static void Resources_getIdentifier(tl_jcall *c) { c->ret = vi(0); }
+
+static void fill_metrics(jobj *m)
+{
+    set_int(m, "widthPixels", H.width); set_int(m, "heightPixels", H.height);
+    set_float(m, "density", H.density); set_float(m, "scaledDensity", H.density);
+    set_int(m, "densityDpi", (int)(H.density * 160));
+    set_float(m, "xdpi", H.density * 160); set_float(m, "ydpi", H.density * 160);
+}
+static void Display_getMetrics(tl_jcall *c) { fill_metrics(c->args[0].l); }
+static void Display_getRotation(tl_jcall *c) { c->ret = vi(0); }
+static void Display_getRefreshRate(tl_jcall *c) { c->ret = vf(60.f); }
+static void Display_getDisplayId(tl_jcall *c) { c->ret = vi(0); }
+static void Display_getWidth(tl_jcall *c) { c->ret = vi(H.width); }
+static void Display_getHeight(tl_jcall *c) { c->ret = vi(H.height); }
+static void Display_getName(tl_jcall *c) { c->ret = vl(STR("Built-in Screen")); }
+static void WindowManager_getDefaultDisplay(tl_jcall *c) { c->ret = vl(H.display); }
+
+/* ----------------------------------------------------- package information */
+
+static void PM_getApplicationInfo(tl_jcall *c) { c->ret = vl(H.appinfo); }
+static void PM_hasSystemFeature(tl_jcall *c)
+{
+    const char *f = S(c->args[0].l);
+    c->ret = vz(!strcmp(f, "android.hardware.touchscreen") || !strcmp(f, "android.hardware.touchscreen.multitouch")
+             || !strcmp(f, "android.hardware.opengles.aep") || !strncmp(f, "android.hardware.vulkan", 23) ? 0 : 0);
+}
+static void PM_getPackageInfo(tl_jcall *c)
+{
+    jobj *p = make("android/content/pm/PackageInfo");
+    set_str(p, "packageName", H.pkg); set_str(p, "versionName", "3.69.2"); set_int(p, "versionCode", 96070);
+    c->ret = vl(p);
+}
+
+/* ------------------------------------------------------------------ Build */
+
+static void install_build(void)
+{
+    jvalue v;
+    #define BS(n, s) do { v.l = STR(s); tl_jni_set_static("android/os/Build", n, "Ljava/lang/String;", v); } while (0)
+    BS("MANUFACTURER", "Google"); BS("BRAND", "google"); BS("MODEL", "Pixel 8"); BS("DEVICE", "shiba"); BS("PRODUCT", "shiba");
+    BS("HARDWARE", "shiba"); BS("BOARD", "shiba"); BS("ID", "UP1A.231105.001"); BS("DISPLAY", "UP1A.231105.001");
+    BS("TYPE", "user"); BS("TAGS", "release-keys"); BS("HOST", "abfarm"); BS("USER", "android-build");
+    BS("FINGERPRINT", "google/shiba/shiba:14/UP1A.231105.001/11000000:user/release-keys"); BS("BOOTLOADER", "unknown");
+    BS("CPU_ABI", "arm64-v8a"); BS("CPU_ABI2", ""); BS("SOC_MODEL", "Tensor G3"); BS("SOC_MANUFACTURER", "Google");
+    #undef BS
+    v.l = STR("14"); tl_jni_set_static("android/os/Build$VERSION", "RELEASE", "Ljava/lang/String;", v);
+    v.l = STR("REL"); tl_jni_set_static("android/os/Build$VERSION", "CODENAME", "Ljava/lang/String;", v);
+    v.l = STR("11000000"); tl_jni_set_static("android/os/Build$VERSION", "INCREMENTAL", "Ljava/lang/String;", v);
+    v.l = STR("2024-05-05"); tl_jni_set_static("android/os/Build$VERSION", "SECURITY_PATCH", "Ljava/lang/String;", v);
+    v.j = 0; v.i = 34; tl_jni_set_static("android/os/Build$VERSION", "SDK_INT", "I", v);
+    v.j = 0; v.i = 34; tl_jni_set_static("android/os/Build$VERSION", "PREVIEW_SDK_INT", "I", v);
+    v.j = 0; v.l = STR("mounted"); tl_jni_set_static("android/os/Environment", "MEDIA_MOUNTED", "Ljava/lang/String;", v);
+    v.l = STR("location"); tl_jni_set_static("android/content/Context", "LOCATION_SERVICE", "Ljava/lang/String;", v);
+    v.l = STR("window"); tl_jni_set_static("android/content/Context", "WINDOW_SERVICE", "Ljava/lang/String;", v);
+    v.l = STR("audio"); tl_jni_set_static("android/content/Context", "AUDIO_SERVICE", "Ljava/lang/String;", v);
+    v.l = STR("input_method"); tl_jni_set_static("android/content/Context", "INPUT_METHOD_SERVICE", "Ljava/lang/String;", v);
+    v.l = STR("sensor"); tl_jni_set_static("android/content/Context", "SENSOR_SERVICE", "Ljava/lang/String;", v);
+    v.l = STR("vibrator"); tl_jni_set_static("android/content/Context", "VIBRATOR_SERVICE", "Ljava/lang/String;", v);
+    v.l = STR("connectivity"); tl_jni_set_static("android/content/Context", "CONNECTIVITY_SERVICE", "Ljava/lang/String;", v);
+    v.l = STR("power"); tl_jni_set_static("android/content/Context", "POWER_SERVICE", "Ljava/lang/String;", v);
+    v.l = STR("display"); tl_jni_set_static("android/content/Context", "DISPLAY_SERVICE", "Ljava/lang/String;", v);
+    v.l = STR("input"); tl_jni_set_static("android/content/Context", "INPUT_SERVICE", "Ljava/lang/String;", v);
+    v.l = STR("phone"); tl_jni_set_static("android/content/Context", "TELEPHONY_SERVICE", "Ljava/lang/String;", v);
+    v.l = STR("clipboard"); tl_jni_set_static("android/content/Context", "CLIPBOARD_SERVICE", "Ljava/lang/String;", v);
+}
+
+/* --------------------------------------------------------- misc statics */
+
+static void Env_getExternalStorageState(tl_jcall *c) { c->ret = vl(STR("mounted")); }
+static void Env_getExternalStorageDirectory(tl_jcall *c) { c->ret = vl(new_file(H.ext_files)); }
+static void Process_setThreadPriority(tl_jcall *c) { (void)c; }
+static void Process_myPid(tl_jcall *c) { c->ret = vi(getpid()); }
+static void Process_myTid(tl_jcall *c) { uint64_t t = 0; pthread_threadid_np(NULL, &t); c->ret = vi((int)t); }
+static void Looper_getMainLooper(tl_jcall *c) { c->ret = vl(H.looper); }
+static void Looper_myLooper(tl_jcall *c) { c->ret = vl(H.looper); }
+static void Handler_post(tl_jcall *c) { (void)c; c->ret = vz(1); }
+static void System_getProperty(tl_jcall *c) { const char *k = S(c->args[0].l); const char *v = !strcmp(k, "os.arch") ? "aarch64" : !strcmp(k, "http.agent") ? "Dalvik/2.1.0 (Linux; U; Android 14; Pixel 8)" : NULL; c->ret = vl(v ? STR(v) : NULL); }
+static void System_currentTimeMillis(tl_jcall *c) { struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); jvalue v; v.j = (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000; c->ret = v; }
+static void System_nanoTime(tl_jcall *c) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); jvalue v; v.j = (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec; c->ret = v; }
+static void UnityPlayer_initializeGoogleAr(tl_jcall *c) { c->ret = vz(0); }
+
+/* JNIBridge builds Java proxies for interfaces C# implements. A proxy that never answers is
+ * enough until something calls through one. */
+static void JNIBridge_newInterfaceProxy(tl_jcall *c)
+{
+    jobj *p = make("java/lang/reflect/Proxy");
+    jvalue h; h.j = c->args[0].j;
+    tl_jni_set_field(p, "handle", "J", h);
+    c->ret = vl(p);
+}
+static void Class_getName(tl_jcall *c) { c->ret = vl(STR(c->self && c->self->kind == TL_K_CLASS ? "java.lang.Object" : "")); }
+
+
+/* ------------------------------------------------- dialogs: say what they say */
+
+static void Builder_init(tl_jcall *c) { (void)c; }
+static void Builder_setTitle(tl_jcall *c) { set_str(c->self, "title", S(c->args[0].l)); c->ret = vl(tl_jni_ref(c->self)); }
+static void Builder_setMessage(tl_jcall *c) { set_str(c->self, "message", S(c->args[0].l)); c->ret = vl(tl_jni_ref(c->self)); }
+static void Builder_chain(tl_jcall *c) { c->ret = vl(tl_jni_ref(c->self)); }
+static void Builder_create(tl_jcall *c)
+{
+    jobj *d = make("android/app/AlertDialog");
+    set_str(d, "title", S(tl_jni_get_field(c->self, "title", "Ljava/lang/String;").l));
+    set_str(d, "message", S(tl_jni_get_field(c->self, "message", "Ljava/lang/String;").l));
+    c->ret = vl(d);
+}
+static void Dialog_show(tl_jcall *c)
+{
+    tl_log_line("DIALOG \"%s\": %s", S(tl_jni_get_field(c->self, "title", "Ljava/lang/String;").l),
+                S(tl_jni_get_field(c->self, "message", "Ljava/lang/String;").l));
+}
+static void Object_getClass(tl_jcall *c) { c->ret = vl(c->self && c->self->cls ? tl_jni_class_object(tl_jni_class_name(c->self)) : NULL); }
+static void Class_getClassLoader(tl_jcall *c) { c->ret = vl(make("dalvik/system/PathClassLoader")); }
+static void ClassLoader_findLibrary(tl_jcall *c) { char p[300]; snprintf(p, sizeof(p), "%s/lib%s.so", H.native_lib, S(c->args[0].l)); c->ret = vl(STR(p)); }
+static void Handler_postDelayed(tl_jcall *c) { (void)c; c->ret = vz(1); }
+static void Handler_init(tl_jcall *c) { (void)c; }
+static void SP_getInt(tl_jcall *c) { c->ret = vi(c->args[1].i); }
+static void SP_getString(tl_jcall *c) { c->ret = vl(c->args[1].l ? tl_jni_ref(c->args[1].l) : NULL); }
+static void SP_getBoolean(tl_jcall *c) { c->ret = vz(c->args[1].z); }
+static void SP_edit(tl_jcall *c) { c->ret = vl(make("android/content/SharedPreferences$Editor")); }
+static void Editor_self(tl_jcall *c) { c->ret = vl(tl_jni_ref(c->self)); }
+static void Editor_noop(tl_jcall *c) { (void)c; }
+static void Iterator_hasNext(tl_jcall *c) { c->ret = vz(0); }
+
+
+/* ------------------------------------------------ strings and builders */
+
+typedef struct { char *p; size_t n, cap; } sbuf;
+static sbuf *sb_of(jobj *o) { if (!o->native) o->native = calloc(1, sizeof(sbuf)); return o->native; }
+static void sb_add(sbuf *b, const char *s, size_t n)
+{
+    if (b->n + n + 1 > b->cap) { b->cap = (b->n + n + 1) * 2; b->p = realloc(b->p, b->cap); }
+    memcpy(b->p + b->n, s, n); b->n += n; b->p[b->n] = 0;
+}
+
+static void String_init_empty(tl_jcall *c) { c->ret = vl(STR("")); }
+static void String_init_bytes(tl_jcall *c)
+{
+    jobj *a = c->args[0].l;
+    char *tmp = malloc((a ? a->arr.len : 0) + 1);
+    if (a) memcpy(tmp, a->arr.data, a->arr.len);
+    tmp[a ? a->arr.len : 0] = 0;
+    c->ret = vl(STR(tmp)); free(tmp);
+}
+static void String_init_bytes_range(tl_jcall *c)
+{
+    jobj *a = c->args[0].l; int off = c->args[1].i, len = c->args[2].i;
+    if (!a || off < 0 || len < 0 || (uint32_t)(off + len) > a->arr.len) { c->ret = vl(STR("")); return; }
+    char *tmp = malloc((size_t)len + 1); memcpy(tmp, (char *)a->arr.data + off, (size_t)len); tmp[len] = 0;
+    c->ret = vl(STR(tmp)); free(tmp);
+}
+static void String_init_string(tl_jcall *c) { c->ret = vl(STR(S(c->args[0].l))); }
+static void String_init_chars(tl_jcall *c)
+{
+    jobj *a = c->args[0].l; size_t n = a ? a->arr.len : 0;
+    char *tmp = malloc(n * 3 + 1); size_t k = 0;
+    for (size_t i = 0; i < n; i++) {
+        uint16_t u = ((uint16_t *)a->arr.data)[i];
+        if (u < 0x80) tmp[k++] = (char)u;
+        else if (u < 0x800) { tmp[k++] = (char)(0xC0 | (u >> 6)); tmp[k++] = (char)(0x80 | (u & 0x3f)); }
+        else { tmp[k++] = (char)(0xE0 | (u >> 12)); tmp[k++] = (char)(0x80 | ((u >> 6) & 0x3f)); tmp[k++] = (char)(0x80 | (u & 0x3f)); }
+    }
+    tmp[k] = 0; c->ret = vl(STR(tmp)); free(tmp);
+}
+static void String_getBytes(tl_jcall *c)
+{
+    const char *s = S(c->self); size_t n = strlen(s);
+    jobj *a = tl_jni_new_prim_array('B', (uint32_t)n); memcpy(a->arr.data, s, n);
+    c->ret = vl(a);
+}
+
+static void SB_init(tl_jcall *c) { sb_of(c->self); }
+static void SB_init_string(tl_jcall *c) { sbuf *b = sb_of(c->self); const char *s = S(c->args[0].l); sb_add(b, s, strlen(s)); }
+static void SB_append_string(tl_jcall *c) { sbuf *b = sb_of(c->self); const char *s = c->args[0].l ? S(c->args[0].l) : "null"; sb_add(b, s, strlen(s)); c->ret = vl(tl_jni_ref(c->self)); }
+static void SB_append_obj(tl_jcall *c)
+{
+    sbuf *b = sb_of(c->self); jobj *o = c->args[0].l;
+    const char *s = !o ? "null" : o->kind == TL_K_STRING ? S(o) : "[object]";
+    sb_add(b, s, strlen(s)); c->ret = vl(tl_jni_ref(c->self));
+}
+static void SB_append_int(tl_jcall *c) { char t[24]; snprintf(t, sizeof(t), "%d", c->args[0].i); sb_add(sb_of(c->self), t, strlen(t)); c->ret = vl(tl_jni_ref(c->self)); }
+static void SB_append_long(tl_jcall *c) { char t[32]; snprintf(t, sizeof(t), "%lld", (long long)c->args[0].j); sb_add(sb_of(c->self), t, strlen(t)); c->ret = vl(tl_jni_ref(c->self)); }
+static void SB_append_char(tl_jcall *c) { char t[2] = { (char)c->args[0].c, 0 }; sb_add(sb_of(c->self), t, 1); c->ret = vl(tl_jni_ref(c->self)); }
+static void SB_append_bool(tl_jcall *c) { const char *t = c->args[0].z ? "true" : "false"; sb_add(sb_of(c->self), t, strlen(t)); c->ret = vl(tl_jni_ref(c->self)); }
+static void SB_append_float(tl_jcall *c) { char t[40]; snprintf(t, sizeof(t), "%g", (double)c->args[0].f); sb_add(sb_of(c->self), t, strlen(t)); c->ret = vl(tl_jni_ref(c->self)); }
+static void SB_append_double(tl_jcall *c) { char t[40]; snprintf(t, sizeof(t), "%g", c->args[0].d); sb_add(sb_of(c->self), t, strlen(t)); c->ret = vl(tl_jni_ref(c->self)); }
+static void SB_toString(tl_jcall *c) { sbuf *b = sb_of(c->self); c->ret = vl(STR(b->p ? b->p : "")); }
+static void SB_length(tl_jcall *c) { c->ret = vi((int)sb_of(c->self)->n); }
+static void SB_setLength(tl_jcall *c) { sbuf *b = sb_of(c->self); if (c->args[0].i >= 0 && (size_t)c->args[0].i <= b->n) { b->n = (size_t)c->args[0].i; if (b->p) b->p[b->n] = 0; } }
+
+/* ------------------------------------------ assets, streams, Scanner */
+
+typedef struct { const uint8_t *data; size_t len, pos; uint8_t *owned; } stream;
+
+static jobj *open_asset(const char *name)
+{
+    char path[1100]; snprintf(path, sizeof(path), "assets/%s", name);
+    for (int i = 0;; i++) {
+        const tl_zip *z = tl_ld_apk_at(i);
+        if (!z) return NULL;
+        const tl_zip_entry *e = tl_zip_find(z, path);
+        if (!e) continue;
+        const uint8_t *d; size_t n; bool owned; char err[160];
+        if (!tl_zip_data(z, e, (size_t)1 << 30, &d, &n, &owned, err, sizeof(err))) return NULL;
+        jobj *s = make("java/io/ByteArrayInputStream");
+        stream *st = calloc(1, sizeof(*st));
+        st->data = d; st->len = n; if (owned) st->owned = (uint8_t *)d;
+        s->native = st;
+        return s;
+    }
+}
+static void AM_open(tl_jcall *c)
+{
+    jobj *s = open_asset(S(c->args[0].l));
+    if (!s) { tl_jni_throw("java/io/FileNotFoundException", S(c->args[0].l)); c->ret = vl(NULL); return; }
+    c->ret = vl(s);
+}
+static void IS_read0(tl_jcall *c) { stream *s = c->self->native; c->ret = vi(s && s->pos < s->len ? s->data[s->pos++] : -1); }
+static void IS_read_arr(tl_jcall *c)
+{
+    stream *s = c->self->native; jobj *a = c->args[0].l;
+    if (!s || !a || s->pos >= s->len) { c->ret = vi(-1); return; }
+    size_t n = a->arr.len < s->len - s->pos ? a->arr.len : s->len - s->pos;
+    memcpy(a->arr.data, s->data + s->pos, n); s->pos += n; c->ret = vi((int)n);
+}
+static void IS_read_range(tl_jcall *c)
+{
+    stream *s = c->self->native; jobj *a = c->args[0].l; int off = c->args[1].i, len = c->args[2].i;
+    if (!s || !a || s->pos >= s->len || off < 0 || len < 0 || (uint32_t)(off + len) > a->arr.len) { c->ret = vi(-1); return; }
+    size_t n = (size_t)len < s->len - s->pos ? (size_t)len : s->len - s->pos;
+    memcpy((char *)a->arr.data + off, s->data + s->pos, n); s->pos += n; c->ret = vi((int)n);
+}
+static void IS_available(tl_jcall *c) { stream *s = c->self->native; c->ret = vi(s ? (int)(s->len - s->pos) : 0); }
+static void IS_close(tl_jcall *c) { (void)c; }
+static void Scanner_init(tl_jcall *c) { tl_jni_set_field(c->self, "stream", "Ljava/io/InputStream;", vl(tl_jni_ref(c->args[0].l))); }
+static void Scanner_useDelimiter(tl_jcall *c) { c->ret = vl(tl_jni_ref(c->self)); }
+static void Scanner_hasNext(tl_jcall *c)
+{
+    jobj *in = tl_jni_get_field(c->self, "stream", "Ljava/io/InputStream;").l; stream *s = in ? in->native : NULL;
+    c->ret = vz(s && s->pos < s->len);
+}
+static void Scanner_next(tl_jcall *c)
+{
+    jobj *in = tl_jni_get_field(c->self, "stream", "Ljava/io/InputStream;").l; stream *s = in ? in->native : NULL;
+    if (!s || s->pos >= s->len) { tl_jni_throw("java/util/NoSuchElementException", ""); c->ret = vl(NULL); return; }
+    char *t = malloc(s->len - s->pos + 1); memcpy(t, s->data + s->pos, s->len - s->pos); t[s->len - s->pos] = 0;
+    s->pos = s->len; c->ret = vl(STR(t)); free(t);
+}
+
+/* ------------------------------------------- collections, services, misc */
+
+static void Map_entrySet(tl_jcall *c) { c->ret = vl(make("java/util/HashSet")); }
+static void Set_iterator(tl_jcall *c) { c->ret = vl(make("java/util/Iterator")); }
+static void Coll_size(tl_jcall *c) { c->ret = vi(0); }
+static void Coll_isEmpty(tl_jcall *c) { c->ret = vz(1); }
+static void SP_getAll(tl_jcall *c) { c->ret = vl(make("java/util/HashMap")); }
+static void Intent_getExtras(tl_jcall *c) { c->ret = vl(NULL); }
+static void Context_getObbDir(tl_jcall *c) { char p[700]; snprintf(p, sizeof(p), "%s/obb", H.ext_files); mkdirs(p); c->ret = vl(new_file(p)); }
+static void Context_getObbDirs(tl_jcall *c)
+{
+    jobj *a = tl_jni_new_obj_array(C("java/io/File"), 1);
+    char p[700]; snprintf(p, sizeof(p), "%s/obb", H.ext_files); mkdirs(p);
+    a->oarr.v[0] = new_file(p);
+    c->ret = vl(a);
+}
+static void Activity_setRequestedOrientation(tl_jcall *c) { (void)c; }
+static void DM_getDisplay(tl_jcall *c) { c->ret = vl(H.display); }
+static void Noop(tl_jcall *c) { (void)c; }
+static void AudioManager_getDevices(tl_jcall *c) { c->ret = vl(tl_jni_new_obj_array(C("android/media/AudioDeviceInfo"), 0)); }
+static void AudioManager_getProperty(tl_jcall *c)
+{
+    const char *k = S(c->args[0].l);
+    c->ret = vl(!strcmp(k, "android.media.property.OUTPUT_SAMPLE_RATE") ? STR("48000")
+              : !strcmp(k, "android.media.property.OUTPUT_FRAMES_PER_BUFFER") ? STR("256") : NULL);
+}
+static void AudioManager_getStreamVolume(tl_jcall *c) { c->ret = vi(7); }
+static void AudioManager_getStreamMaxVolume(tl_jcall *c) { c->ret = vi(15); }
+static void AudioManager_requestAudioFocus(tl_jcall *c) { c->ret = vi(1); /* AUDIOFOCUS_REQUEST_GRANTED */ }
+static void Uri_encode(tl_jcall *c) { c->ret = vl(STR(S(c->args[0].l))); }
+static void PAD_init(tl_jcall *c) { c->ret = vl(make("com/unity3d/player/PlayAssetDeliveryUnityWrapper")); }
+static void PAD_playCoreApiMissing(tl_jcall *c) { c->ret = vz(1); }
+static void FMOD_isRunning(tl_jcall *c) { c->ret = vz(1); }
+
+/* ------------------------------------------------------------------ tables */
+
+static const struct { const char *name, *super; } k_classes[] = {
+    { "java/lang/Object", NULL }, { "java/lang/String", "java/lang/Object" }, { "java/lang/System", "java/lang/Object" }, { "java/lang/Class", "java/lang/Object" },
+    { "java/lang/ClassLoader", "java/lang/Object" }, { "dalvik/system/PathClassLoader", "java/lang/ClassLoader" },
+    { "java/lang/Throwable", "java/lang/Object" }, { "java/lang/Exception", "java/lang/Throwable" },
+    { "java/lang/Error", "java/lang/Throwable" }, { "java/lang/NoClassDefFoundError", "java/lang/Error" },
+    { "java/lang/NoSuchMethodError", "java/lang/Error" }, { "java/lang/NoSuchFieldError", "java/lang/Error" },
+    { "java/lang/NullPointerException", "java/lang/Exception" }, { "java/lang/RuntimeException", "java/lang/Exception" },
+    { "java/io/File", "java/lang/Object" }, { "java/lang/reflect/Proxy", "java/lang/Object" },
+    { "java/nio/DirectByteBuffer", "java/lang/Object" },
+    { "android/content/Context", "java/lang/Object" }, { "android/content/ContextWrapper", "android/content/Context" },
+    { "android/view/ContextThemeWrapper", "android/content/ContextWrapper" }, { "android/app/Activity", "android/view/ContextThemeWrapper" },
+    { "android/view/View", "java/lang/Object" }, { "android/view/ViewGroup", "android/view/View" },
+    { "android/widget/FrameLayout", "android/view/ViewGroup" }, { "android/view/Surface", "java/lang/Object" },
+    { "android/view/SurfaceView", "android/view/View" }, { "com/unity3d/player/UnityPlayer", "android/widget/FrameLayout" },
+    { "android/content/res/Resources", "java/lang/Object" }, { "android/content/res/AssetManager", "java/lang/Object" },
+    { "android/content/res/Configuration", "java/lang/Object" }, { "android/util/DisplayMetrics", "java/lang/Object" },
+    { "android/content/pm/ApplicationInfo", "java/lang/Object" }, { "android/content/pm/PackageManager", "java/lang/Object" },
+    { "android/content/pm/PackageInfo", "java/lang/Object" }, { "android/view/Display", "java/lang/Object" },
+    { "android/view/WindowManager", "java/lang/Object" }, { "android/view/Window", "java/lang/Object" },
+    { "android/os/Looper", "java/lang/Object" }, { "android/os/Handler", "java/lang/Object" },
+    { "android/os/Build", "java/lang/Object" }, { "android/os/Build$VERSION", "java/lang/Object" },
+    { "android/os/Environment", "java/lang/Object" }, { "android/os/Process", "java/lang/Object" },
+    { "android/content/SharedPreferences", "java/lang/Object" }, { "android/content/Intent", "java/lang/Object" },
+    { "bitter/jnibridge/JNIBridge", "java/lang/Object" },
+    { "java/lang/StringBuilder", "java/lang/Object" }, { "java/io/InputStream", "java/lang/Object" },
+    { "java/io/ByteArrayInputStream", "java/io/InputStream" }, { "java/io/FileNotFoundException", "java/lang/Exception" },
+    { "java/util/Scanner", "java/lang/Object" }, { "java/util/HashMap", "java/lang/Object" }, { "java/util/HashSet", "java/lang/Object" },
+    { "java/util/Map", "java/lang/Object" }, { "java/util/Set", "java/lang/Object" }, { "java/util/NoSuchElementException", "java/lang/Exception" },
+    { "android/hardware/display/DisplayManager", "java/lang/Object" }, { "android/media/AudioManager", "java/lang/Object" },
+    { "android/media/AudioDeviceInfo", "java/lang/Object" }, { "android/net/Uri", "java/lang/Object" },
+    { "org/fmod/FMODAudioDevice", "java/lang/Object" }, { "android/app/AlertDialog$Builder", "java/lang/Object" }, { "android/app/Dialog", "java/lang/Object" }, { "android/app/AlertDialog", "android/app/Dialog" },
+    { "android/content/SharedPreferences$Editor", "java/lang/Object" }, { "java/util/Iterator", "java/lang/Object" },
+};
+
+#define M(c, n, s, f) { c, n, s, f }
+static const tl_jhle k_hle[] = {
+    M("java/lang/Object", "toString", "()Ljava/lang/String;", Object_toString),
+    M("java/lang/Object", "hashCode", "()I", Object_hashCode),
+    M("java/lang/Object", "equals", "(Ljava/lang/Object;)Z", Object_equals),
+    M("java/lang/String", "equals", "(Ljava/lang/Object;)Z", String_equals),
+    M("java/lang/String", "toString", "()Ljava/lang/String;", String_toString),
+    M("java/lang/String", "length", "()I", String_length),
+    M("java/lang/String", "isEmpty", "()Z", String_isEmpty),
+    M("java/lang/String", "hashCode", "()I", String_hashCode),
+    M("java/lang/Class", "getName", "()Ljava/lang/String;", Class_getName),
+    M("java/lang/System", "getProperty", "(Ljava/lang/String;)Ljava/lang/String;", System_getProperty),
+    M("java/lang/System", "currentTimeMillis", "()J", System_currentTimeMillis),
+    M("java/lang/System", "nanoTime", "()J", System_nanoTime),
+    M("java/io/File", "<init>", "(Ljava/lang/String;)V", File_init_s),
+    M("java/io/File", "<init>", "(Ljava/io/File;Ljava/lang/String;)V", File_init_fs),
+    M("java/io/File", "getPath", "()Ljava/lang/String;", File_getPath),
+    M("java/io/File", "getAbsolutePath", "()Ljava/lang/String;", File_getPath),
+    M("java/io/File", "getCanonicalPath", "()Ljava/lang/String;", File_getPath),
+    M("java/io/File", "getName", "()Ljava/lang/String;", File_getName),
+    M("java/io/File", "getParent", "()Ljava/lang/String;", File_getParent),
+    M("java/io/File", "getParentFile", "()Ljava/io/File;", File_getParentFile),
+    M("java/io/File", "exists", "()Z", File_exists), M("java/io/File", "isDirectory", "()Z", File_isDirectory),
+    M("java/io/File", "isFile", "()Z", File_isFile), M("java/io/File", "canRead", "()Z", File_canRead),
+    M("java/io/File", "canWrite", "()Z", File_canWrite), M("java/io/File", "mkdirs", "()Z", File_mkdirs),
+    M("java/io/File", "mkdir", "()Z", File_mkdir), M("java/io/File", "delete", "()Z", File_delete),
+    M("java/io/File", "length", "()J", File_length), M("java/io/File", "toString", "()Ljava/lang/String;", File_toString),
+    M("android/content/Context", "getPackageName", "()Ljava/lang/String;", Context_getPackageName),
+    M("android/content/Context", "getPackageCodePath", "()Ljava/lang/String;", Context_getPackageCodePath),
+    M("android/content/Context", "getPackageResourcePath", "()Ljava/lang/String;", Context_getPackageResourcePath),
+    M("android/content/Context", "getFilesDir", "()Ljava/io/File;", Context_getFilesDir),
+    M("android/content/Context", "getCacheDir", "()Ljava/io/File;", Context_getCacheDir),
+    M("android/content/Context", "getExternalFilesDir", "(Ljava/lang/String;)Ljava/io/File;", Context_getExternalFilesDir),
+    M("android/content/Context", "getExternalCacheDir", "()Ljava/io/File;", Context_getExternalCacheDir),
+    M("android/content/Context", "getDir", "(Ljava/lang/String;I)Ljava/io/File;", Context_getDir),
+    M("android/content/Context", "getResources", "()Landroid/content/res/Resources;", Context_getResources),
+    M("android/content/Context", "getAssets", "()Landroid/content/res/AssetManager;", Context_getAssets),
+    M("android/content/Context", "getApplicationInfo", "()Landroid/content/pm/ApplicationInfo;", Context_getApplicationInfo),
+    M("android/content/Context", "getPackageManager", "()Landroid/content/pm/PackageManager;", Context_getPackageManager),
+    M("android/content/Context", "getApplicationContext", "()Landroid/content/Context;", Context_getApplicationContext),
+    M("android/content/Context", "getMainLooper", "()Landroid/os/Looper;", Context_getMainLooper),
+    M("android/content/Context", "getClassLoader", "()Ljava/lang/ClassLoader;", Context_getClassLoader),
+    M("android/content/Context", "getSharedPreferences", "(Ljava/lang/String;I)Landroid/content/SharedPreferences;", Context_getSharedPreferences),
+    M("android/content/Context", "checkCallingOrSelfPermission", "(Ljava/lang/String;)I", Context_checkCallingOrSelfPermission),
+    M("android/content/Context", "checkSelfPermission", "(Ljava/lang/String;)I", Context_checkSelfPermission),
+    M("android/content/Context", "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;", Context_getSystemService),
+    M("android/content/Context", "getContentResolver", "()Landroid/content/ContentResolver;", Context_getContentResolver),
+    M("android/app/Activity", "getWindow", "()Landroid/view/Window;", Activity_getWindow),
+    M("android/app/Activity", "getWindowManager", "()Landroid/view/WindowManager;", Activity_getWindowManager),
+    M("android/app/Activity", "getRequestedOrientation", "()I", Activity_getRequestedOrientation),
+    M("android/app/Activity", "getIntent", "()Landroid/content/Intent;", Activity_getIntent),
+    M("android/app/Activity", "isFinishing", "()Z", Activity_isFinishing),
+    M("android/app/Activity", "runOnUiThread", "(Ljava/lang/Runnable;)V", Activity_runOnUiThread),
+    M("android/content/res/Resources", "getAssets", "()Landroid/content/res/AssetManager;", Resources_getAssets),
+    M("android/content/res/Resources", "getConfiguration", "()Landroid/content/res/Configuration;", Resources_getConfiguration),
+    M("android/content/res/Resources", "getDisplayMetrics", "()Landroid/util/DisplayMetrics;", Resources_getDisplayMetrics),
+    M("android/content/res/Resources", "getIdentifier", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)I", Resources_getIdentifier),
+    M("android/view/Display", "getMetrics", "(Landroid/util/DisplayMetrics;)V", Display_getMetrics),
+    M("android/view/Display", "getRealMetrics", "(Landroid/util/DisplayMetrics;)V", Display_getMetrics),
+    M("android/view/Display", "getRotation", "()I", Display_getRotation),
+    M("android/view/Display", "getRefreshRate", "()F", Display_getRefreshRate),
+    M("android/view/Display", "getDisplayId", "()I", Display_getDisplayId),
+    M("android/view/Display", "getWidth", "()I", Display_getWidth), M("android/view/Display", "getHeight", "()I", Display_getHeight),
+    M("android/view/Display", "getName", "()Ljava/lang/String;", Display_getName),
+    M("android/view/WindowManager", "getDefaultDisplay", "()Landroid/view/Display;", WindowManager_getDefaultDisplay),
+    M("android/content/pm/PackageManager", "getApplicationInfo", "(Ljava/lang/String;I)Landroid/content/pm/ApplicationInfo;", PM_getApplicationInfo),
+    M("android/content/pm/PackageManager", "hasSystemFeature", "(Ljava/lang/String;)Z", PM_hasSystemFeature),
+    M("android/content/pm/PackageManager", "getPackageInfo", "(Ljava/lang/String;I)Landroid/content/pm/PackageInfo;", PM_getPackageInfo),
+    M("android/os/Environment", "getExternalStorageState", "()Ljava/lang/String;", Env_getExternalStorageState),
+    M("android/os/Environment", "getExternalStorageDirectory", "()Ljava/io/File;", Env_getExternalStorageDirectory),
+    M("android/os/Process", "setThreadPriority", "(II)V", Process_setThreadPriority),
+    M("android/os/Process", "myPid", "()I", Process_myPid), M("android/os/Process", "myTid", "()I", Process_myTid),
+    M("android/os/Looper", "getMainLooper", "()Landroid/os/Looper;", Looper_getMainLooper),
+    M("android/os/Looper", "myLooper", "()Landroid/os/Looper;", Looper_myLooper),
+    M("android/os/Handler", "post", "(Ljava/lang/Runnable;)Z", Handler_post),
+    M("java/lang/Object", "getClass", "()Ljava/lang/Class;", Object_getClass),
+    M("java/lang/Class", "getClassLoader", "()Ljava/lang/ClassLoader;", Class_getClassLoader),
+    M("java/lang/ClassLoader", "findLibrary", "(Ljava/lang/String;)Ljava/lang/String;", ClassLoader_findLibrary),
+    M("android/app/AlertDialog$Builder", "<init>", "(Landroid/content/Context;)V", Builder_init),
+    M("android/app/AlertDialog$Builder", "setTitle", "(Ljava/lang/CharSequence;)Landroid/app/AlertDialog$Builder;", Builder_setTitle),
+    M("android/app/AlertDialog$Builder", "setMessage", "(Ljava/lang/CharSequence;)Landroid/app/AlertDialog$Builder;", Builder_setMessage),
+    M("android/app/AlertDialog$Builder", "setCancelable", "(Z)Landroid/app/AlertDialog$Builder;", Builder_chain),
+    M("android/app/AlertDialog$Builder", "setPositiveButton", "(Ljava/lang/CharSequence;Landroid/content/DialogInterface$OnClickListener;)Landroid/app/AlertDialog$Builder;", Builder_chain),
+    M("android/app/AlertDialog$Builder", "setNegativeButton", "(Ljava/lang/CharSequence;Landroid/content/DialogInterface$OnClickListener;)Landroid/app/AlertDialog$Builder;", Builder_chain),
+    M("android/app/AlertDialog$Builder", "setView", "(Landroid/view/View;)Landroid/app/AlertDialog$Builder;", Builder_chain),
+    M("android/app/AlertDialog$Builder", "setOnKeyListener", "(Landroid/content/DialogInterface$OnKeyListener;)Landroid/app/AlertDialog$Builder;", Builder_chain),
+    M("android/app/AlertDialog$Builder", "setOnCancelListener", "(Landroid/content/DialogInterface$OnCancelListener;)Landroid/app/AlertDialog$Builder;", Builder_chain),
+    M("android/app/AlertDialog$Builder", "create", "()Landroid/app/AlertDialog;", Builder_create),
+    M("android/app/Dialog", "show", "()V", Dialog_show),
+    M("android/app/AlertDialog", "show", "()V", Dialog_show),
+    M("android/os/Handler", "<init>", "(Landroid/os/Looper;)V", Handler_init),
+    M("android/os/Handler", "<init>", "()V", Handler_init),
+    M("android/os/Handler", "postDelayed", "(Ljava/lang/Runnable;J)Z", Handler_postDelayed),
+    M("android/content/SharedPreferences", "getInt", "(Ljava/lang/String;I)I", SP_getInt),
+    M("android/content/SharedPreferences", "getString", "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;", SP_getString),
+    M("android/content/SharedPreferences", "getBoolean", "(Ljava/lang/String;Z)Z", SP_getBoolean),
+    M("android/content/SharedPreferences", "edit", "()Landroid/content/SharedPreferences$Editor;", SP_edit),
+    M("android/content/SharedPreferences$Editor", "putInt", "(Ljava/lang/String;I)Landroid/content/SharedPreferences$Editor;", Editor_self),
+    M("android/content/SharedPreferences$Editor", "putString", "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/SharedPreferences$Editor;", Editor_self),
+    M("android/content/SharedPreferences$Editor", "putBoolean", "(Ljava/lang/String;Z)Landroid/content/SharedPreferences$Editor;", Editor_self),
+    M("android/content/SharedPreferences$Editor", "apply", "()V", Editor_noop),
+    M("java/util/Iterator", "hasNext", "()Z", Iterator_hasNext),
+    M("java/lang/String", "<init>", "()V", String_init_empty), M("java/lang/String", "<init>", "([B)V", String_init_bytes),
+    M("java/lang/String", "<init>", "([BLjava/lang/String;)V", String_init_bytes), M("java/lang/String", "<init>", "([BII)V", String_init_bytes_range),
+    M("java/lang/String", "<init>", "([BIILjava/lang/String;)V", String_init_bytes_range), M("java/lang/String", "<init>", "(Ljava/lang/String;)V", String_init_string),
+    M("java/lang/String", "<init>", "([C)V", String_init_chars), M("java/lang/String", "getBytes", "()[B", String_getBytes),
+    M("java/lang/String", "getBytes", "(Ljava/lang/String;)[B", String_getBytes),
+    M("java/lang/StringBuilder", "<init>", "()V", SB_init), M("java/lang/StringBuilder", "<init>", "(I)V", SB_init),
+    M("java/lang/StringBuilder", "<init>", "(Ljava/lang/String;)V", SB_init_string),
+    M("java/lang/StringBuilder", "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;", SB_append_string),
+    M("java/lang/StringBuilder", "append", "(Ljava/lang/Object;)Ljava/lang/StringBuilder;", SB_append_obj),
+    M("java/lang/StringBuilder", "append", "(Ljava/lang/CharSequence;)Ljava/lang/StringBuilder;", SB_append_obj),
+    M("java/lang/StringBuilder", "append", "(I)Ljava/lang/StringBuilder;", SB_append_int), M("java/lang/StringBuilder", "append", "(J)Ljava/lang/StringBuilder;", SB_append_long),
+    M("java/lang/StringBuilder", "append", "(C)Ljava/lang/StringBuilder;", SB_append_char), M("java/lang/StringBuilder", "append", "(Z)Ljava/lang/StringBuilder;", SB_append_bool),
+    M("java/lang/StringBuilder", "append", "(F)Ljava/lang/StringBuilder;", SB_append_float), M("java/lang/StringBuilder", "append", "(D)Ljava/lang/StringBuilder;", SB_append_double),
+    M("java/lang/StringBuilder", "toString", "()Ljava/lang/String;", SB_toString), M("java/lang/StringBuilder", "length", "()I", SB_length),
+    M("java/lang/StringBuilder", "setLength", "(I)V", SB_setLength),
+    M("android/content/res/AssetManager", "open", "(Ljava/lang/String;)Ljava/io/InputStream;", AM_open),
+    M("android/content/res/AssetManager", "open", "(Ljava/lang/String;I)Ljava/io/InputStream;", AM_open),
+    M("java/io/InputStream", "read", "()I", IS_read0), M("java/io/InputStream", "read", "([B)I", IS_read_arr), M("java/io/InputStream", "read", "([BII)I", IS_read_range),
+    M("java/io/InputStream", "available", "()I", IS_available), M("java/io/InputStream", "close", "()V", IS_close),
+    M("java/util/Scanner", "<init>", "(Ljava/io/InputStream;Ljava/lang/String;)V", Scanner_init), M("java/util/Scanner", "<init>", "(Ljava/io/InputStream;)V", Scanner_init),
+    M("java/util/Scanner", "useDelimiter", "(Ljava/lang/String;)Ljava/util/Scanner;", Scanner_useDelimiter),
+    M("java/util/Scanner", "hasNext", "()Z", Scanner_hasNext), M("java/util/Scanner", "next", "()Ljava/lang/String;", Scanner_next), M("java/util/Scanner", "close", "()V", Noop),
+    M("java/util/HashMap", "entrySet", "()Ljava/util/Set;", Map_entrySet), M("java/util/Map", "entrySet", "()Ljava/util/Set;", Map_entrySet),
+    M("java/util/HashMap", "size", "()I", Coll_size), M("java/util/Map", "size", "()I", Coll_size), M("java/util/HashMap", "isEmpty", "()Z", Coll_isEmpty),
+    M("java/util/HashSet", "iterator", "()Ljava/util/Iterator;", Set_iterator), M("java/util/Set", "iterator", "()Ljava/util/Iterator;", Set_iterator),
+    M("java/util/HashSet", "size", "()I", Coll_size), M("java/util/Set", "size", "()I", Coll_size),
+    M("android/content/SharedPreferences", "getAll", "()Ljava/util/Map;", SP_getAll),
+    M("android/content/Intent", "getExtras", "()Landroid/os/Bundle;", Intent_getExtras),
+    M("android/content/Context", "getObbDir", "()Ljava/io/File;", Context_getObbDir), M("android/content/Context", "getObbDirs", "()[Ljava/io/File;", Context_getObbDirs),
+    M("android/app/Activity", "setRequestedOrientation", "(I)V", Activity_setRequestedOrientation),
+    M("android/hardware/display/DisplayManager", "getDisplay", "(I)Landroid/view/Display;", DM_getDisplay),
+    M("android/hardware/display/DisplayManager", "registerDisplayListener", "(Landroid/hardware/display/DisplayManager$DisplayListener;Landroid/os/Handler;)V", Noop),
+    M("android/util/DisplayMetrics", "<init>", "()V", Noop),
+    M("android/media/AudioManager", "getDevices", "(I)[Landroid/media/AudioDeviceInfo;", AudioManager_getDevices),
+    M("android/media/AudioManager", "getProperty", "(Ljava/lang/String;)Ljava/lang/String;", AudioManager_getProperty),
+    M("android/media/AudioManager", "getStreamVolume", "(I)I", AudioManager_getStreamVolume), M("android/media/AudioManager", "getStreamMaxVolume", "(I)I", AudioManager_getStreamMaxVolume),
+    M("android/media/AudioManager", "requestAudioFocus", "(Landroid/media/AudioManager$OnAudioFocusChangeListener;II)I", AudioManager_requestAudioFocus),
+    M("android/net/Uri", "encode", "(Ljava/lang/String;)Ljava/lang/String;", Uri_encode),
+    M("com/unity3d/player/PlayAssetDeliveryUnityWrapper", "init", "(Landroid/content/Context;)Lcom/unity3d/player/PlayAssetDeliveryUnityWrapper;", PAD_init),
+    M("com/unity3d/player/PlayAssetDeliveryUnityWrapper", "playCoreApiMissing", "()Z", PAD_playCoreApiMissing),
+    M("com/unity3d/player/UnityCoreAssetPacksStatusCallbacks", "<init>", "()V", Noop),
+    M("com/unity3d/player/HFPStatus", "clearHFPStat", "()V", Noop),
+    M("org/fmod/FMODAudioDevice", "<init>", "()V", Noop), M("org/fmod/FMODAudioDevice", "start", "()V", Noop),
+    M("org/fmod/FMODAudioDevice", "stop", "()V", Noop), M("org/fmod/FMODAudioDevice", "isRunning", "()Z", FMOD_isRunning),
+    M("com/unity3d/player/UnityPlayer", "initializeGoogleAr", "()Z", UnityPlayer_initializeGoogleAr),
+    M("bitter/jnibridge/JNIBridge", "newInterfaceProxy", "(J[Ljava/lang/Class;)Ljava/lang/Object;", JNIBridge_newInterfaceProxy),
+    { NULL, NULL, NULL, NULL }
+};
+
+void tl_hle_configure(const char *pkg, const char *apk, const char *data, int w, int h)
+{
+    snprintf(H.pkg, sizeof(H.pkg), "%s", pkg);
+    snprintf(H.apk, sizeof(H.apk), "%s", apk);
+    snprintf(H.data, sizeof(H.data), "%s", data);
+    snprintf(H.files, sizeof(H.files), "%s/files", data);
+    snprintf(H.cache, sizeof(H.cache), "%s/cache", data);
+    snprintf(H.ext_files, sizeof(H.ext_files), "%s/sdcard/Android/data/%s/files", data, pkg);
+    snprintf(H.ext_cache, sizeof(H.ext_cache), "%s/sdcard/Android/data/%s/cache", data, pkg);
+    snprintf(H.native_lib, sizeof(H.native_lib), "/data/app/lib/arm64");
+    H.width = w; H.height = h; H.density = 3.0f;
+    mkdirs(H.files); mkdirs(H.cache); mkdirs(H.ext_files); mkdirs(H.ext_cache);
+}
+
+jobj *tl_hle_activity(void) { return H.activity; }
+
+void tl_jni_hle_install(void)
+{
+    for (size_t i = 0; i < sizeof(k_classes) / sizeof(k_classes[0]); i++) tl_jni_declare(k_classes[i].name, k_classes[i].super);
+    tl_jni_register_hle(k_hle);
+    install_build();
+
+    H.activity = make("android/app/Activity");
+    H.resources = make("android/content/res/Resources");
+    H.assets = make("android/content/res/AssetManager");
+    H.config = make("android/content/res/Configuration");
+    set_int(H.config, "orientation", 1);            /* ORIENTATION_PORTRAIT */
+    set_float(H.config, "fontScale", 1.0f);
+    set_int(H.config, "screenLayout", 0x22); set_int(H.config, "keyboard", 1); set_int(H.config, "navigation", 1);
+    set_int(H.config, "touchscreen", 3); set_int(H.config, "screenWidthDp", (int)(H.width / H.density));
+    set_int(H.config, "screenHeightDp", (int)(H.height / H.density)); set_int(H.config, "densityDpi", (int)(H.density * 160));
+    H.metrics = make("android/util/DisplayMetrics");
+    fill_metrics(H.metrics);
+    H.appinfo = make("android/content/pm/ApplicationInfo");
+    set_str(H.appinfo, "sourceDir", H.apk); set_str(H.appinfo, "publicSourceDir", H.apk);
+    set_str(H.appinfo, "nativeLibraryDir", H.native_lib); set_str(H.appinfo, "dataDir", H.data);
+    set_str(H.appinfo, "packageName", H.pkg); set_int(H.appinfo, "flags", 0x8000 /* FLAG_HAS_CODE */);
+    set_int(H.appinfo, "targetSdkVersion", 36); set_int(H.appinfo, "minSdkVersion", 24);
+    H.pm = make("android/content/pm/PackageManager");
+    H.display = make("android/view/Display");
+    H.wm = make("android/view/WindowManager");
+    H.window = make("android/view/Window");
+    H.looper = make("android/os/Looper");
+    H.handler = make("android/os/Handler");
+    tl_jni_set_static("com/unity3d/player/UnityPlayer", "currentActivity", "Landroid/app/Activity;", vl(H.activity));
+    tl_jni_set_static("com/unity3d/player/UnityPlayer", "currentContext", "Landroid/content/Context;", vl(H.activity));
+}
