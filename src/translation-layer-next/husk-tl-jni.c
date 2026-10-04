@@ -381,16 +381,25 @@ static void args_from_va(const tl_jmeth *m, tl_va_list *ap, jvalue *out)
 static tl_jmeth *mid_ok(void *mid) { return (tl_jmeth *)mid; }
 
 /* The real work behind every Call*Method: kind 0 instance, 1 nonvirtual, 2 static. */
+static jvalue null_receiver(const tl_jmeth *m)
+{
+    char msg[300];
+    snprintf(msg, sizeof(msg), "Attempt to invoke virtual method '%s.%s%s' on a null object reference", m->cls->name, m->name, m->sig);
+    tl_jni_throw("java/lang/NullPointerException", msg);
+    return g_zero;
+}
 static jvalue call_a(int kind, jobj *self, void *mid, const jvalue *args)
 {
     tl_jmeth *m = mid_ok(mid);
     if (!m) return g_zero;
+    if (kind != 2 && !self) return null_receiver(m);
     return invoke(kind == 2 ? NULL : self, m, kind == 1, args);
 }
 static jvalue call_va(int kind, jobj *self, void *mid, tl_va_list *ap)
 {
     tl_jmeth *m = mid_ok(mid);
     if (!m) return g_zero;
+    if (kind != 2 && !self) return null_receiver(m);
     jvalue args[40];
     args_from_va(m, ap, args);
     return invoke(kind == 2 ? NULL : self, m, kind == 1, args);
@@ -574,6 +583,75 @@ static void *jni_GetFieldID_impl(jo cls, const char *name, const char *sig, bool
 }
 static void *jni_GetFieldID(void *env, jo cls, const char *n, const char *s) { (void)env; return jni_GetFieldID_impl(cls, n, s, false); }
 static void *jni_GetStaticFieldID(void *env, jo cls, const char *n, const char *s) { (void)env; return jni_GetFieldID_impl(cls, n, s, true); }
+
+/* ------------------------------------------------------------- reflection */
+
+static jobj *reflected(const char *cls, void *member)
+{
+    jobj *o = tl_jni_new_object(tl_jni_class(cls));
+    o->native = member;
+    return o;
+}
+
+jobj *tl_jni_reflect_method(jobj *cls, const char *name, const char *sig, bool is_static)
+{
+    if (!cls || cls->kind != TL_K_CLASS) return NULL;
+    tl_jmeth *m = lookup_method(cls->klass.jc, name, sig, is_static);
+    if (!m || !m->exists) return NULL;
+    return reflected(!strcmp(name, "<init>") ? "java/lang/reflect/Constructor" : "java/lang/reflect/Method", m);
+}
+
+jobj *tl_jni_reflect_field(jobj *cls, const char *name, const char *sig, bool is_static)
+{
+    if (!cls || cls->kind != TL_K_CLASS) return NULL;
+    tl_jfield *f = lookup_field(cls->klass.jc, name, sig, is_static, false);
+    return f ? reflected("java/lang/reflect/Field", f) : NULL;
+}
+
+const char *tl_jni_reflected_field_sig(const jobj *field) { return field && field->native ? ((const tl_jfield *)field->native)->sig : NULL; }
+
+jobj *tl_jni_reflected_declaring_class(const jobj *member)
+{
+    if (!member || !member->native) return NULL;
+    const char *k = member->cls ? member->cls->name : "";
+    tl_jclass *c = !strcmp(k, "java/lang/reflect/Field") ? ((const tl_jfield *)member->native)->cls : ((const tl_jmeth *)member->native)->cls;
+    return c ? c->mirror : NULL;
+}
+
+const char *tl_jni_reflected_name(const jobj *member)
+{
+    if (!member || !member->native) return NULL;
+    return !strcmp(member->cls->name, "java/lang/reflect/Field") ? ((const tl_jfield *)member->native)->name : ((const tl_jmeth *)member->native)->name;
+}
+const char *tl_jni_reflected_sig(const jobj *member)
+{
+    if (!member || !member->native) return NULL;
+    return !strcmp(member->cls->name, "java/lang/reflect/Field") ? ((const tl_jfield *)member->native)->sig : ((const tl_jmeth *)member->native)->sig;
+}
+
+static void *jni_FromReflectedMethod(void *env, jo m)
+{
+    (void)env;
+    if (!m || !m->native) { tl_jni_throw("java/lang/NullPointerException", "reflected method is null"); return NULL; }
+    return m->native;
+}
+static void *jni_FromReflectedField(void *env, jo f)
+{
+    (void)env;
+    if (!f || !f->native) { tl_jni_throw("java/lang/NullPointerException", "reflected field is null"); return NULL; }
+    return f->native;
+}
+static jo jni_ToReflectedMethod(void *env, jo cls, void *mid, uint8_t is_static)
+{
+    (void)env; (void)cls; (void)is_static;
+    tl_jmeth *m = mid;
+    return m ? reflected(!strcmp(m->name, "<init>") ? "java/lang/reflect/Constructor" : "java/lang/reflect/Method", m) : NULL;
+}
+static jo jni_ToReflectedField(void *env, jo cls, void *fid, uint8_t is_static)
+{
+    (void)env; (void)cls; (void)is_static;
+    return fid ? reflected("java/lang/reflect/Field", fid) : NULL;
+}
 
 #define REF_Object(x) ((jo)tl_jni_ref((jo)(x)))
 #define REF_Boolean(x) (x)
@@ -772,6 +850,7 @@ static pthread_once_t g_init_once = PTHREAD_ONCE_INIT;
 static void build_tables(void)
 {
     SLOT(4, jni_GetVersion); SLOT(6, jni_FindClass); SLOT(10, jni_GetSuperclass); SLOT(11, jni_IsAssignableFrom);
+    SLOT(7, jni_FromReflectedMethod); SLOT(8, jni_FromReflectedField); SLOT(9, jni_ToReflectedMethod); SLOT(12, jni_ToReflectedField);
     SLOT(13, jni_Throw); SLOT(14, jni_ThrowNew); SLOT(15, jni_ExceptionOccurred); SLOT(16, jni_ExceptionDescribe);
     SLOT(17, jni_ExceptionClear); SLOT(18, jni_FatalError); SLOT(19, jni_PushLocalFrame); SLOT(20, jni_PopLocalFrame);
     SLOT(21, jni_NewGlobalRef); SLOT(22, jni_DeleteGlobalRef); SLOT(23, jni_DeleteLocalRef); SLOT(24, jni_IsSameObject);

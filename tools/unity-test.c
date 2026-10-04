@@ -6,6 +6,8 @@
  *
  * Environment: TL_JNI_TRACE=1|2 (log JNI lookups / every call), TL_SKIP=a.so,...
  */
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdatomic.h>
@@ -103,21 +105,37 @@ static void on_dump(int sig, siginfo_t *info, void *uctx)
     fflush(stderr);
 }
 
+static int safe_read(uintptr_t addr, void *out, size_t n)
+{
+    vm_size_t got = 0;
+    return vm_read_overwrite(mach_task_self(), (vm_address_t)addr, n, (vm_address_t)out, &got) == KERN_SUCCESS && got == n;
+}
+
 static void on_crash(int sig, siginfo_t *info, void *uctx)
 {
     ucontext_t *uc = uctx;
     _STRUCT_ARM_THREAD_STATE64 *ss = &uc->uc_mcontext->__ss;
-    fprintf(stderr, "\n=== CRASH: signal %d, fault address %p ===\n", sig, info->si_addr);
+    char tn[32] = ""; pthread_getname_np(pthread_self(), tn, sizeof(tn));
+    fprintf(stderr, "\n=== CRASH: signal %d, fault address %p, thread '%s' ===\n", sig, info->si_addr, tn);
     describe("pc", (void *)ss->__pc);
     describe("lr", (void *)ss->__lr);
     if (info->si_addr) describe("fault", info->si_addr);
-    uint64_t *fp = (uint64_t *)ss->__fp;
-    for (int i = 0; i < 14 && fp && ((uintptr_t)fp & 7) == 0 && (uintptr_t)fp > 0x100000000ull; i++) {
-        describe("frame", (void *)fp[1]);
-        fp = (uint64_t *)fp[0];
+    uintptr_t fp = ss->__fp;
+    for (int i = 0; i < 14 && fp && (fp & 7) == 0; i++) {
+        uint64_t fr[2];
+        if (!safe_read(fp, fr, sizeof(fr))) break;
+        describe("frame", (void *)fr[1]);
+        fp = fr[0];
     }
-    fprintf(stderr, "  x0=%#llx x1=%#llx x2=%#llx x3=%#llx x8=%#llx x9=%#llx x19=%#llx x20=%#llx\n",
-            ss->__x[0], ss->__x[1], ss->__x[2], ss->__x[3], ss->__x[8], ss->__x[9], ss->__x[19], ss->__x[20]);
+    for (int i = 0; i < 29; i += 4)
+        fprintf(stderr, "  x%d=%#llx x%d=%#llx x%d=%#llx x%d=%#llx\n", i, ss->__x[i], i + 1, ss->__x[i + 1], i + 2, i + 2 < 29 ? ss->__x[i + 2] : 0, i + 3, i + 3 < 29 ? ss->__x[i + 3] : 0);
+    fprintf(stderr, "  sp=%#llx fp=%#llx\n", ss->__sp, ss->__fp);
+    uint64_t dump_base = getenv("TL_CRASH_DUMP_REG") ? ss->__x[atoi(getenv("TL_CRASH_DUMP_REG"))] : ss->__x[0];
+    for (int i = 0; i < 0x120; i += 16) {
+        uint64_t q[2];
+        if (!safe_read(dump_base + i, q, sizeof(q))) break;
+        fprintf(stderr, "  [%#llx+%#x] %016llx %016llx\n", (unsigned long long)dump_base, i, (unsigned long long)q[0], (unsigned long long)q[1]);
+    }
     fflush(stderr);
     _exit(139);
 }
@@ -239,6 +257,16 @@ static void dump_pushes(void)
         fprintf(stderr, "EV %d %s t%d node=%#llx prev=%#llx\n", i, g_site_names[g_ev[i].site], g_ev[i].tid, (unsigned long long)g_ev[i].node, (unsigned long long)g_ev[i].prev);
 }
 
+static void probe_icall_missing(uint64_t *r) { fprintf(stderr, "PROBE icall not resolved: %s\n", (const char *)r[19]); }
+static void probe_cxa_throw(uint64_t *r) { fprintf(stderr, "PROBE __cxa_throw(obj=%#llx tinfo=%#llx dtor=%#llx) lr=%#llx\n", (unsigned long long)r[0], (unsigned long long)r[1], (unsigned long long)r[2], (unsigned long long)r[30]); }
+static void install_icall_probes(void)
+{
+    tl_lib *L = tl_ld_find_lib("libil2cpp.so");
+    if (!L) return;
+    if (!tl_ld_probe(L, 0x1e6eb44, probe_icall_missing)) fprintf(stderr, "probe failed (icall)\n");
+    if (!tl_ld_probe(L, 0x1edb0e0, probe_cxa_throw)) fprintf(stderr, "probe failed (throw)\n");
+}
+
 static void install_probes(void)
 {
     tl_lib *L = tl_ld_find_lib("libunity.so");
@@ -282,6 +310,7 @@ int main(int argc, char **argv)
                             .frame_dir = frames, .frame_every = 30 };
     if (!tl_unity_start(&cfg)) { fprintf(stderr, "unity: start failed\n"); return 1; }
     if (getenv("TL_PROBES")) install_probes();
+    if (getenv("TL_ICALL_PROBES")) install_icall_probes();
     if (getenv("TL_STOP_EARLY")) { tl_ld_iterate(print_lib, NULL); raise(SIGSTOP); }
     if (!tl_unity_run()) { fprintf(stderr, "unity: run failed\n"); return 1; }
     tl_ld_iterate(print_lib, NULL);

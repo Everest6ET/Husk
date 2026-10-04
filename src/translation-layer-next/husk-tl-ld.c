@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include "husk-tl-internal.h"
+#include "husk-tl-a64.h"
 #include "husk-tl-xmem.h"
 
 /* The project's log sink, and the bionic shim's surface. */
@@ -70,9 +71,12 @@ struct tl_lib {
     int ndeps;
     bool deps_ready;
 
-    uint8_t *stub_rx, *stub_rw;    /* one page after the image: stubs for rewritten `svc` sites */
-    size_t stub_used;
+    uint8_t *stub_rx, *stub_rw;    /* pages after the image: stubs for rewritten `svc` and x18 sites */
+    size_t stub_used, stub_cap, nstub;
 
+    struct { uint64_t start, end; } code[16];   /* executable sections, as vaddrs: the only places instructions are patched */
+    int ncode;
+    size_t n_x18, n_x18_failed;    /* sites rewritten for the reserved register, and sites that could not be */
     int state;                     /* 0 mapped, 1 relocating, 2 relocated, 3 initialising, 4 initialised */
     uint32_t n_unresolved;
 };
@@ -508,7 +512,7 @@ __attribute__((naked, used)) void tl_probe_common(void)
 bool tl_ld_probe(tl_lib *L, uint64_t vaddr, void (*cb)(uint64_t *regs))
 {
     uint64_t off = vaddr - L->base_vaddr;
-    if (off + 4 > L->npages * PAGE || L->stub_used + 64 > PAGE) return false;
+    if (off + 4 > L->npages * PAGE || L->stub_used + 64 > L->stub_cap) return false;
     uint32_t *site_rw = (uint32_t *)(L->rw + off);
     const uint8_t *site_rx = L->rx + off;
     uint8_t *rx = L->stub_rx + L->stub_used, *rw = L->stub_rw + L->stub_used;
@@ -536,7 +540,7 @@ bool tl_ld_probe(tl_lib *L, uint64_t vaddr, void (*cb)(uint64_t *regs))
 /* A 32-byte stub for the `svc` at site_rx; returns its executable address. */
 static uint8_t *svc_stub(tl_lib *L, const uint8_t *site_rx)
 {
-    if (L->stub_used + 32 > PAGE) return NULL;
+    if (L->stub_used + 32 > L->stub_cap) return NULL;
     uint8_t *rx = L->stub_rx + L->stub_used, *rw = L->stub_rw + L->stub_used;
     L->stub_used += 32;
     uint32_t imm19 = (uint32_t)(((int64_t)L->stub_rx - (int64_t)(rx + 8)) / 4) & 0x7FFFFu;
@@ -553,6 +557,212 @@ static uint8_t *svc_stub(tl_lib *L, const uint8_t *site_rx)
     };
     memcpy(rw, code, 32);
     return rx;
+}
+
+/* --------------------------------------------------------------------- x18 */
+
+/*
+ * Apple reserves x18, and the kernel zeroes it on every exception return -- every
+ * page fault, every interrupt -- while Android compilers use it as one more scratch
+ * register and keep values in it across instructions that can fault. Left alone,
+ * guest code that does that computes with a zero at some random point and dies
+ * with an address of 0xfffffffffffffff0.
+ *
+ * So no guest instruction ever holds a live value in the real x18. Each one that
+ * names it is replaced by a branch to a small stub that works on a "virtual x18"
+ * kept in the thread's own TSD array, which the kernel does not touch: the stub
+ * loads the virtual value into a scratch register, runs the original instruction
+ * with that register in place of x18, writes the (possibly changed) value back, and
+ * branches to the following instruction. The scratch registers are saved in the
+ * 128 bytes below sp that Apple's ABI keeps free of signal frames. Nothing the
+ * kernel does can land between two instructions of a stub and be seen: only x18
+ * is ever lost, and x18 is not used.
+ *
+ * Instructions that read their operand's value as part of control flow or that are
+ * pc-relative cannot be copied into a stub unchanged, so they get their own
+ * shapes: adrp/adr/ldr-literal into x18 become the constant they compute, cbz and
+ * tbz become a test of the loaded value that branches on to the original target,
+ * and `br x18` jumps through a scratch register.
+ */
+#define X18_STUB_BYTES 64
+
+static int64_t g_vx18_off = -1;     /* byte offset of the virtual-x18 slot from the TSD base */
+
+static bool vx18_init(void)
+{
+    if (g_vx18_off >= 0) return true;
+#if defined(__aarch64__)
+    pthread_key_t key;
+    if (pthread_key_create(&key, NULL)) return false;
+    const uintptr_t sentinel = (uintptr_t)0x5a5a1234deadbeefull;
+    pthread_setspecific(key, (void *)sentinel);
+    uintptr_t base;
+    __asm__ volatile("mrs %0, tpidrro_el0" : "=r"(base));
+    base &= ~(uintptr_t)7;
+    const volatile uintptr_t *tsd = (const volatile uintptr_t *)base;
+    int64_t off = -1;
+    for (int i = 0; i < 520; i++) if (tsd[i] == sentinel) { off = (int64_t)i * 8; break; }
+    pthread_setspecific(key, NULL);
+    if (off < 0 || off > 32760) { pthread_key_delete(key); return false; }
+    g_vx18_off = off;
+    return true;
+#else
+    return false;
+#endif
+}
+
+/* The value of the calling thread's virtual x18, for a signal handler to save and restore around guest handlers. */
+uint64_t tl_vx18_get(void)
+{
+#if defined(__aarch64__)
+    if (g_vx18_off < 0) return 0;
+    uintptr_t base;
+    __asm__ volatile("mrs %0, tpidrro_el0" : "=r"(base));
+    return *(const volatile uint64_t *)((base & ~(uintptr_t)7) + (uintptr_t)g_vx18_off);
+#else
+    return 0;
+#endif
+}
+void tl_vx18_set(uint64_t v)
+{
+#if defined(__aarch64__)
+    if (g_vx18_off < 0) return;
+    uintptr_t base;
+    __asm__ volatile("mrs %0, tpidrro_el0" : "=r"(base));
+    *(volatile uint64_t *)((base & ~(uintptr_t)7) + (uintptr_t)g_vx18_off) = v;
+#else
+    (void)v;
+#endif
+}
+
+static inline uint32_t e_stur(unsigned rt, int imm)  { return 0xF8000000u | (((uint32_t)imm & 0x1FFu) << 12) | (31u << 5) | rt; }
+static inline uint32_t e_ldur(unsigned rt, int imm)  { return 0xF8400000u | (((uint32_t)imm & 0x1FFu) << 12) | (31u << 5) | rt; }
+static inline uint32_t e_mrs_tsd(unsigned rt)        { return 0xD53BD060u | rt; }
+static inline uint32_t e_and_tsd(unsigned r)         { return 0x927DF000u | (r << 5) | r; }          /* and r, r, #~7 */
+static inline uint32_t e_ldr_slot(unsigned rt, unsigned rn) { return 0xF9400000u | ((uint32_t)(g_vx18_off / 8) << 10) | (rn << 5) | rt; }
+static inline uint32_t e_str_slot(unsigned rt, unsigned rn) { return 0xF9000000u | ((uint32_t)(g_vx18_off / 8) << 10) | (rn << 5) | rt; }
+
+static int e_mov64(uint32_t *out, unsigned rd, uint64_t v)
+{
+    int n = 0;
+    out[n++] = 0xD2800000u | (uint32_t)((v & 0xFFFF) << 5) | rd;                       /* movz rd, #lo */
+    for (int sh = 1; sh < 4; sh++) {
+        uint64_t part = (v >> (16 * sh)) & 0xFFFF;
+        if (part) out[n++] = 0xF2800000u | ((uint32_t)sh << 21) | ((uint32_t)part << 5) | rd;   /* movk */
+    }
+    return n;
+}
+
+static bool in_range_b(const uint8_t *from, const uint8_t *to)
+{
+    int64_t o = ((int64_t)to - (int64_t)from) / 4;
+    return o > -(1 << 25) && o < (1 << 25);
+}
+static inline uint32_t e_b(const uint8_t *from, const uint8_t *to)
+{
+    return 0x14000000u | ((uint32_t)(((int64_t)to - (int64_t)from) / 4) & 0x3FFFFFFu);
+}
+
+static unsigned pick_scratch(uint32_t used, unsigned avoid)
+{
+    static const unsigned order[] = { 16, 17, 15, 14, 13, 12, 11, 10, 9 };
+    for (size_t i = 0; i < sizeof(order) / sizeof(order[0]); i++)
+        if (!(used & (1u << order[i])) && order[i] != avoid) return order[i];
+    return 0;
+}
+
+enum { X18_NONE = 0, X18_DONE = 1, X18_FAILED = 2 };
+
+/* Rewrite the instruction at site_rw (executable address pc) if it names x18. */
+static int x18_rewrite(tl_lib *L, uint32_t *site_rw, const uint8_t *pc, ptrdiff_t delta)
+{
+    uint32_t insn = *site_rw;
+    if ((insn & 31u) != 18 && ((insn >> 5) & 31u) != 18 && ((insn >> 10) & 31u) != 18 && ((insn >> 16) & 31u) != 18)
+        return X18_NONE;
+    bool known;
+    if (!a64_uses_gpr(insn, 18, &known)) return X18_NONE;
+    if (!known) {
+        if (G.verbosity >= 2) tl_log_line("ld: %s: unrecognised instruction %08x at +%#llx looks like it uses x18", L->name, insn, (unsigned long long)(pc - L->rx));
+        return X18_FAILED;
+    }
+    if (g_vx18_off < 0 || L->stub_used + X18_STUB_BYTES > L->stub_cap) return X18_FAILED;
+
+    uint8_t *rx = L->stub_rx + L->stub_used, *rw = L->stub_rw + L->stub_used;
+    uint32_t c[X18_STUB_BYTES / 4];
+    int n = 0;
+    const uint8_t *back = pc + 4;
+    uint32_t used = a64_gpr_mask(insn);
+#define EMIT(word) do { uint32_t w_ = (word); c[n++] = w_; } while (0)
+#define EMIT_B(to) do { uint32_t w_ = e_b(rx + n * 4, (to)); c[n++] = w_; } while (0)
+
+    if ((insn & 0x9F000000u) == 0x90000000u || (insn & 0x9F000000u) == 0x10000000u || (insn & 0xBF000000u) == 0x18000000u) {
+        /* pc-relative into x18: the value is a constant of the site, known now */
+        uint64_t value;
+        if ((insn & 0x9F000000u) == 0x90000000u || (insn & 0x9F000000u) == 0x10000000u) {
+            bool page = (insn & 0x80000000u) != 0;
+            int64_t imm = (int64_t)((((insn >> 5) & 0x7FFFFu) << 2) | ((insn >> 29) & 3u));
+            if (imm & 0x100000) imm -= 0x200000;
+            uintptr_t tp = page ? ((uintptr_t)pc & ~(uintptr_t)0xFFF) + (uintptr_t)(imm * 4096) : (uintptr_t)pc + (uintptr_t)imm;
+            if (tp >= (uintptr_t)L->rx && tp < (uintptr_t)L->rx + L->npages * PAGE && (L->pflags[(tp - (uintptr_t)L->rx) / PAGE] & TL_PAGE_W))
+                tp += (uintptr_t)delta;
+            value = tp;
+        } else {
+            int64_t imm = (int64_t)((insn >> 5) & 0x7FFFFu);
+            if (imm & 0x40000) imm -= 0x80000;
+            const uint8_t *src = (const uint8_t *)((uintptr_t)pc + (uintptr_t)(imm * 4) + (uintptr_t)delta);
+            value = (insn & 0x40000000u) ? *(const uint64_t *)src : (uint64_t)*(const uint32_t *)src;
+        }
+        unsigned S = 16, T = 17;
+        EMIT(e_stur(S, -16)); EMIT(e_stur(T, -8));
+        n += e_mov64(c + n, S, value);
+        EMIT(e_mrs_tsd(T)); EMIT(e_and_tsd(T)); EMIT(e_str_slot(S, T));
+        EMIT(e_ldur(T, -8)); EMIT(e_ldur(S, -16));
+        EMIT_B(back);
+    } else if ((insn & 0xFFFFFC1Fu) == 0xD61F0000u) {                       /* br x18 */
+        EMIT(e_mrs_tsd(17)); EMIT(e_and_tsd(17)); EMIT(e_ldr_slot(17, 17));
+        EMIT(0xD61F0000u | (17u << 5));
+    } else if ((insn & 0x7E000000u) == 0x34000000u || (insn & 0x7E000000u) == 0x36000000u) {   /* cbz, cbnz, tbz, tbnz */
+        bool is_tb = (insn & 0x7E000000u) == 0x36000000u;
+        int64_t imm = is_tb ? (int64_t)((insn >> 5) & 0x3FFFu) : (int64_t)((insn >> 5) & 0x7FFFFu);
+        int64_t sign = is_tb ? 0x2000 : 0x40000;
+        if (imm & sign) imm -= sign * 2;
+        const uint8_t *target = pc + imm * 4;
+        unsigned S = 16;
+        EMIT(e_stur(S, -16));
+        EMIT(e_mrs_tsd(S)); EMIT(e_and_tsd(S)); EMIT(e_ldr_slot(S, S));
+        /* the test at index 4 branches to index 7 when taken: three instructions on */
+        uint32_t field_mask = is_tb ? (0x3FFFu << 5) : (0x7FFFFu << 5);
+        EMIT((insn & ~(field_mask | 0x1Fu)) | (3u << 5) | S);
+        EMIT(e_ldur(S, -16));
+        EMIT_B(back);
+        EMIT(e_ldur(S, -16));
+        if (!in_range_b(rx + n * 4, target)) return X18_FAILED;
+        EMIT_B(target);
+    } else {
+        /* a base register of sp with writeback would collide with the saved scratch registers */
+        bool pair = (insn & 0x3A000000u) == 0x28000000u, single = (insn & 0x3B000000u) == 0x38000000u;
+        unsigned mode = pair ? (insn >> 23) & 3u : (insn >> 10) & 3u;
+        if ((pair || (single && !((insn >> 21) & 1u))) && ((insn >> 5) & 31u) == 31 && (mode == 1 || mode == 3)) {
+            tl_log_line("ld: %s: x18 instruction %08x at +%#llx writes back sp", L->name, insn, (unsigned long long)(pc - L->rx));
+            return X18_FAILED;
+        }
+        unsigned S = pick_scratch(used, 0), T = pick_scratch(used, S);
+        if (!S || !T) return X18_FAILED;
+        EMIT(e_stur(S, -16)); EMIT(e_stur(T, -8));
+        EMIT(e_mrs_tsd(S)); EMIT(e_and_tsd(S)); EMIT(e_ldr_slot(S, S));
+        EMIT(a64_subst_gpr(insn, 18, S));
+        EMIT(e_mrs_tsd(T)); EMIT(e_and_tsd(T)); EMIT(e_str_slot(S, T));
+        EMIT(e_ldur(T, -8)); EMIT(e_ldur(S, -16));
+        EMIT_B(back);
+    }
+#undef EMIT
+#undef EMIT_B
+    if (!in_range_b(pc, rx)) return X18_FAILED;
+    memcpy(rw, c, (size_t)n * 4);
+    for (int i = n; i < X18_STUB_BYTES / 4; i++) ((uint32_t *)rw)[i] = 0xD503201Fu;
+    L->stub_used += X18_STUB_BYTES;
+    *site_rw = e_b(pc, rx);
+    return X18_DONE;
 }
 
 /* --------------------------------------------------------------- patching */
@@ -582,13 +792,19 @@ static void patch_image(tl_lib *L, size_t *n_tpidr, size_t *n_adrp, size_t *n_ad
 {
     ptrdiff_t delta = L->rw - L->rx;
     *n_tpidr = *n_adrp = *n_adr = *n_svc = 0;
-    for (size_t pg = 0; pg < L->npages; pg++) {
-        if (!(L->pflags[pg] & TL_PAGE_X)) continue;
-        uint32_t *w = (uint32_t *)(L->rw + pg * PAGE);
-        const uint8_t *x = L->rx + pg * PAGE;
-        for (size_t i = 0; i < PAGE / 4; i++) {
+    /* Only instructions are patched: many libraries put .rodata and .eh_frame in the same
+     * executable segment as .text, and a data word that happens to look like an adrp or a
+     * load must be left alone. */
+    for (int r = 0; r < L->ncode; r++) {
+        uint32_t *w = (uint32_t *)(L->rw + (L->code[r].start - L->base_vaddr));
+        const uint8_t *x = L->rx + (L->code[r].start - L->base_vaddr);
+        size_t nwords = (size_t)((L->code[r].end - L->code[r].start) / 4);
+        for (size_t i = 0; i < nwords; i++) {
             uint32_t insn = w[i];
             const uint8_t *pc = x + i * 4;
+            int xr = x18_rewrite(L, &w[i], pc, delta);
+            if (xr == X18_DONE) { L->n_x18++; continue; }
+            if (xr == X18_FAILED) { L->n_x18_failed++; continue; }
             if ((insn & 0xFFFFFFE0u) == 0xD53BD040u) {            /* mrs Xt, tpidr_el0 */
                 w[i] = encode_adrp(insn & 0x1Fu, pc, G.tcb_rw);
                 (*n_tpidr)++;
@@ -881,8 +1097,46 @@ static tl_lib *map_library(const char *name, uint8_t *file, size_t flen)
     uint8_t *flags = malloc(npages);
     tl_page_plan(loads, (size_t)nloads, has_relro ? &relro : NULL, PAGE, flags, npages, &base_vaddr);
 
+    /* The executable sections, from the section headers when the file has them (it almost always does);
+     * otherwise whole executable segments, which is correct for a library with nothing but code in them. */
+    struct { uint64_t vaddr, size, foff; } code[16]; int ncode = 0;
+    if (eh->e_shoff && eh->e_shentsize >= 64 && eh->e_shnum && eh->e_shoff + (uint64_t)eh->e_shnum * eh->e_shentsize <= flen) {
+        for (unsigned i = 0; i < eh->e_shnum && ncode < 16; i++) {
+            const uint8_t *sh = file + eh->e_shoff + (size_t)i * eh->e_shentsize;
+            uint32_t type; uint64_t flags, addr, off, size;
+            memcpy(&type, sh + 4, 4); memcpy(&flags, sh + 8, 8); memcpy(&addr, sh + 16, 8); memcpy(&off, sh + 24, 8); memcpy(&size, sh + 32, 8);
+            if (type == 1 /* PROGBITS */ && (flags & 4 /* EXECINSTR */) && size && off + size <= flen) {
+                code[ncode].vaddr = addr; code[ncode].size = size; code[ncode].foff = off; ncode++;
+            }
+        }
+    }
+    if (!ncode) {
+        tl_log_line("ld: %s has no section headers; treating every executable segment as code", name);
+        for (unsigned i = 0; i < eh->e_phnum && ncode < 16; i++) {
+            const elf_phdr *p = &phs[i];
+            if (p->p_type == PT_LOAD_ && (p->p_flags & PF_X_) && p->p_offset + p->p_filesz <= flen) {
+                code[ncode].vaddr = p->p_vaddr; code[ncode].size = p->p_filesz; code[ncode].foff = p->p_offset; ncode++;
+            }
+        }
+    }
+
+    /* Stub pages after the image: one literal slot, a few probes, a stub for every raw
+     * system call, and one for every instruction that names the reserved register x18. */
+    size_t stub_bytes = 16 + 8192;
+    for (int r = 0; r < ncode; r++) {
+        const uint32_t *wv = (const uint32_t *)(file + code[r].foff);
+        for (size_t k = 0, cnt = (size_t)(code[r].size / 4); k < cnt; k++) {
+            uint32_t v = wv[k];
+            if (v == 0xD4000001u) stub_bytes += 32;
+            else if (((v & 31u) == 18 || ((v >> 5) & 31u) == 18 || ((v >> 10) & 31u) == 18 || ((v >> 16) & 31u) == 18) && a64_uses_gpr(v, 18, NULL))
+                stub_bytes += X18_STUB_BYTES;
+        }
+    }
+    size_t nstub = (stub_bytes + PAGE - 1) / PAGE;
+    if (!vx18_init()) tl_log_line("ld: no thread-specific slot for the virtual x18; instructions using x18 will not be rewritten");
+
     uint8_t *rx, *rw;
-    if (!tl_xmem_alloc((npages + 1) * PAGE, &rx, &rw)) {
+    if (!tl_xmem_alloc((npages + nstub) * PAGE, &rx, &rw)) {
         tl_log_line("ld: %s needs %zu MiB of executable memory and the region has %zu MiB left", name,
                     npages * PAGE >> 20, (tl_xmem_size() - tl_xmem_used()) >> 20);
         free(flags); free(phs);
@@ -890,7 +1144,7 @@ static tl_lib *map_library(const char *name, uint8_t *file, size_t flen)
     }
     /* The region's pages are not guaranteed zero (StikDebug writes a byte into each),
      * and .bss has to be. */
-    memset(rw, 0, (npages + 1) * PAGE);
+    memset(rw, 0, (npages + nstub) * PAGE);
     for (unsigned i = 0; i < eh->e_phnum; i++) {
         const elf_phdr *p = &phs[i];
         if (p->p_type != PT_LOAD_ || !p->p_filesz) continue;
@@ -907,7 +1161,9 @@ static tl_lib *map_library(const char *name, uint8_t *file, size_t flen)
     snprintf(L->name, sizeof(L->name), "%s", name);
     L->rx = rx; L->rw = rw; L->base_vaddr = base_vaddr; L->npages = npages; L->pflags = flags;
     L->phdr = phs; L->phnum = eh->e_phnum;
-    L->stub_rx = rx + npages * PAGE; L->stub_rw = rw + npages * PAGE; L->stub_used = 16;
+    for (int r = 0; r < ncode; r++) { L->code[r].start = code[r].vaddr; L->code[r].end = code[r].vaddr + code[r].size; }
+    L->ncode = ncode;
+    L->stub_rx = rx + npages * PAGE; L->stub_rw = rw + npages * PAGE; L->stub_used = 16; L->stub_cap = nstub * PAGE; L->nstub = nstub;
     { uint64_t h = (uint64_t)(uintptr_t)tl_svc_common; memcpy(L->stub_rw, &h, 8); }
     parse_dynamic(L, dyn_v, dyn_n);
     if (L->strtab) {
@@ -938,7 +1194,7 @@ static bool relocate(tl_lib *L)
     if (!ok) { tl_log_line("ld: %s: relocation failed", L->name); return false; }
     size_t t = 0, a = 0, ad = 0, sv = 0;
     patch_image(L, &t, &a, &ad, &sv);
-    tl_xmem_flush(L->rx, (L->npages + 1) * PAGE);
+    tl_xmem_flush(L->rx, (L->npages + L->nstub) * PAGE);
     L->state = 2;
     if (G.verbosity >= 1) {
         tl_log_line("ld: %-36s %5.1f MiB  %7zu relocs, %4zu tpidr + %5zu adrp patched%s%s", L->name,
@@ -947,6 +1203,8 @@ static bool relocate(tl_lib *L)
         if (L->n_unresolved) tl_log_line("ld:   %s: %u imports bound to logging stubs", L->name, L->n_unresolved);
         if (ad) tl_log_line("ld:   %s: %zu 'adr' instructions reach writable data through the read-only view", L->name, ad);
         if (sv) tl_log_line("ld:   %s: %zu raw system-call sites rewritten", L->name, sv);
+        if (L->n_x18 || L->n_x18_failed) tl_log_line("ld:   %s: %zu instructions using x18 rewritten for the virtual register%s", L->name, L->n_x18,
+                                                     L->n_x18_failed ? " (and some that could not be)" : "");
     }
     return true;
 }

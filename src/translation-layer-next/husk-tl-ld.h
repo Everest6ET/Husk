@@ -79,6 +79,14 @@ int tl_ld_iterate(tl_ld_phdr_cb cb, void *user);
  */
 bool tl_ld_probe(tl_lib *lib, uint64_t vaddr, void (*cb)(uint64_t *regs));
 
+/*
+ * The calling thread's virtual x18. Guest code never holds a live value in the real
+ * register (the kernel zeroes it); its x18 lives in a TSD slot instead, and anything
+ * that runs guest code on a signal frame saves it before and restores it after.
+ */
+uint64_t tl_vx18_get(void);
+void tl_vx18_set(uint64_t v);
+
 /* Imports that nothing provided, bound to a stub that logs on call. */
 size_t tl_ld_unresolved_count(void);
 

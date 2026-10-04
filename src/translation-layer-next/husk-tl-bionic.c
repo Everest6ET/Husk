@@ -474,6 +474,7 @@ static void *bionic_dlopen(const char *path, int flags)
         return &g_sys_handle[0];
     }
     tl_lib *L = tl_ld_load(base);
+    if (getenv("TL_DL_TRACE")) tl_log_line("dl: dlopen(%s) -> %s", path, L ? "ok" : "not found");
     if (!L) { dl_fail("dlopen failed: library \"%s\" not found", path); return NULL; }
     tl_ld_init(L);
     return L;
@@ -491,6 +492,7 @@ static void *bionic_dlsym(void *handle, const char *name)
     } else {
         r = tl_ld_sym((tl_lib *)handle, name);
     }
+    if (getenv("TL_DL_TRACE")) tl_log_line("dl: dlsym(%s) -> %s", name, r ? "found" : "missing");
     if (!r) dl_fail("undefined symbol: %s", name);
     return r;
 }

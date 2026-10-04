@@ -106,6 +106,21 @@ void tl_jni_clear(void);
 /* The native method a library registered with RegisterNatives (or NULL). */
 void *tl_jni_native(const char *cls, const char *name, const char *sig);
 
+/*
+ * java.lang.reflect objects for methods and fields, as Unity's ReflectionHelper hands
+ * them back to native code, which turns them into IDs with FromReflectedMethod/Field.
+ * NULL when the class has no such member.
+ */
+jobj *tl_jni_reflect_method(jobj *cls, const char *name, const char *sig, bool is_static);
+jobj *tl_jni_reflect_field(jobj *cls, const char *name, const char *sig, bool is_static);
+const char *tl_jni_reflected_field_sig(const jobj *field);
+jobj *tl_jni_reflected_declaring_class(const jobj *member);
+const char *tl_jni_reflected_name(const jobj *member);       /* a method's or field's name */
+const char *tl_jni_reflected_sig(const jobj *member);        /* a method's or field's signature */
+
+/* A Java proxy made by JNIBridge, whose methods run C# in the native library that registered JNIBridge.invoke. */
+
+
 /* Call a Java method by name from C (HLE-implemented or not), as native code would. */
 jvalue tl_jni_call(jobj *self_or_class, const char *name, const char *sig, const jvalue *args);
 

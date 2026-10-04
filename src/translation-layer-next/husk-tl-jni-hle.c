@@ -121,6 +121,8 @@ static void Context_getPackageCodePath(tl_jcall *c) { c->ret = vl(STR(H.apk)); }
 static void Context_getPackageResourcePath(tl_jcall *c) { c->ret = vl(STR(H.apk)); }
 static void Context_getFilesDir(tl_jcall *c) { c->ret = vl(new_file(H.files)); }
 static void Context_getCacheDir(tl_jcall *c) { c->ret = vl(new_file(H.cache)); }
+static void Context_getCodeCacheDir(tl_jcall *c) { char p[700]; snprintf(p, sizeof(p), "%s/code_cache", H.data); mkdirs(p); c->ret = vl(new_file(p)); }
+static void Context_getNoBackupFilesDir(tl_jcall *c) { char p[700]; snprintf(p, sizeof(p), "%s/no_backup", H.data); mkdirs(p); c->ret = vl(new_file(p)); }
 static void Context_getExternalFilesDir(tl_jcall *c) { c->ret = vl(new_file(H.ext_files)); }
 static void Context_getExternalCacheDir(tl_jcall *c) { c->ret = vl(new_file(H.ext_cache)); }
 static void Context_getDir(tl_jcall *c) { char p[700]; snprintf(p, sizeof(p), "%s/app_%s", H.data, S(c->args[0].l)); mkdirs(p); c->ret = vl(new_file(p)); }
@@ -129,7 +131,8 @@ static void Context_getAssets(tl_jcall *c) { c->ret = vl(H.assets); }
 static void Context_getApplicationInfo(tl_jcall *c) { c->ret = vl(H.appinfo); }
 static void Context_getPackageManager(tl_jcall *c) { c->ret = vl(H.pm); }
 static void Context_getApplicationContext(tl_jcall *c) { c->ret = vl(H.activity); }
-static void Context_getMainLooper(tl_jcall *c) { c->ret = vl(H.looper); }
+extern jobj *tl_loop_main_looper(void);
+static void Context_getMainLooper(tl_jcall *c) { c->ret = vl(tl_loop_main_looper()); }
 static void Context_getContentResolver(tl_jcall *c) { c->ret = vl(make("android/content/ContentResolver")); }
 static void Context_getClassLoader(tl_jcall *c) { c->ret = vl(make("dalvik/system/PathClassLoader")); }
 static void Context_getSharedPreferences(tl_jcall *c)
@@ -177,7 +180,6 @@ static void Activity_getWindowManager(tl_jcall *c) { c->ret = vl(H.wm); }
 static void Activity_getRequestedOrientation(tl_jcall *c) { c->ret = vi(-1); }
 static void Activity_getIntent(tl_jcall *c) { c->ret = vl(make("android/content/Intent")); }
 static void Activity_isFinishing(tl_jcall *c) { c->ret = vz(0); }
-static void Activity_runOnUiThread(tl_jcall *c) { (void)c; /* the Runnable would run on the UI thread */ }
 static void Activity_getComponentName(tl_jcall *c) { c->ret = vl(make("android/content/ComponentName")); }
 
 /* ---------------------------------------------------- Resources, metrics */
@@ -259,9 +261,47 @@ static void Env_getExternalStorageDirectory(tl_jcall *c) { c->ret = vl(new_file(
 static void Process_setThreadPriority(tl_jcall *c) { (void)c; }
 static void Process_myPid(tl_jcall *c) { c->ret = vi(getpid()); }
 static void Process_myTid(tl_jcall *c) { uint64_t t = 0; pthread_threadid_np(NULL, &t); c->ret = vi((int)t); }
-static void Looper_getMainLooper(tl_jcall *c) { c->ret = vl(H.looper); }
-static void Looper_myLooper(tl_jcall *c) { c->ret = vl(H.looper); }
-static void Handler_post(tl_jcall *c) { (void)c; c->ret = vz(1); }
+/* System.load / loadLibrary: what ART does for a library -- map it, and call its JNI_OnLoad once with the JavaVM. */
+static tl_lib *g_onload_done[96];
+static int g_nonload;
+static pthread_mutex_t g_onload_mu = PTHREAD_MUTEX_INITIALIZER;
+static bool load_native_library(const char *base)
+{
+    tl_lib *L = tl_ld_load(base);
+    if (!L) return false;
+    tl_ld_init(L);
+    pthread_mutex_lock(&g_onload_mu);
+    bool first = true;
+    for (int i = 0; i < g_nonload; i++) if (g_onload_done[i] == L) first = false;
+    if (first && g_nonload < 96) g_onload_done[g_nonload++] = L;
+    pthread_mutex_unlock(&g_onload_mu);
+    if (first) {
+        int32_t (*onload)(void *vm, void *reserved) = (int32_t (*)(void *, void *))tl_ld_sym(L, "JNI_OnLoad");
+        if (onload) {
+            int32_t ver = onload(tl_jni_vm(), NULL);
+            tl_log_line("jni: %s JNI_OnLoad -> %#x", base, ver);
+        }
+    }
+    return true;
+}
+static void System_load(tl_jcall *c)
+{
+    const char *path = S(c->args[0].l);
+    const char *base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    if (!load_native_library(base)) {
+        char msg[300]; snprintf(msg, sizeof(msg), "dlopen failed: library \"%s\" not found", path);
+        tl_jni_throw("java/lang/UnsatisfiedLinkError", msg);
+    }
+}
+static void System_loadLibrary(tl_jcall *c)
+{
+    char base[200]; snprintf(base, sizeof(base), "lib%s.so", S(c->args[0].l));
+    if (!load_native_library(base)) {
+        char msg[300]; snprintf(msg, sizeof(msg), "dlopen failed: library \"%s\" not found", base);
+        tl_jni_throw("java/lang/UnsatisfiedLinkError", msg);
+    }
+}
 static void System_getProperty(tl_jcall *c) { const char *k = S(c->args[0].l); const char *v = !strcmp(k, "os.arch") ? "aarch64" : !strcmp(k, "http.agent") ? "Dalvik/2.1.0 (Linux; U; Android 14; Pixel 8)" : NULL; c->ret = vl(v ? STR(v) : NULL); }
 static void System_currentTimeMillis(tl_jcall *c) { struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); jvalue v; v.j = (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000; c->ret = v; }
 static void System_nanoTime(tl_jcall *c) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); jvalue v; v.j = (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec; c->ret = v; }
@@ -276,7 +316,36 @@ static void JNIBridge_newInterfaceProxy(tl_jcall *c)
     tl_jni_set_field(p, "handle", "J", h);
     c->ret = vl(p);
 }
-static void Class_getName(tl_jcall *c) { c->ret = vl(STR(c->self && c->self->kind == TL_K_CLASS ? "java.lang.Object" : "")); }
+/* ReflectionHelper finds a member by name and signature with Java reflection; native code turns what it
+ * returns back into an ID. A class with no such member answers null, as the real helper does. */
+/* Unity builds signatures from Class.getName(), which uses dots where JNI uses slashes; the real helper matches either. */
+static const char *slashed(const char *sig, char *buf, size_t n)
+{
+    snprintf(buf, n, "%s", sig);
+    for (char *p = buf; *p; p++) if (*p == '.') *p = '/';
+    return buf;
+}
+static void Reflection_getConstructorID(tl_jcall *c)
+{
+    char b[400];
+    c->ret = vl(tl_jni_reflect_method(c->args[0].l, "<init>", slashed(S(c->args[1].l), b, sizeof(b)), false));
+}
+static void Reflection_getMethodID(tl_jcall *c)
+{
+    char b[400];
+    c->ret = vl(tl_jni_reflect_method(c->args[0].l, S(c->args[1].l), slashed(S(c->args[2].l), b, sizeof(b)), c->args[3].z != 0));
+}
+static void Reflection_getFieldID(tl_jcall *c)
+{
+    char b[400];
+    c->ret = vl(tl_jni_reflect_field(c->args[0].l, S(c->args[1].l), slashed(S(c->args[2].l), b, sizeof(b)), c->args[3].z != 0));
+}
+static void Reflection_getFieldSignature(tl_jcall *c)
+{
+    const char *sig = tl_jni_reflected_field_sig(c->args[0].l);
+    c->ret = vl(STR(sig ? sig : ""));
+}
+static void Member_getDeclaringClass(tl_jcall *c) { c->ret = vl(tl_jni_reflected_declaring_class(c->self)); }
 
 
 /* ------------------------------------------------- dialogs: say what they say */
@@ -300,8 +369,6 @@ static void Dialog_show(tl_jcall *c)
 static void Object_getClass(tl_jcall *c) { c->ret = vl(c->self && c->self->cls ? tl_jni_class_object(tl_jni_class_name(c->self)) : NULL); }
 static void Class_getClassLoader(tl_jcall *c) { c->ret = vl(make("dalvik/system/PathClassLoader")); }
 static void ClassLoader_findLibrary(tl_jcall *c) { char p[300]; snprintf(p, sizeof(p), "%s/lib%s.so", H.native_lib, S(c->args[0].l)); c->ret = vl(STR(p)); }
-static void Handler_postDelayed(tl_jcall *c) { (void)c; c->ret = vz(1); }
-static void Handler_init(tl_jcall *c) { (void)c; }
 static void SP_getInt(tl_jcall *c) { c->ret = vi(c->args[1].i); }
 static void SP_getString(tl_jcall *c) { c->ret = vl(c->args[1].l ? tl_jni_ref(c->args[1].l) : NULL); }
 static void SP_getBoolean(tl_jcall *c) { c->ret = vz(c->args[1].z); }
@@ -495,6 +562,8 @@ static const struct { const char *name, *super; } k_classes[] = {
     { "android/os/Environment", "java/lang/Object" }, { "android/os/Process", "java/lang/Object" },
     { "android/content/SharedPreferences", "java/lang/Object" }, { "android/content/Intent", "java/lang/Object" },
     { "bitter/jnibridge/JNIBridge", "java/lang/Object" },
+    { "com/unity3d/player/ReflectionHelper", "java/lang/Object" }, { "java/lang/reflect/Member", "java/lang/Object" },
+    { "java/lang/reflect/Method", "java/lang/Object" }, { "java/lang/reflect/Constructor", "java/lang/Object" }, { "java/lang/reflect/Field", "java/lang/Object" },
     { "java/lang/StringBuilder", "java/lang/Object" }, { "java/io/InputStream", "java/lang/Object" },
     { "java/io/ByteArrayInputStream", "java/io/InputStream" }, { "java/io/FileNotFoundException", "java/lang/Exception" },
     { "java/util/Scanner", "java/lang/Object" }, { "java/util/HashMap", "java/lang/Object" }, { "java/util/HashSet", "java/lang/Object" },
@@ -507,6 +576,8 @@ static const struct { const char *name, *super; } k_classes[] = {
 
 #define M(c, n, s, f) { c, n, s, f }
 static const tl_jhle k_hle[] = {
+    M("java/lang/System", "load", "(Ljava/lang/String;)V", System_load),
+    M("java/lang/System", "loadLibrary", "(Ljava/lang/String;)V", System_loadLibrary),
     M("java/lang/Object", "toString", "()Ljava/lang/String;", Object_toString),
     M("java/lang/Object", "hashCode", "()I", Object_hashCode),
     M("java/lang/Object", "equals", "(Ljava/lang/Object;)Z", Object_equals),
@@ -515,7 +586,6 @@ static const tl_jhle k_hle[] = {
     M("java/lang/String", "length", "()I", String_length),
     M("java/lang/String", "isEmpty", "()Z", String_isEmpty),
     M("java/lang/String", "hashCode", "()I", String_hashCode),
-    M("java/lang/Class", "getName", "()Ljava/lang/String;", Class_getName),
     M("java/lang/System", "getProperty", "(Ljava/lang/String;)Ljava/lang/String;", System_getProperty),
     M("java/lang/System", "currentTimeMillis", "()J", System_currentTimeMillis),
     M("java/lang/System", "nanoTime", "()J", System_nanoTime),
@@ -537,6 +607,8 @@ static const tl_jhle k_hle[] = {
     M("android/content/Context", "getPackageResourcePath", "()Ljava/lang/String;", Context_getPackageResourcePath),
     M("android/content/Context", "getFilesDir", "()Ljava/io/File;", Context_getFilesDir),
     M("android/content/Context", "getCacheDir", "()Ljava/io/File;", Context_getCacheDir),
+    M("android/content/Context", "getCodeCacheDir", "()Ljava/io/File;", Context_getCodeCacheDir),
+    M("android/content/Context", "getNoBackupFilesDir", "()Ljava/io/File;", Context_getNoBackupFilesDir),
     M("android/content/Context", "getExternalFilesDir", "(Ljava/lang/String;)Ljava/io/File;", Context_getExternalFilesDir),
     M("android/content/Context", "getExternalCacheDir", "()Ljava/io/File;", Context_getExternalCacheDir),
     M("android/content/Context", "getDir", "(Ljava/lang/String;I)Ljava/io/File;", Context_getDir),
@@ -557,7 +629,6 @@ static const tl_jhle k_hle[] = {
     M("android/app/Activity", "getRequestedOrientation", "()I", Activity_getRequestedOrientation),
     M("android/app/Activity", "getIntent", "()Landroid/content/Intent;", Activity_getIntent),
     M("android/app/Activity", "isFinishing", "()Z", Activity_isFinishing),
-    M("android/app/Activity", "runOnUiThread", "(Ljava/lang/Runnable;)V", Activity_runOnUiThread),
     M("android/content/res/Resources", "getAssets", "()Landroid/content/res/AssetManager;", Resources_getAssets),
     M("android/content/res/Resources", "getConfiguration", "()Landroid/content/res/Configuration;", Resources_getConfiguration),
     M("android/content/res/Resources", "getDisplayMetrics", "()Landroid/util/DisplayMetrics;", Resources_getDisplayMetrics),
@@ -577,9 +648,6 @@ static const tl_jhle k_hle[] = {
     M("android/os/Environment", "getExternalStorageDirectory", "()Ljava/io/File;", Env_getExternalStorageDirectory),
     M("android/os/Process", "setThreadPriority", "(II)V", Process_setThreadPriority),
     M("android/os/Process", "myPid", "()I", Process_myPid), M("android/os/Process", "myTid", "()I", Process_myTid),
-    M("android/os/Looper", "getMainLooper", "()Landroid/os/Looper;", Looper_getMainLooper),
-    M("android/os/Looper", "myLooper", "()Landroid/os/Looper;", Looper_myLooper),
-    M("android/os/Handler", "post", "(Ljava/lang/Runnable;)Z", Handler_post),
     M("java/lang/Object", "getClass", "()Ljava/lang/Class;", Object_getClass),
     M("java/lang/Class", "getClassLoader", "()Ljava/lang/ClassLoader;", Class_getClassLoader),
     M("java/lang/ClassLoader", "findLibrary", "(Ljava/lang/String;)Ljava/lang/String;", ClassLoader_findLibrary),
@@ -595,9 +663,6 @@ static const tl_jhle k_hle[] = {
     M("android/app/AlertDialog$Builder", "create", "()Landroid/app/AlertDialog;", Builder_create),
     M("android/app/Dialog", "show", "()V", Dialog_show),
     M("android/app/AlertDialog", "show", "()V", Dialog_show),
-    M("android/os/Handler", "<init>", "(Landroid/os/Looper;)V", Handler_init),
-    M("android/os/Handler", "<init>", "()V", Handler_init),
-    M("android/os/Handler", "postDelayed", "(Ljava/lang/Runnable;J)Z", Handler_postDelayed),
     M("android/content/SharedPreferences", "getInt", "(Ljava/lang/String;I)I", SP_getInt),
     M("android/content/SharedPreferences", "getString", "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;", SP_getString),
     M("android/content/SharedPreferences", "getBoolean", "(Ljava/lang/String;Z)Z", SP_getBoolean),
@@ -653,6 +718,13 @@ static const tl_jhle k_hle[] = {
     M("org/fmod/FMODAudioDevice", "stop", "()V", Noop), M("org/fmod/FMODAudioDevice", "isRunning", "()Z", FMOD_isRunning),
     M("com/unity3d/player/UnityPlayer", "initializeGoogleAr", "()Z", UnityPlayer_initializeGoogleAr),
     M("bitter/jnibridge/JNIBridge", "newInterfaceProxy", "(J[Ljava/lang/Class;)Ljava/lang/Object;", JNIBridge_newInterfaceProxy),
+    M("com/unity3d/player/ReflectionHelper", "getConstructorID", "(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/reflect/Constructor;", Reflection_getConstructorID),
+    M("com/unity3d/player/ReflectionHelper", "getMethodID", "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;Z)Ljava/lang/reflect/Method;", Reflection_getMethodID),
+    M("com/unity3d/player/ReflectionHelper", "getFieldID", "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;Z)Ljava/lang/reflect/Field;", Reflection_getFieldID),
+    M("com/unity3d/player/ReflectionHelper", "getFieldSignature", "(Ljava/lang/reflect/Field;)Ljava/lang/String;", Reflection_getFieldSignature),
+    M("java/lang/reflect/Field", "getDeclaringClass", "()Ljava/lang/Class;", Member_getDeclaringClass),
+    M("java/lang/reflect/Method", "getDeclaringClass", "()Ljava/lang/Class;", Member_getDeclaringClass),
+    M("java/lang/reflect/Constructor", "getDeclaringClass", "()Ljava/lang/Class;", Member_getDeclaringClass),
     { NULL, NULL, NULL, NULL }
 };
 
@@ -672,11 +744,13 @@ void tl_hle_configure(const char *pkg, const char *apk, const char *data, int w,
 
 jobj *tl_hle_activity(void) { return H.activity; }
 
+extern void tl_loop_install(void);
 void tl_jni_hle_install(void)
 {
     for (size_t i = 0; i < sizeof(k_classes) / sizeof(k_classes[0]); i++) tl_jni_declare(k_classes[i].name, k_classes[i].super);
     tl_jni_register_hle(k_hle);
     install_build();
+    tl_loop_install();
 
     H.activity = make("android/app/Activity");
     H.resources = make("android/content/res/Resources");
@@ -698,8 +772,6 @@ void tl_jni_hle_install(void)
     H.display = make("android/view/Display");
     H.wm = make("android/view/WindowManager");
     H.window = make("android/view/Window");
-    H.looper = make("android/os/Looper");
-    H.handler = make("android/os/Handler");
     tl_jni_set_static("com/unity3d/player/UnityPlayer", "currentActivity", "Landroid/app/Activity;", vl(H.activity));
     tl_jni_set_static("com/unity3d/player/UnityPlayer", "currentContext", "Landroid/content/Context;", vl(H.activity));
 }
