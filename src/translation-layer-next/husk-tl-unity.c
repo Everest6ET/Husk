@@ -30,6 +30,9 @@ static struct {
     atomic_ulong frames;
     atomic_bool stop;
     atomic_bool paused;
+    atomic_ullong perf_ns, perf_max_ns;     /* time inside nativeRender since the last snapshot, and the worst call */
+    atomic_ulong perf_frames;
+    struct timespec perf_since;
     pthread_t thread;
     bool thread_started;
 } U;
@@ -120,7 +123,17 @@ static void *unity_main(void *arg)
             continue;
         }
         if (was_paused) { NATIVE_VOID("nativeResume", "()V", 0, 0); NATIVE_VOID("nativeFocusChanged", "(Z)V", 1, 0); was_paused = false; tl_log_line("unity: resumed"); }
+        struct timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
         uint8_t keep = ((uint8_t (*)(void *, void *))render)(tl_jni_env(), U.player);
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        {
+            unsigned long long ns = (unsigned long long)((t1.tv_sec - t0.tv_sec) * 1000000000ll + (t1.tv_nsec - t0.tv_nsec));
+            atomic_fetch_add(&U.perf_ns, ns);
+            atomic_fetch_add(&U.perf_frames, 1);
+            unsigned long long m = atomic_load(&U.perf_max_ns);
+            while (ns > m && !atomic_compare_exchange_weak(&U.perf_max_ns, &m, ns)) {}
+        }
         atomic_fetch_add(&U.frames, 1);
         if (!keep) { tl_log_line("unity: nativeRender returned false: the engine asked to quit"); break; }
         usleep(2000);
@@ -205,6 +218,19 @@ void tl_unity_touch(int phase, int id, float x, float y)
     fn(tl_jni_env(), U.player, ev, 0);
     if (tl_jni_pending()) tl_jni_clear();
     tl_jni_unref(ev);
+}
+
+void tl_unity_perf_snapshot(tl_unity_perf *out)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    unsigned long long ns = atomic_exchange(&U.perf_ns, 0), mx = atomic_exchange(&U.perf_max_ns, 0);
+    unsigned long n = atomic_exchange(&U.perf_frames, 0);
+    double elapsed = U.perf_since.tv_sec ? (now.tv_sec - U.perf_since.tv_sec) + (now.tv_nsec - U.perf_since.tv_nsec) / 1e9 : 0;
+    U.perf_since = now;
+    out->fps = elapsed > 0.05 ? (double)n / elapsed : 0;
+    out->mean_ms = n ? (double)ns / n / 1e6 : 0;
+    out->max_ms = (double)mx / 1e6;
 }
 
 void tl_unity_set_paused(bool paused) { atomic_store(&U.paused, paused); }

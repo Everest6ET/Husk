@@ -43,6 +43,10 @@ unsigned long tl_unity_frames(void);
  */
 void tl_unity_touch(int phase, int id, float x, float y);
 
+/* How the last stretch went: frames per second, and the mean and worst time inside one nativeRender call. Resets what it measured. */
+typedef struct tl_unity_perf { double fps, mean_ms, max_ms; } tl_unity_perf;
+void tl_unity_perf_snapshot(tl_unity_perf *out);
+
 /* Pause the engine the way UnityPlayer.onPause does (and resume it). Safe from any thread. */
 void tl_unity_set_paused(bool paused);
 

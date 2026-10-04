@@ -201,6 +201,7 @@ bool husk_unity_launch(const char *apk, const char *data_dir, void *metal_layer,
 
 int husk_unity_state(void) { return atomic_load(&A.state); }
 unsigned long husk_unity_frames(void) { return tl_unity_frames(); }
+void husk_unity_perf_snapshot(husk_unity_perf *out) { tl_unity_perf p; tl_unity_perf_snapshot(&p); out->fps = p.fps; out->mean_ms = p.mean_ms; out->max_ms = p.max_ms; }
 void husk_unity_touch(int phase, int id, float x, float y) { if (atomic_load(&A.state) == HUSK_UNITY_RUNNING) tl_unity_touch(phase, id, x, y); }
 void husk_unity_set_paused(bool paused) { if (atomic_load(&A.state) == HUSK_UNITY_RUNNING) tl_unity_set_paused(paused); }
 

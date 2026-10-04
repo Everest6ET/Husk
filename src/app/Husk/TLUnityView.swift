@@ -17,6 +17,11 @@ final class TLUnityUIView: UIView {
     /// Active touches by UITouch identity, each given a small stable id like Android's pointer ids.
     private var pointers: [ObjectIdentifier: Int32] = [:]
 
+    /// "58 fps · 11.2 ms" in the corner, as the other screen has: frames the game finished per second, and the
+    /// mean time one frame takes it. Refreshed once a second from the runtime's own counters.
+    private let stats = UILabel()
+    private var statsTimer: Timer?
+
     init(apk: String, dataDir: String) {
         self.apk = apk
         self.dataDir = dataDir
@@ -32,12 +37,33 @@ final class TLUnityUIView: UIView {
             metal.contentsScale = 2
             metal.isOpaque = true
         }
+
+        stats.font = .monospacedSystemFont(ofSize: 10, weight: .medium)
+        stats.textColor = .white
+        stats.backgroundColor = UIColor.black.withAlphaComponent(0.55)
+        stats.layer.cornerRadius = 4
+        stats.layer.masksToBounds = true
+        stats.textAlignment = .center
+        stats.isUserInteractionEnabled = false
+        stats.text = " "
+        addSubview(stats)
+    }
+
+    deinit { statsTimer?.invalidate() }
+
+    private func updateStats() {
+        var p = husk_unity_perf()
+        husk_unity_perf_snapshot(&p)
+        stats.text = p.fps > 0
+            ? String(format: "%.0f fps · %.1f ms · max %.0f", p.fps, p.mean_ms, p.max_ms)
+            : "starting"
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        stats.frame = CGRect(x: bounds.width - 148, y: bounds.height - 22, width: 142, height: 16)
         guard bounds.width > 0, bounds.height > 0 else { return }
         let w = Int((bounds.width * contentScaleFactor).rounded())
         let h = Int((bounds.height * contentScaleFactor).rounded())
@@ -47,7 +73,14 @@ final class TLUnityUIView: UIView {
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
-        if window != nil { husk_unity_set_paused(false) } else { husk_unity_set_paused(true) }
+        statsTimer?.invalidate()
+        statsTimer = nil
+        if window != nil {
+            husk_unity_set_paused(false)
+            statsTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in self?.updateStats() }
+        } else {
+            husk_unity_set_paused(true)
+        }
         setNeedsLayout()
     }
 
@@ -100,7 +133,16 @@ final class TLUnityUIView: UIView {
 struct TLUnityScreen: UIViewRepresentable {
     let apk: String
     let dataDir: String
-    func makeUIView(context: Context) -> TLUnityUIView { TLUnityUIView(apk: apk, dataDir: dataDir) }
+    /// One view for the life of the process. The engine's GPU surface belongs to this view's layer and an engine
+    /// cannot be started twice, so coming back to the game must show the same layer, not a new one.
+    private static var shared: TLUnityUIView?
+
+    func makeUIView(context: Context) -> TLUnityUIView {
+        if let view = Self.shared { return view }
+        let view = TLUnityUIView(apk: apk, dataDir: dataDir)
+        Self.shared = view
+        return view
+    }
     func updateUIView(_ view: TLUnityUIView, context: Context) {}
 }
 
@@ -136,20 +178,39 @@ final class TLUnityModel: ObservableObject {
     var statusText: String {
         switch state {
         case Int32(HUSK_UNITY_STARTING): return "Loading the engine…"
-        case Int32(HUSK_UNITY_RUNNING):  return "Running · \(frames) frames"
+        case Int32(HUSK_UNITY_RUNNING):  return "Running"
         case Int32(HUSK_UNITY_FAILED):   return "Could not start — see the log"
         case Int32(HUSK_UNITY_ENDED):    return "The game exited"
         default:                         return "Starting"
         }
     }
+
+    var subStatusText: String {
+        switch state {
+        case Int32(HUSK_UNITY_RUNNING): return "\(frames) frame(s) drawn · native runtime"
+        case Int32(HUSK_UNITY_STARTING): return "Loading libraries and starting Unity"
+        default: return "Native runtime"
+        }
+    }
+
+    var statusColor: Color {
+        switch state {
+        case Int32(HUSK_UNITY_RUNNING):  return Theme.good
+        case Int32(HUSK_UNITY_FAILED):   return .red
+        case Int32(HUSK_UNITY_ENDED):    return .orange
+        default:                         return Theme.accent
+        }
+    }
 }
 
-/// The Unity game, full screen, with a thin bar for leaving it and reading the log.
+/// The Unity game the way the other runner shows a game: a status header, the screen taking whatever the log
+/// leaves, and a log underneath that opens and closes. Presented full screen, not as a sheet, so a swipe in the
+/// game is the game's.
 struct TLUnityAttemptView: View {
     let app: TLApp
     @Environment(\.dismiss) private var dismiss
     @StateObject private var model = TLUnityModel()
-    @State private var showLog = false
+    @AppStorage("husk.tl.unity.showLog") private var showLog = false
 
     private var dataDir: String {
         TranslationLayer.root.appendingPathComponent(app.id, isDirectory: true)
@@ -157,50 +218,90 @@ struct TLUnityAttemptView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 12) {
-                Button("Close") { dismiss() }
-                    .font(.system(size: 15, weight: .semibold))
-                Text(model.statusText)
-                    .font(.system(size: 12))
-                    .foregroundStyle(Theme.textDim)
-                    .lineLimit(1)
-                Spacer()
-                Button { showLog = true } label: { Image(systemName: "text.alignleft") }
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-            .background(Theme.surface)
-
-            if let apk = app.apks.first {
-                TLUnityScreen(apk: apk, dataDir: dataDir)
-                    .background(Color.black)
-            }
-        }
-        .background(Theme.bg.ignoresSafeArea())
-        .interactiveDismissDisabled()               // a swipe down is the game's, not the sheet's
-        .onAppear { model.start() }
-        .onDisappear { model.stop() }
-        .sheet(isPresented: $showLog) {
-            NavigationStack {
-                ScrollView {
-                    Text(model.logText.isEmpty ? "No log yet." : model.logText)
-                        .font(.technical(11))
-                        .foregroundStyle(Theme.text)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(12)
-                        .textSelection(.enabled)
+        NavigationStack {
+            VStack(spacing: 0) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(model.statusText)
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(model.statusColor)
+                        Text(model.subStatusText)
+                            .font(.system(size: 12))
+                            .foregroundStyle(Theme.textDim)
+                    }
+                    Spacer()
                 }
-                .background(Theme.bg)
-                .navigationTitle("Log")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) { Button("Done") { showLog = false } }
-                    ToolbarItem(placement: .primaryAction) {
-                        Button { UIPasteboard.general.string = model.logText } label: { Image(systemName: "doc.on.doc") }
+                .padding()
+                .background(Theme.surface)
+
+                Divider()
+
+                if let apk = app.apks.first {
+                    TLUnityScreen(apk: apk, dataDir: dataDir)
+                        .frame(maxWidth: .infinity, maxHeight: showLog ? 380 : .infinity)
+                        .background(Color.black)
+                    Divider()
+                }
+
+                HStack(spacing: 10) {
+                    Button {
+                        withAnimation(.snappy(duration: 0.25)) { showLog.toggle() }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: showLog ? "chevron.down" : "chevron.right")
+                                .font(.system(size: 11, weight: .bold))
+                                .frame(width: 12)
+                            Text("ATTEMPT LOG")
+                                .font(.technical(11, weight: .bold))
+                        }
+                        .foregroundStyle(Theme.textDim)
+                    }
+                    .buttonStyle(.plain)
+                    Spacer()
+                    if showLog {
+                        Button { UIPasteboard.general.string = model.logText } label: {
+                            Label("Copy", systemImage: "doc.on.doc").font(.system(size: 12))
+                        }
+                    } else {
+                        Text("tap to show")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.textDim.opacity(0.7))
                     }
                 }
+                .padding(.horizontal)
+                .padding(.vertical, 8)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    if !showLog { withAnimation(.snappy(duration: 0.25)) { showLog = true } }
+                }
+
+                if showLog {
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                            Text(model.logText.isEmpty ? "Starting…" : model.logText)
+                                .font(.technical(11))
+                                .foregroundStyle(Theme.text)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(12)
+                                .textSelection(.enabled)
+                                .id("bottom")
+                        }
+                        .background(Theme.bg)
+                        .onChange(of: model.logText) { _ in proxy.scrollTo("bottom", anchor: .bottom) }
+                    }
+                    .transition(.opacity)
+                }
+            }
+            .background(Theme.bg.ignoresSafeArea())
+            .navigationTitle(app.label)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } }
             }
         }
+        // Swipes near the edges are the game's: keep the system from taking them for itself.
+        .defersSystemGestures(on: .all)
+        .onAppear { model.start() }
+        .onDisappear { model.stop() }
     }
 }

@@ -594,7 +594,13 @@ struct TLAppReportView: View {
             }
             Button("Cancel", role: .cancel) { }
         }
-        .sheet(isPresented: $showAttempt) {
+        // A Unity game is swiped, and a sheet takes a swipe down for itself: it goes full screen.
+        .sheet(isPresented: Binding(get: { showAttempt && app.report?.runsOnNativeRuntime != true },
+                                    set: { showAttempt = $0 })) {
+            TLAttemptView(app: app)
+        }
+        .fullScreenCover(isPresented: Binding(get: { showAttempt && app.report?.runsOnNativeRuntime == true },
+                                              set: { showAttempt = $0 })) {
             TLAttemptView(app: app)
         }
     }
@@ -787,7 +793,7 @@ struct TLAttemptView: View {
     let app: TLApp
 
     var body: some View {
-        if app.report?.engine?.hasPrefix("Unity") == true {
+        if app.report?.runsOnNativeRuntime == true {
             TLUnityAttemptView(app: app)
         } else {
             TLClassicAttemptView(app: app)

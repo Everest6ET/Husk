@@ -28,6 +28,8 @@ bool husk_unity_launch(const char *apk, const char *data_dir, void *metal_layer,
 
 int  husk_unity_state(void);
 unsigned long husk_unity_frames(void);
+typedef struct husk_unity_perf { double fps, mean_ms, max_ms; } husk_unity_perf;
+void husk_unity_perf_snapshot(husk_unity_perf *out);          /* since the last call */
 void husk_unity_touch(int phase, int id, float x, float y);   /* phase 0 down, 1 move, 2 up, 3 cancel */
 void husk_unity_set_paused(bool paused);
 
