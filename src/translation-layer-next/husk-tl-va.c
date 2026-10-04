@@ -1,0 +1,274 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+#include "husk-tl-va.h"
+
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <wchar.h>
+
+/* ---------------------------------------------------------------- the stub */
+
+/*
+ * The common half of every TL_VA_STUB. Entered with x16 = the C implementation and
+ * every argument register as the guest left it. Builds, below the caller's frame:
+ *
+ *      [sp +   0] x0..x7        (64 bytes)
+ *      [sp +  64] q0..q7        (128 bytes)
+ *      [sp + 192] caller's sp   (8 bytes, 16 with padding)
+ *
+ * then x29/x30 above that, calls the implementation with x0 = sp, and returns its
+ * result untouched in x0 / d0.
+ */
+__asm__(
+    ".text\n.p2align 2\n.globl _tl_va_common\n_tl_va_common:\n"
+    "  stp x29, x30, [sp, #-16]!\n"
+    "  mov x29, sp\n"
+    "  sub sp, sp, #208\n"
+    "  stp x0, x1, [sp, #0]\n"
+    "  stp x2, x3, [sp, #16]\n"
+    "  stp x4, x5, [sp, #32]\n"
+    "  stp x6, x7, [sp, #48]\n"
+    "  stp q0, q1, [sp, #64]\n"
+    "  stp q2, q3, [sp, #96]\n"
+    "  stp q4, q5, [sp, #128]\n"
+    "  stp q6, q7, [sp, #160]\n"
+    "  add x9, x29, #16\n"
+    "  str x9, [sp, #192]\n"
+    "  mov x0, sp\n"
+    "  blr x16\n"
+    "  mov sp, x29\n"
+    "  ldp x29, x30, [sp], #16\n"
+    "  ret\n");
+
+/* ------------------------------------------------------------------ printf */
+
+typedef struct { char *p; size_t len, cap; } sbuf;
+
+static void sb_put(sbuf *b, const char *s, size_t n)
+{
+    if (b->len + n + 1 > b->cap) {
+        size_t nc = b->cap ? b->cap * 2 : 256;
+        while (nc < b->len + n + 1) nc *= 2;
+        b->p = realloc(b->p, nc);
+        b->cap = nc;
+    }
+    memcpy(b->p + b->len, s, n);
+    b->len += n;
+    b->p[b->len] = 0;
+}
+
+/* UTF-32 -> UTF-8. */
+static size_t utf8_encode(uint32_t c, char *o)
+{
+    if (c < 0x80) { o[0] = (char)c; return 1; }
+    if (c < 0x800) { o[0] = (char)(0xC0 | (c >> 6)); o[1] = (char)(0x80 | (c & 0x3F)); return 2; }
+    if (c < 0x10000) { o[0] = (char)(0xE0 | (c >> 12)); o[1] = (char)(0x80 | ((c >> 6) & 0x3F)); o[2] = (char)(0x80 | (c & 0x3F)); return 3; }
+    o[0] = (char)(0xF0 | (c >> 18)); o[1] = (char)(0x80 | ((c >> 12) & 0x3F));
+    o[2] = (char)(0x80 | ((c >> 6) & 0x3F)); o[3] = (char)(0x80 | (c & 0x3F));
+    return 4;
+}
+
+enum { LEN_NONE, LEN_HH, LEN_H, LEN_L, LEN_LL, LEN_J, LEN_Z, LEN_T, LEN_BIGL };
+
+/* Core formatter: `fmt` is a narrow format string, output is bytes. */
+static void format_into(sbuf *out, const char *fmt, tl_va_list *ap)
+{
+    for (const char *f = fmt; *f; f++) {
+        if (*f != '%') {
+            const char *e = strchr(f, '%');
+            size_t n = e ? (size_t)(e - f) : strlen(f);
+            sb_put(out, f, n);
+            f += n - 1;
+            continue;
+        }
+        f++;
+        char flags[8]; int nflags = 0;
+        while (*f && strchr("-+ #0'", *f) && nflags < 7) flags[nflags++] = *f++;
+        flags[nflags] = 0;
+        int width = -1, prec = -1;
+        if (*f == '*') {
+            width = (int)(int32_t)tl_va_arg_u64(ap); f++;
+            if (width < 0) { if (nflags < 7) { flags[nflags++] = '-'; flags[nflags] = 0; } width = -width; }
+        } else if (*f >= '0' && *f <= '9') { width = 0; while (*f >= '0' && *f <= '9') width = width * 10 + (*f++ - '0'); }
+        if (*f == '.') {
+            f++; prec = 0;
+            if (*f == '*') { prec = (int)(int32_t)tl_va_arg_u64(ap); f++; if (prec < 0) prec = -1; }
+            else while (*f >= '0' && *f <= '9') prec = prec * 10 + (*f++ - '0');
+        }
+        int len = LEN_NONE;
+        for (;;) {
+            if (*f == 'h') { len = (len == LEN_H) ? LEN_HH : LEN_H; f++; }
+            else if (*f == 'l') { len = (len == LEN_L) ? LEN_LL : LEN_L; f++; }
+            else if (*f == 'j') { len = LEN_J; f++; }
+            else if (*f == 'z') { len = LEN_Z; f++; }
+            else if (*f == 't') { len = LEN_T; f++; }
+            else if (*f == 'L') { len = LEN_BIGL; f++; }
+            else if (*f == 'q') { len = LEN_LL; f++; }
+            else break;
+        }
+        char conv = *f;
+        if (!conv) break;
+
+        char spec[48]; char tmp[512];
+        int sn = 0;
+        spec[sn++] = '%';
+        for (int i = 0; i < nflags; i++) spec[sn++] = flags[i];
+        if (width >= 0) sn += snprintf(spec + sn, sizeof(spec) - (size_t)sn, "%d", width);
+        if (prec >= 0) sn += snprintf(spec + sn, sizeof(spec) - (size_t)sn, ".%d", prec);
+
+        switch (conv) {
+        case 'd': case 'i': {
+            uint64_t raw = tl_va_arg_u64(ap);
+            long long v;
+            switch (len) {
+            case LEN_HH: v = (signed char)raw; break;
+            case LEN_H:  v = (short)raw; break;
+            case LEN_NONE: v = (int)(int32_t)raw; break;
+            default: v = (long long)raw; break;
+            }
+            strcpy(spec + sn, "lld");
+            int n = snprintf(tmp, sizeof(tmp), spec, v);
+            sb_put(out, tmp, (size_t)(n < (int)sizeof(tmp) ? n : (int)sizeof(tmp) - 1));
+            break;
+        }
+        case 'u': case 'x': case 'X': case 'o': {
+            uint64_t raw = tl_va_arg_u64(ap);
+            unsigned long long v;
+            switch (len) {
+            case LEN_HH: v = (unsigned char)raw; break;
+            case LEN_H:  v = (unsigned short)raw; break;
+            case LEN_NONE: v = (uint32_t)raw; break;
+            default: v = raw; break;
+            }
+            spec[sn++] = 'l'; spec[sn++] = 'l'; spec[sn++] = conv; spec[sn] = 0;
+            int n = snprintf(tmp, sizeof(tmp), spec, v);
+            sb_put(out, tmp, (size_t)(n < (int)sizeof(tmp) ? n : (int)sizeof(tmp) - 1));
+            break;
+        }
+        case 'c': {
+            uint64_t raw = tl_va_arg_u64(ap);
+            if (len == LEN_L) {
+                char u[4]; size_t k = utf8_encode((uint32_t)raw, u);
+                sb_put(out, u, k);
+            } else {
+                spec[sn++] = 'c'; spec[sn] = 0;
+                int n = snprintf(tmp, sizeof(tmp), spec, (int)(unsigned char)raw);
+                sb_put(out, tmp, (size_t)(n < (int)sizeof(tmp) ? n : (int)sizeof(tmp) - 1));
+            }
+            break;
+        }
+        case 's': {
+            const char *s = (const char *)(uintptr_t)tl_va_arg_u64(ap);
+            if (len == LEN_L) {
+                const wchar_t *w = (const wchar_t *)s;
+                sbuf t = {0};
+                if (!w) sb_put(&t, "(null)", 6);
+                else for (size_t i = 0; w[i] && (prec < 0 || t.len < (size_t)prec); i++) {
+                    char u[4]; size_t k = utf8_encode((uint32_t)w[i], u); sb_put(&t, u, k);
+                }
+                int pad = width > (int)t.len ? width - (int)t.len : 0;
+                bool left = strchr(flags, '-') != NULL;
+                if (!left) for (int i = 0; i < pad; i++) sb_put(out, " ", 1);
+                if (t.p) sb_put(out, t.p, t.len);
+                if (left) for (int i = 0; i < pad; i++) sb_put(out, " ", 1);
+                free(t.p);
+            } else {
+                if (!s) s = "(null)";
+                spec[sn++] = 's'; spec[sn] = 0;
+                size_t need = strlen(s) + (width > 0 ? (size_t)width : 0) + 8;
+                char *big = need > sizeof(tmp) ? malloc(need) : tmp;
+                int n = snprintf(big, need > sizeof(tmp) ? need : sizeof(tmp), spec, s);
+                sb_put(out, big, (size_t)n);
+                if (big != tmp) free(big);
+            }
+            break;
+        }
+        case 'p': {
+            uint64_t v = tl_va_arg_u64(ap);
+            int n = snprintf(tmp, sizeof(tmp), "0x%llx", (unsigned long long)v);
+            sb_put(out, tmp, (size_t)n);
+            break;
+        }
+        case 'f': case 'F': case 'e': case 'E': case 'g': case 'G': case 'a': case 'A': {
+            double d = tl_va_arg_f64(ap);
+            if (len == LEN_BIGL) { /* a guest long double (IEEE quad) is in a q register: take its double value */ }
+            spec[sn++] = conv; spec[sn] = 0;
+            int n = snprintf(tmp, sizeof(tmp), spec, d);
+            if (n >= (int)sizeof(tmp)) {
+                char *big = malloc((size_t)n + 1);
+                snprintf(big, (size_t)n + 1, spec, d);
+                sb_put(out, big, (size_t)n);
+                free(big);
+            } else sb_put(out, tmp, (size_t)n);
+            break;
+        }
+        case 'n': {
+            int *p = (int *)(uintptr_t)tl_va_arg_u64(ap);
+            if (p) *p = (int)out->len;
+            break;
+        }
+        case '%':
+            sb_put(out, "%", 1);
+            break;
+        default: {
+            char lit[2] = { '%', conv };
+            sb_put(out, lit, 2);
+            break;
+        }
+        }
+    }
+}
+
+int tl_format(char *out, size_t cap, const char *fmt, tl_va_list *ap)
+{
+    sbuf b = {0};
+    sb_put(&b, "", 0);
+    format_into(&b, fmt ? fmt : "(null)", ap);
+    if (out && cap) {
+        size_t n = b.len < cap - 1 ? b.len : cap - 1;
+        memcpy(out, b.p, n);
+        out[n] = 0;
+    }
+    int r = (int)b.len;
+    free(b.p);
+    return r;
+}
+
+int tl_format_wide(wchar_t *out, size_t cap, const wchar_t *fmt, tl_va_list *ap)
+{
+    /* Narrow the format (ASCII conversions), format, widen the result. */
+    size_t fl = fmt ? wcslen(fmt) : 0;
+    char *nf = malloc(fl * 4 + 1);
+    size_t k = 0;
+    for (size_t i = 0; i < fl; i++) k += utf8_encode((uint32_t)fmt[i], nf + k);
+    nf[k] = 0;
+    sbuf b = {0};
+    sb_put(&b, "", 0);
+    format_into(&b, nf, ap);
+    free(nf);
+    /* UTF-8 -> wchar_t */
+    size_t wn = 0;
+    for (size_t i = 0; i < b.len;) {
+        unsigned char c = (unsigned char)b.p[i];
+        uint32_t cp; size_t adv;
+        if (c < 0x80) { cp = c; adv = 1; }
+        else if ((c >> 5) == 6 && i + 1 < b.len) { cp = ((c & 0x1F) << 6) | (b.p[i+1] & 0x3F); adv = 2; }
+        else if ((c >> 4) == 14 && i + 2 < b.len) { cp = ((c & 0x0F) << 12) | ((b.p[i+1] & 0x3F) << 6) | (b.p[i+2] & 0x3F); adv = 3; }
+        else if ((c >> 3) == 30 && i + 3 < b.len) { cp = ((c & 7) << 18) | ((b.p[i+1] & 0x3F) << 12) | ((b.p[i+2] & 0x3F) << 6) | (b.p[i+3] & 0x3F); adv = 4; }
+        else { cp = c; adv = 1; }
+        if (out && cap && wn + 1 < cap) out[wn] = (wchar_t)cp;
+        wn++; i += adv;
+    }
+    if (out && cap) out[wn < cap - 1 ? wn : cap - 1] = 0;
+    free(b.p);
+    return (int)wn;
+}
+
+int tl_scan_string(const char *src, const char *fmt, tl_va_list *ap)
+{
+    void *a[16];
+    for (int i = 0; i < 16; i++) a[i] = (void *)(uintptr_t)tl_va_arg_u64(ap);
+    return sscanf(src, fmt, a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7],
+                  a[8], a[9], a[10], a[11], a[12], a[13], a[14], a[15]);
+}
