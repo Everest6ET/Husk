@@ -72,6 +72,13 @@ typedef int (*tl_ld_phdr_cb)(uintptr_t bias, const char *name, const void *phdr,
                              unsigned phnum, void *user);
 int tl_ld_iterate(tl_ld_phdr_cb cb, void *user);
 
+/*
+ * Diagnostic probe: before the instruction at `vaddr` runs, call cb(regs) with the integer registers
+ * x0..x28 as they stand (regs[i] is xi); then the instruction runs as usual. The instruction must not be
+ * pc-relative. For finding out what guest code is doing when no debugger can follow it.
+ */
+bool tl_ld_probe(tl_lib *lib, uint64_t vaddr, void (*cb)(uint64_t *regs));
+
 /* Imports that nothing provided, bound to a stub that logs on call. */
 size_t tl_ld_unresolved_count(void);
 

@@ -8,10 +8,12 @@
  */
 #include <pthread.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <sys/ucontext.h>
 #include <unistd.h>
 
@@ -20,10 +22,16 @@
 #include "husk-tl-unity.h"
 #include "husk-tl-xmem.h"
 
+static void dump_pushes(void);
+
 void tl_log_line(const char *fmt, ...)
 {
     static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
+    static struct timespec t0;
+    struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
     pthread_mutex_lock(&m);
+    if (!t0.tv_sec) t0 = t;
+    if (getenv("TL_LOG_TIME")) fprintf(stderr, "[%7.3f] ", (t.tv_sec - t0.tv_sec) + (t.tv_nsec - t0.tv_nsec) / 1e9);
     va_list ap; va_start(ap, fmt);
     vfprintf(stderr, fmt, ap); fputc('\n', stderr);
     va_end(ap);
@@ -114,6 +122,134 @@ static void on_crash(int sig, siginfo_t *info, void *uctx)
     _exit(139);
 }
 
+/* Watches Unity's bucket-1 free list for the inconsistency that wedges it, and says when it appears. */
+static uintptr_t g_unity_rw;
+static void *monitor(void *arg)
+{
+    (void)arg;
+    uint64_t *list = (uint64_t *)(g_unity_rw + 0x1265af0);
+    uint64_t last_head = 0, last_tail = 0, last_next = ~0ull;
+    for (;;) {
+        usleep(50);
+        uint64_t headw = list[8], head = headw & ~1ull, tail = list[16];
+        uint64_t next = head > 0x100000000ull ? *(uint64_t *)head : 0;
+        if (getenv("TL_MONITOR_VERBOSE") && (headw != last_head || tail != last_tail || next != last_next)) {
+            tl_log_line("MONITOR: head=%#llx(%llu) next=%#llx tail=%#llx", (unsigned long long)head, (unsigned long long)(headw & 1), (unsigned long long)next, (unsigned long long)tail);
+            last_head = headw; last_tail = tail; last_next = next;
+        }
+        if (head > 0x100000000ull && *(uint64_t *)head == 0 && tail && tail != head && !(headw & 1)) {
+            usleep(20000);                                   /* a transient: confirm it persists */
+            if (list[8] != headw || list[16] != tail || *(uint64_t *)head != 0) continue;
+            dump_pushes();
+            tl_log_line("MONITOR: queue inconsistent: head=%#llx next=0 tail=%#llx", (unsigned long long)head, (unsigned long long)tail);
+            tl_log_line("MONITOR: chunk %#llx first words: %#llx %#llx %#llx %#llx", (unsigned long long)(head & ~0x3fffull),
+                        (unsigned long long)((uint64_t *)(head & ~0x3fffull))[0], (unsigned long long)((uint64_t *)(head & ~0x3fffull))[1],
+                        (unsigned long long)((uint64_t *)(head & ~0x3fffull))[2], (unsigned long long)((uint64_t *)(head & ~0x3fffull))[3]);
+            return NULL;
+        }
+    }
+}
+
+static int find_unity(uintptr_t bias, const char *name, const void *phdr, unsigned phnum, void *user)
+{
+    (void)phdr; (void)phnum; (void)user;
+    if (!strcmp(name, "libunity.so")) g_unity_rw = (uintptr_t)((char *)bias + tl_xmem_delta());
+    return 0;
+}
+
+/* Probes on Unity's bucket free-list push/pop sites: record every operation on 32-byte blocks. */
+#define NEV 200000
+static struct { uint16_t site, tid; uint64_t node, prev; } g_ev[NEV];
+static _Atomic int g_nev;
+static const char *g_site_names[] = { "carve", "link1", "head1", "link2", "link3", "head3", "link4", "head4", "link5", "head5", "pop" };
+static pthread_t g_tids[32]; static char g_tnames[32][20]; static _Atomic int g_ntid;
+static int tid_index(void)
+{
+    pthread_t me = pthread_self();
+    int n = atomic_load(&g_ntid);
+    for (int i = 0; i < n && i < 32; i++) if (pthread_equal(g_tids[i], me)) return i;
+    int k = atomic_fetch_add(&g_ntid, 1);
+    if (k >= 32) return 31;
+    g_tids[k] = me; pthread_getname_np(me, g_tnames[k], sizeof(g_tnames[k]));
+    return k;
+}
+/* Shadow model of the 32-byte bucket queue: after every operation, check that each queued node's memory still says what the model says. */
+#define MODEL_N 8192
+static struct { uint64_t node, exp_next; uint8_t inq, reported; } g_model[MODEL_N];
+static uint64_t g_model_tail;
+static pthread_mutex_t g_model_mu = PTHREAD_MUTEX_INITIALIZER;
+static struct { uint64_t node, found, exp; int ev; } g_corrupt[64]; static int g_ncorrupt;
+static int model_slot(uint64_t node)
+{
+    unsigned h = (unsigned)((node >> 5) * 2654435761u) & (MODEL_N - 1);
+    while (g_model[h].node && g_model[h].node != node) h = (h + 1) & (MODEL_N - 1);
+    g_model[h].node = node;
+    return (int)h;
+}
+static void model_check(int evi)
+{
+    for (int h = 0; h < MODEL_N; h++) {
+        if (!g_model[h].node || !g_model[h].inq || g_model[h].reported) continue;
+        if (g_model[h].node == g_model_tail) continue;
+        uint64_t got = *(volatile uint64_t *)g_model[h].node;
+        if (got != g_model[h].exp_next) {
+            g_model[h].reported = 1;
+            if (g_ncorrupt < 64) { g_corrupt[g_ncorrupt].node = g_model[h].node; g_corrupt[g_ncorrupt].found = got; g_corrupt[g_ncorrupt].exp = g_model[h].exp_next; g_corrupt[g_ncorrupt].ev = evi; g_ncorrupt++; }
+        }
+    }
+}
+/* The probe fires before the instruction at the site runs, so the previous operation is complete by now: check, then apply this one. */
+static void model_apply(int site, uint64_t node, int evi)
+{
+    pthread_mutex_lock(&g_model_mu);
+    model_check(evi);
+    if (site == 10) { g_model[model_slot(node)].inq = 0; }
+    else {
+        int k = model_slot(node);
+        g_model[k].exp_next = 0; g_model[k].inq = 1; g_model[k].reported = 0;
+        if (g_model_tail) g_model[model_slot(g_model_tail)].exp_next = node;
+        g_model_tail = node;
+    }
+    pthread_mutex_unlock(&g_model_mu);
+}
+volatile uint64_t g_watch_addr;
+static void record(int site, uint64_t node, uint64_t prev)
+{
+    if (!node) return;
+    if (*(volatile int32_t *)(node & ~0x3fffull) != 32) return;
+    int i = atomic_fetch_add(&g_nev, 1);
+    { static int watch_ev = -2; if (watch_ev == -2) watch_ev = getenv("TL_WATCH_EV") ? atoi(getenv("TL_WATCH_EV")) : -1;
+      if (i == watch_ev) { g_watch_addr = node + 0x20; fprintf(stderr, "WATCH addr=%#llx (event %d, node %#llx)\n", (unsigned long long)g_watch_addr, i, (unsigned long long)node); raise(SIGSTOP); } }
+    model_apply(site, node, i);
+    if (i < NEV) { g_ev[i].site = (uint16_t)site; g_ev[i].tid = (uint16_t)tid_index(); g_ev[i].node = node; g_ev[i].prev = prev; }
+}
+#define PROBE(sitei, nodereg, tgtreg) static void probe_##sitei(uint64_t *r) { record(sitei, r[nodereg], r[tgtreg]); }
+PROBE(0, 8, 13)   PROBE(1, 19, 9)   PROBE(2, 19, 8)   PROBE(3, 1, 8)   PROBE(4, 19, 10)
+PROBE(5, 19, 8)   PROBE(6, 1, 9)    PROBE(7, 1, 8)    PROBE(8, 19, 10)  PROBE(9, 19, 8)
+static void probe_10(uint64_t *r) { record(10, r[0], 0); }
+
+static void dump_pushes(void)
+{
+    int n = atomic_load(&g_nev); if (n > NEV) n = NEV;
+    int nt = atomic_load(&g_ntid); if (nt > 32) nt = 32;
+    for (int i = 0; i < nt; i++) fprintf(stderr, "EVTHREAD %d %s\n", i, g_tnames[i]);
+    fprintf(stderr, "EVLOG: %d events\n", n);
+    for (int i = 0; i < g_ncorrupt; i++) fprintf(stderr, "CORRUPT node=%#llx expected-next=%#llx found=%#llx found-before-event %d\n", (unsigned long long)g_corrupt[i].node, (unsigned long long)g_corrupt[i].exp, (unsigned long long)g_corrupt[i].found, g_corrupt[i].ev);
+    for (int i = 0; i < n; i++)
+        fprintf(stderr, "EV %d %s t%d node=%#llx prev=%#llx\n", i, g_site_names[g_ev[i].site], g_ev[i].tid, (unsigned long long)g_ev[i].node, (unsigned long long)g_ev[i].prev);
+}
+
+static void install_probes(void)
+{
+    tl_lib *L = tl_ld_find_lib("libunity.so");
+    struct { uint64_t off; void (*cb)(uint64_t *); } ps[] = {
+        { 0x497464, probe_0 }, { 0x4971dc, probe_1 }, { 0x4971ec, probe_2 }, { 0x498324, probe_3 }, { 0x4988e8, probe_4 },
+        { 0x4988f8, probe_5 }, { 0x4989a4, probe_6 }, { 0x4989b4, probe_7 }, { 0x499c1c, probe_8 }, { 0x499c2c, probe_9 },
+        { 0x49e8d0, probe_10 },
+    };
+    for (size_t i = 0; i < sizeof(ps) / sizeof(ps[0]); i++) if (!tl_ld_probe(L, ps[i].off, ps[i].cb)) fprintf(stderr, "probe at %#llx failed\n", (unsigned long long)ps[i].off);
+}
+
 static int print_lib(uintptr_t bias, const char *name, const void *phdr, unsigned phnum, void *user)
 {
     (void)phdr; (void)phnum; (void)user;
@@ -145,9 +281,11 @@ int main(int argc, char **argv)
                             .angle_egl = getenv("TL_ANGLE_EGL") ? getenv("TL_ANGLE_EGL") : egl, .angle_gles = getenv("TL_ANGLE_GLES") ? getenv("TL_ANGLE_GLES") : gles,
                             .frame_dir = frames, .frame_every = 30 };
     if (!tl_unity_start(&cfg)) { fprintf(stderr, "unity: start failed\n"); return 1; }
+    if (getenv("TL_PROBES")) install_probes();
     if (getenv("TL_STOP_EARLY")) { tl_ld_iterate(print_lib, NULL); raise(SIGSTOP); }
     if (!tl_unity_run()) { fprintf(stderr, "unity: run failed\n"); return 1; }
     tl_ld_iterate(print_lib, NULL);
+    if (getenv("TL_MONITOR")) { tl_ld_iterate(find_unity, NULL); pthread_t mt; pthread_create(&mt, NULL, monitor, NULL); }
     int secs = argc > 2 ? atoi(argv[2]) : 5;
     if (getenv("TL_STOP_AT")) { sleep((unsigned)atoi(getenv("TL_STOP_AT"))); raise(SIGSTOP); }
     if (getenv("TL_POKE_AT")) { sleep((unsigned)atoi(getenv("TL_POKE_AT"))); tl_unity_poke(SIGUSR2); usleep(300000); secs -= atoi(getenv("TL_POKE_AT")); }

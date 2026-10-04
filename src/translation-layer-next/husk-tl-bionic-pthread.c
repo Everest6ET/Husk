@@ -176,6 +176,8 @@ static int b_rwlock_unlock(void *g)    { return rc(pthread_rwlock_unlock(obj_hos
 
 /* ---------------------------------------------------------------- semaphores */
 
+/* bionic's sem_t is 16 bytes on LP64 (a count and three reserved words): clearing more tramples the next field of whatever embeds it. */
+
 typedef struct { pthread_mutex_t m; pthread_cond_t c; int count; } host_sem;
 
 static void *make_sem(uint32_t value)
@@ -191,7 +193,7 @@ static int b_sem_init(void *g, int pshared, unsigned value)
 {
     (void)pshared;
     guest_obj *o = g;
-    memset(g, 0, 32);
+    memset(g, 0, 16);
     o->host = make_sem(value);
     atomic_store(&o->magic, MAGIC_READY);
     return 0;
@@ -203,7 +205,7 @@ static int b_sem_destroy(void *g)
         host_sem *s = o->host;
         pthread_cond_destroy(&s->c); pthread_mutex_destroy(&s->m); free(s);
     }
-    memset(g, 0, 32);
+    memset(g, 0, 16);
     return 0;
 }
 static host_sem *hs(void *g) { return obj_host(g, make_sem); }
@@ -290,8 +292,10 @@ static int b_setspecific(int key, const void *v) { return rc(pthread_setspecific
 
 /* ---------------------------------------------------------------- threads */
 
-/* bionic's pthread_attr_t is 64 bytes: flags, stack_base, stack_size, guard_size, sched... */
+/* bionic's pthread_attr_t is 56 bytes on LP64: flags, stack_base, stack_size, guard_size, sched... */
 typedef struct { uint32_t flags; uint32_t pad; void *stack_base; size_t stack_size; size_t guard_size; int32_t policy, priority; char reserved[16]; } guest_attr;
+_Static_assert(sizeof(guest_attr) == 56, "bionic pthread_attr_t is 56 bytes on LP64");
+_Static_assert(sizeof(guest_obj) <= 16, "guest_obj must fit bionic's smallest object, sem_t");
 #define GATTR_DETACHED 1u
 #define DEFAULT_STACK (1024u * 1024u)
 

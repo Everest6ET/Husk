@@ -476,6 +476,63 @@ __attribute__((naked, used)) void tl_svc_common(void)
 #endif
 }
 
+/* ------------------------------------------------------------------ probes */
+
+__attribute__((naked, used)) void tl_probe_common(void)
+{
+#if defined(__aarch64__)
+    __asm__ volatile(
+        "stp x29, x30, [sp, #-16]!\n"
+        "mov x29, sp\n"
+        "sub sp, sp, #624\n"
+        "stp x0, x1, [sp, #0]\n"   "stp x2, x3, [sp, #16]\n"   "stp x4, x5, [sp, #32]\n"   "stp x6, x7, [sp, #48]\n"
+        "stp x8, x9, [sp, #64]\n"  "stp x10, x11, [sp, #80]\n" "stp x12, x13, [sp, #96]\n" "stp x14, x15, [sp, #112]\n"
+        "stp x16, x17, [sp, #128]\n" "stp x18, x19, [sp, #144]\n" "stp x20, x21, [sp, #160]\n" "stp x22, x23, [sp, #176]\n"
+        "stp x24, x25, [sp, #192]\n" "stp x26, x27, [sp, #208]\n" "str x28, [sp, #224]\n"
+        "stp q0, q1, [sp, #240]\n"  "stp q2, q3, [sp, #272]\n"  "stp q4, q5, [sp, #304]\n"  "stp q6, q7, [sp, #336]\n"
+        "stp q16, q17, [sp, #368]\n" "stp q18, q19, [sp, #400]\n" "stp q20, q21, [sp, #432]\n" "stp q22, q23, [sp, #464]\n"
+        "stp q24, q25, [sp, #496]\n" "stp q26, q27, [sp, #528]\n" "stp q28, q29, [sp, #560]\n" "stp q30, q31, [sp, #592]\n"
+        "mov x0, sp\n"
+        "blr x17\n"
+        "ldp x0, x1, [sp, #0]\n"   "ldp x2, x3, [sp, #16]\n"   "ldp x4, x5, [sp, #32]\n"   "ldp x6, x7, [sp, #48]\n"
+        "ldp x8, x9, [sp, #64]\n"  "ldp x10, x11, [sp, #80]\n" "ldp x12, x13, [sp, #96]\n" "ldp x14, x15, [sp, #112]\n"
+        "ldp q0, q1, [sp, #240]\n"  "ldp q2, q3, [sp, #272]\n"  "ldp q4, q5, [sp, #304]\n"  "ldp q6, q7, [sp, #336]\n"
+        "ldp q16, q17, [sp, #368]\n" "ldp q18, q19, [sp, #400]\n" "ldp q20, q21, [sp, #432]\n" "ldp q22, q23, [sp, #464]\n"
+        "ldp q24, q25, [sp, #496]\n" "ldp q26, q27, [sp, #528]\n" "ldp q28, q29, [sp, #560]\n" "ldp q30, q31, [sp, #592]\n"
+        "mov sp, x29\n"
+        "ldp x29, x30, [sp], #16\n"
+        "ret\n");
+#endif
+}
+
+bool tl_ld_probe(tl_lib *L, uint64_t vaddr, void (*cb)(uint64_t *regs))
+{
+    uint64_t off = vaddr - L->base_vaddr;
+    if (off + 4 > L->npages * PAGE || L->stub_used + 64 > PAGE) return false;
+    uint32_t *site_rw = (uint32_t *)(L->rw + off);
+    const uint8_t *site_rx = L->rx + off;
+    uint8_t *rx = L->stub_rx + L->stub_used, *rw = L->stub_rw + L->stub_used;
+    L->stub_used += 64;
+    uint64_t common = (uint64_t)(uintptr_t)tl_probe_common, cbv = (uint64_t)(uintptr_t)cb;
+    memcpy(rw + 40, &cbv, 8);
+    memcpy(rw + 48, &common, 8);
+    uint32_t ldr_common = 0x58000010u | ((uint32_t)(((48 - 8) / 4) & 0x7FFFF) << 5);   /* ldr x16, [stub+48] */
+    uint32_t ldr_cb     = 0x58000011u | ((uint32_t)(((40 - 12) / 4) & 0x7FFFF) << 5);  /* ldr x17, [stub+40] */
+    int64_t back = ((int64_t)(site_rx + 4) - (int64_t)(rx + 32)) / 4;
+    uint32_t code[10] = {
+        0xA9BF7BFDu, 0xA9BF47F0u, ldr_common, ldr_cb, 0xD63F0200u /* blr x16 */,
+        0xA8C147F0u, 0xA8C17BFDu, *site_rw /* the original instruction */,
+        0x14000000u | ((uint32_t)back & 0x3FFFFFFu), 0xD503201Fu,
+    };
+    memcpy(rw, code, 40);
+    int64_t to = ((int64_t)rx - (int64_t)site_rx) / 4;
+    if (to <= -(1 << 25) || to >= (1 << 25)) return false;
+    *site_rw = 0x14000000u | ((uint32_t)to & 0x3FFFFFFu);
+    tl_xmem_flush(rx, 64);
+    tl_xmem_flush(site_rx, 4);
+    return true;
+}
+
 /* A 32-byte stub for the `svc` at site_rx; returns its executable address. */
 static uint8_t *svc_stub(tl_lib *L, const uint8_t *site_rx)
 {
