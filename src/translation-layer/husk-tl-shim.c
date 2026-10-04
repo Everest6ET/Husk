@@ -598,7 +598,132 @@ void *dlsym_shim(void *handle, const char *name)
     return tl_shim_find(name);
 }
 
-/* ---------------------------------------------- the symbol registry -- */
+extern int *__error(void);
+
+static unsigned long getauxval_shim(unsigned long type)
+{
+    if (type == 16) { /* AT_HWCAP */
+        return (1ul << 0) | (1ul << 1) | (1ul << 2) | (1ul << 3) |
+               (1ul << 4) | (1ul << 5) | (1ul << 7);
+    }
+    if (type == 6) { /* AT_PAGESZ */
+        return 16384;
+    }
+    return 0;
+}
+
+static int *__errno_shim(void)
+{
+    return __error();
+}
+
+static int __system_property_get_shim(const char *name, char *value)
+{
+    if (!name || !value) return 0;
+    if (!strcmp(name, "ro.build.version.sdk")) {
+        strcpy(value, "33");
+        return (int)strlen(value);
+    }
+    value[0] = '\0';
+    return 0;
+}
+
+static size_t __strlen_chk_shim(const char *s, size_t maxlen)
+{
+    size_t len = strlen(s);
+    if (len >= maxlen) abort();
+    return len;
+}
+
+static void *__memmove_chk_shim(void *dst, const void *src, size_t len, size_t dstlen)
+{
+    if (len > dstlen) abort();
+    return memmove(dst, src, len);
+}
+
+static int __vsnprintf_chk_shim(char *s, size_t maxlen, int flag, size_t slen, const char *format, va_list args)
+{
+    (void)flag; (void)slen;
+    return vsnprintf(s, maxlen, format, args);
+}
+
+static void android_set_abort_message_shim(const char *msg)
+{
+    tl_log_line("abort: %s", msg ? msg : "");
+}
+
+static void __cxa_finalize_shim(void *d) { (void)d; }
+static int __cxa_atexit_shim(void (*fn)(void *), void *arg, void *d) { (void)fn; (void)arg; (void)d; return 0; }
+static int dl_iterate_phdr_shim(void *cb, void *data) { (void)cb; (void)data; return 0; }
+
+static uint64_t g_sF_storage[24]; /* 3 fake FILE structs */
+static FILE *map_stream(void *s) {
+    if (s == &g_sF_storage[0]) return stdin;
+    if (s == &g_sF_storage[8]) return stdout;
+    if (s == &g_sF_storage[16]) return stderr;
+    return (FILE *)s;
+}
+
+static int fprintf_shim(void *stream, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int r = vfprintf(map_stream(stream), fmt, ap);
+    va_end(ap);
+    return r;
+}
+
+static int vfprintf_shim(void *stream, const char *fmt, va_list ap) {
+    return vfprintf(map_stream(stream), fmt, ap);
+}
+
+static int fputc_shim(int c, void *stream) {
+    return fputc(c, map_stream(stream));
+}
+
+static int fflush_shim(void *stream) {
+    return fflush(stream ? map_stream(stream) : NULL);
+}
+
+static size_t fwrite_shim(const void *ptr, size_t size, size_t nmemb, void *stream) {
+    return fwrite(ptr, size, nmemb, map_stream(stream));
+}
+
+/* Surface and HardwareBuffer stubs */
+static void *ANativeWindow_fromSurface_shim(void *env, void *surface) { (void)env; (void)surface; return NULL; }
+static void *ASurfaceControl_create_shim(void) { return NULL; }
+static void *ASurfaceControl_createFromWindow_shim(void *p, const char *n) { (void)p; (void)n; return NULL; }
+static void ASurfaceControl_release_shim(void *sc) { (void)sc; }
+static void *ASurfaceTransaction_create_shim(void) { return NULL; }
+static void ASurfaceTransaction_delete_shim(void *t) { (void)t; }
+static void ASurfaceTransaction_apply_shim(void *t) { (void)t; }
+static void ASurfaceTransaction_reparent_shim(void *t, void *sc, void *p) { (void)t; (void)sc; (void)p; }
+static void ASurfaceTransaction_setOnComplete_shim(void *t, void *c, void *l) { (void)t; (void)c; (void)l; }
+static void ASurfaceTransaction_setOnCommit_shim(void *t, void *c, void *l) { (void)t; (void)c; (void)l; }
+static void ASurfaceTransaction_setBuffer_shim(void *t, void *sc, void *b, int f) { (void)t; (void)sc; (void)b; (void)f; }
+static void ASurfaceTransaction_setVisibility_shim(void *t, void *sc, int8_t v) { (void)t; (void)sc; (void)v; }
+static void ASurfaceTransaction_setZOrder_shim(void *t, void *sc, int32_t z) { (void)t; (void)sc; (void)z; }
+static void ASurfaceTransaction_setDamageRegion_shim(void *t, void *sc, const void *r, size_t n) { (void)t; (void)sc; (void)r; (void)n; }
+static void ASurfaceTransaction_setDesiredPresentTime_shim(void *t, int64_t pt) { (void)t; (void)pt; }
+static void ASurfaceTransaction_setBufferTransparency_shim(void *t, void *sc, int8_t tr) { (void)t; (void)sc; (void)tr; }
+static void ASurfaceTransaction_setBufferAlpha_shim(void *t, void *sc, float a) { (void)t; (void)sc; (void)a; }
+static void ASurfaceTransaction_setCrop_shim(void *t, void *sc, const void *c) { (void)t; (void)sc; (void)c; }
+static void ASurfaceTransaction_setPosition_shim(void *t, void *sc, float x, float y) { (void)t; (void)sc; (void)x; (void)y; }
+static void ASurfaceTransaction_setScale_shim(void *t, void *sc, float sx, float sy) { (void)t; (void)sc; (void)sx; (void)sy; }
+static void ASurfaceTransaction_setBufferTransform_shim(void *t, void *sc, int32_t tr) { (void)t; (void)sc; (void)tr; }
+static void ASurfaceTransaction_setBufferDataSpace_shim(void *t, void *sc, int32_t ds) { (void)t; (void)sc; (void)ds; }
+static void ASurfaceTransaction_setGeometry_shim(void *t, void *sc, const void *s, const void *d, int32_t tr) { (void)t; (void)sc; (void)s; (void)d; (void)tr; }
+static void ASurfaceTransactionStats_getASurfaceControls_shim(void *st, void ***sc, size_t *cnt) { (void)st; if (sc) *sc = NULL; if (cnt) *cnt = 0; }
+static int ASurfaceTransactionStats_getPreviousReleaseFenceFd_shim(void *st, void *sc) { (void)st; (void)sc; return -1; }
+static void ASurfaceTransactionStats_releaseASurfaceControls_shim(void *st) { (void)st; }
+static void ASurfaceTransaction_setFrameRateWithChangeStrategy_shim(void *t, void *sc, float f, int8_t c, int8_t s) { (void)t; (void)sc; (void)f; (void)c; (void)s; }
+static void ASurfaceTransaction_setFrameRate_shim(void *t, void *sc, float f, int8_t c) { (void)t; (void)sc; (void)f; (void)c; }
+static void *AHardwareBuffer_fromHardwareBuffer_shim(void *env, void *hb) { (void)env; (void)hb; return NULL; }
+static void AHardwareBuffer_describe_shim(const void *b, void *d) { (void)b; (void)d; }
+static int AHardwareBuffer_lock_shim(void *b, uint64_t u, int f, const void *r, void **out) { (void)b; (void)u; (void)f; (void)r; if (out) *out = NULL; return -1; }
+static void AHardwareBuffer_release_shim(void *b) { (void)b; }
+static int AHardwareBuffer_unlock_shim(void *b, int *f) { (void)b; (void)f; return 0; }
+static void *AHardwareBuffer_toHardwareBuffer_shim(void *env, const void *b) { (void)env; (void)b; return NULL; }
+static int AHardwareBuffer_allocate_shim(const void *d, void **out) { (void)d; if (out) *out = NULL; return -1; }
 
 void *tl_shim_find(const char *name);
 
@@ -718,6 +843,59 @@ static const tl_export_entry g_exports[] = {
     { "sysconf",                    sysconf_shim },
     { "dlopen",                     dlopen_shim },
     { "dlsym",                      dlsym_shim },
+
+    { "getauxval",                  getauxval_shim },
+    { "__errno",                    __errno_shim },
+    { "__system_property_get",      __system_property_get_shim },
+    { "__strlen_chk",               __strlen_chk_shim },
+    { "__memmove_chk",              __memmove_chk_shim },
+    { "__vsnprintf_chk",            __vsnprintf_chk_shim },
+    { "android_set_abort_message",  android_set_abort_message_shim },
+    { "__cxa_finalize",             __cxa_finalize_shim },
+    { "__cxa_atexit",               __cxa_atexit_shim },
+    { "dl_iterate_phdr",            dl_iterate_phdr_shim },
+    { "__sF",                       g_sF_storage },
+    { "fprintf",                    fprintf_shim },
+    { "vfprintf",                   vfprintf_shim },
+    { "fputc",                      fputc_shim },
+    { "fflush",                     fflush_shim },
+    { "fwrite",                     fwrite_shim },
+
+    { "ANativeWindow_fromSurface",  ANativeWindow_fromSurface_shim },
+    { "ASurfaceControl_create",     ASurfaceControl_create_shim },
+    { "ASurfaceControl_createFromWindow", ASurfaceControl_createFromWindow_shim },
+    { "ASurfaceControl_release",    ASurfaceControl_release_shim },
+    { "ASurfaceTransaction_create", ASurfaceTransaction_create_shim },
+    { "ASurfaceTransaction_delete", ASurfaceTransaction_delete_shim },
+    { "ASurfaceTransaction_apply",  ASurfaceTransaction_apply_shim },
+    { "ASurfaceTransaction_reparent", ASurfaceTransaction_reparent_shim },
+    { "ASurfaceTransaction_setOnComplete", ASurfaceTransaction_setOnComplete_shim },
+    { "ASurfaceTransaction_setOnCommit", ASurfaceTransaction_setOnCommit_shim },
+    { "ASurfaceTransaction_setBuffer", ASurfaceTransaction_setBuffer_shim },
+    { "ASurfaceTransaction_setVisibility", ASurfaceTransaction_setVisibility_shim },
+    { "ASurfaceTransaction_setZOrder", ASurfaceTransaction_setZOrder_shim },
+    { "ASurfaceTransaction_setDamageRegion", ASurfaceTransaction_setDamageRegion_shim },
+    { "ASurfaceTransaction_setDesiredPresentTime", ASurfaceTransaction_setDesiredPresentTime_shim },
+    { "ASurfaceTransaction_setBufferTransparency", ASurfaceTransaction_setBufferTransparency_shim },
+    { "ASurfaceTransaction_setBufferAlpha", ASurfaceTransaction_setBufferAlpha_shim },
+    { "ASurfaceTransaction_setCrop", ASurfaceTransaction_setCrop_shim },
+    { "ASurfaceTransaction_setPosition", ASurfaceTransaction_setPosition_shim },
+    { "ASurfaceTransaction_setScale", ASurfaceTransaction_setScale_shim },
+    { "ASurfaceTransaction_setBufferTransform", ASurfaceTransaction_setBufferTransform_shim },
+    { "ASurfaceTransaction_setBufferDataSpace", ASurfaceTransaction_setBufferDataSpace_shim },
+    { "ASurfaceTransaction_setGeometry", ASurfaceTransaction_setGeometry_shim },
+    { "ASurfaceTransactionStats_getASurfaceControls", ASurfaceTransactionStats_getASurfaceControls_shim },
+    { "ASurfaceTransactionStats_getPreviousReleaseFenceFd", ASurfaceTransactionStats_getPreviousReleaseFenceFd_shim },
+    { "ASurfaceTransactionStats_releaseASurfaceControls", ASurfaceTransactionStats_releaseASurfaceControls_shim },
+    { "ASurfaceTransaction_setFrameRateWithChangeStrategy", ASurfaceTransaction_setFrameRateWithChangeStrategy_shim },
+    { "ASurfaceTransaction_setFrameRate", ASurfaceTransaction_setFrameRate_shim },
+    { "AHardwareBuffer_fromHardwareBuffer", AHardwareBuffer_fromHardwareBuffer_shim },
+    { "AHardwareBuffer_describe",   AHardwareBuffer_describe_shim },
+    { "AHardwareBuffer_lock",       AHardwareBuffer_lock_shim },
+    { "AHardwareBuffer_release",    AHardwareBuffer_release_shim },
+    { "AHardwareBuffer_unlock",     AHardwareBuffer_unlock_shim },
+    { "AHardwareBuffer_toHardwareBuffer", AHardwareBuffer_toHardwareBuffer_shim },
+    { "AHardwareBuffer_allocate",   AHardwareBuffer_allocate_shim },
 };
 
 static int __android_log_vprint_shim(int prio, const char *tag, const char *fmt, va_list ap)
@@ -740,6 +918,10 @@ void *tl_shim_find(const char *name)
     }
     if (!strcmp(name, "__android_log_vprint")) {
         return (void *)__android_log_vprint_shim;
+    }
+    void *host = dlsym(RTLD_DEFAULT, name);
+    if (host) {
+        return host;
     }
     return NULL;
 }

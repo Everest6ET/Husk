@@ -319,6 +319,8 @@ void tl_log_line(const char *fmt, ...)
         w = (int)sizeof(line) - 1;
     }
     line[w] = '\n';
+    line[w + 1] = '\0';
+    fputs(line, stderr);
     pthread_mutex_lock(&g_log_mutex);
     tl_log_put(&g_run.log, line, (size_t)w + 1);
     pthread_mutex_unlock(&g_log_mutex);
@@ -638,7 +640,7 @@ static void *resolve(const char *name, bool *weak)
     if (shim) {
         return shim;
     }
-    *weak = true;                /* caller decides whether a miss is fatal */
+    (void)weak;
     return NULL;
 }
 
@@ -949,6 +951,45 @@ static bool extract_lib(const char *apk, const char *libname,
     return true;
 }
 
+#if defined(__aarch64__)
+static uint64_t g_bionic_tcb[512] __attribute__((aligned(4096)));
+
+static uint32_t encode_adrp(uint32_t rt, const void *pc, const void *target)
+{
+    int64_t delta = (int64_t)(((uintptr_t)target & ~(uintptr_t)0xFFF)
+                            - ((uintptr_t)pc & ~(uintptr_t)0xFFF)) >> 12;
+    uint32_t imm = (uint32_t)delta & 0x1FFFFF;
+    return 0x90000000u | ((imm & 3u) << 29) | ((imm >> 2) << 5) | (rt & 0x1Fu);
+}
+
+static void patch_tpidr_reads(uint8_t *code_rw, const uint8_t *code_rx, size_t len)
+{
+    g_bionic_tcb[0] = (uint64_t)(uintptr_t)g_bionic_tcb;
+    g_bionic_tcb[1] = 1000;
+    g_bionic_tcb[2] = 1000;
+    g_bionic_tcb[5] = 0xdeadbeefcafebabeull; /* offset 0x28: stack canary guard */
+
+    size_t count = 0;
+    for (size_t off = 0; off + 4 <= len; off += 4) {
+        uint32_t insn = *(uint32_t *)(code_rw + off);
+        if ((insn & 0xFFFFFFE0u) == 0xD53BD040u) {
+            uint32_t rt = insn & 0x1Fu;
+            uint32_t new_insn = encode_adrp(rt, code_rx + off, g_bionic_tcb);
+            *(uint32_t *)(code_rw + off) = new_insn;
+            count++;
+        }
+    }
+    if (count > 0) {
+        tl_log_line("patch: rewritten %zu 'mrs Xt, tpidr_el0' -> adrp stack guard", count);
+    }
+}
+#else
+static void patch_tpidr_reads(uint8_t *code_rw, const uint8_t *code_rx, size_t len)
+{
+    (void)code_rw; (void)code_rx; (void)len;
+}
+#endif
+
 /* ---------------------------------------------------------- loading  */
 
 static bool load_library(const char *name, const uint8_t *file, size_t flen)
@@ -1073,6 +1114,7 @@ static bool load_library(const char *name, const uint8_t *file, size_t flen)
             return false;
         }
         base_rw = base;
+        jit_writable(true);
     }
 
     size_t carved = 0;
@@ -1131,6 +1173,7 @@ static bool load_library(const char *name, const uint8_t *file, size_t flen)
     /* Copy the segments in. Executable and dual-mapped segments copy through base_rw;
      * carved writable segments copy through base. */
     bool ok = true;
+    jit_writable(true);
     for (int i = 0; i < nloads && ok; i++) {
         const uint8_t *ph = (const uint8_t *)loads[i];
         uint64_t v = ld64(ph + 16), fo = ld64(ph + 8);
@@ -1154,6 +1197,7 @@ static bool load_library(const char *name, const uint8_t *file, size_t flen)
         unmap_lib(&(tl_lib){ .base = base, .npages = npages, .page_flags = flags, .is_stikdebug = is_stikdebug });
         return false;
     }
+    patch_tpidr_reads(base_rw, base, npages * TL_PAGE);
     jit_icache(base, npages * TL_PAGE);
 
     ldyn d;
@@ -1178,9 +1222,7 @@ static bool load_library(const char *name, const uint8_t *file, size_t flen)
         unmap_lib(&(tl_lib){ .base = base, .npages = npages, .page_flags = flags, .is_stikdebug = is_stikdebug });
         return false;
     }
-    if (!lex_seg(&e, d.symtab, 24 * 1024 * 1024, &sym_off)) {
-        /* A symtab is bounded by the strtab that follows it in practice;
-         * 24 MiB is past any real table and lex_seg clamps to the file. */
+    if (!lex_seg(&e, d.symtab, sizeof(tl_sym), &sym_off)) {
         sym_off = 0;
     }
 
@@ -1476,6 +1518,18 @@ int husk_tl_attempt_start(const char *const *apks, int count, int seconds)
                 tl_log_line("attempt: helper %s did not load (continuing)",
                             names[i]);
             }
+        }
+    }
+
+    /* Run JNI_OnLoad for any loaded library that exports it. */
+    for (int i = 0; i < g_run.nlibs; i++) {
+        int (*on_load)(void *, void *) = (int (*)(void *, void *))lib_lookup(&g_run.libs[i], "JNI_OnLoad");
+        if (on_load) {
+            tl_log_line("jni: %s exports JNI_OnLoad at %p -- calling it", g_run.libs[i].name, on_load);
+            jit_writable(false);
+            int version = on_load(tl_shim_vm(), NULL);
+            jit_writable(true);
+            tl_log_line("jni: %s JNI_OnLoad returned 0x%x", g_run.libs[i].name, version);
         }
     }
 
