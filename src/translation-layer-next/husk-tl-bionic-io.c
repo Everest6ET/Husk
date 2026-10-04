@@ -33,7 +33,6 @@
 #include <sys/time.h>
 #include <sys/uio.h>
 #include <mach/mach.h>
-#include <mach/mach_vm.h>
 #include <time.h>
 #include <unistd.h>
 #include <utime.h>
@@ -394,9 +393,9 @@ static void anon_zap(uintptr_t addr, size_t len)
         uintptr_t e = g_anon[i].addr + g_anon[i].len < end ? g_anon[i].addr + g_anon[i].len : end;
         if (a >= e) continue;
         for (uintptr_t p = a & ~(uintptr_t)16383; p < e;) {           /* walk the regions in the range */
-            mach_vm_address_t ra = p; mach_vm_size_t rs = 0;
+            vm_address_t ra = p; vm_size_t rs = 0;
             vm_region_basic_info_data_64_t info; mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj;
-            if (mach_vm_region(mach_task_self(), &ra, &rs, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &cnt, &obj) != KERN_SUCCESS) break;
+            if (vm_region_64(mach_task_self(), &ra, &rs, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &cnt, &obj) != KERN_SUCCESS) break;
             if (ra > p) { p = ra; continue; }
             uintptr_t re = ra + rs < e ? ra + rs : e;
             int prot = (info.protection & VM_PROT_READ ? PROT_READ : 0) | (info.protection & VM_PROT_WRITE ? PROT_WRITE : 0);

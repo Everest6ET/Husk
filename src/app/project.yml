@@ -36,6 +36,11 @@ targets:
       # The experimental translation layer's C side. Compiled into the app,
       # not into the QEMU library -- see docs/04-translation-layer.md.
       - path: ../translation-layer
+      # The native runtime: a real linker for Android's libraries, a bionic shim, JNI with a
+      # Java world written in C, and the Unity driver. Runs Unity games such as Subway Surfers.
+      - path: ../translation-layer-next
+        excludes:
+          - "husk-tl-unity-app.h"
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.husk.app

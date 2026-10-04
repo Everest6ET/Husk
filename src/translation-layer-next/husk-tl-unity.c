@@ -29,6 +29,7 @@ static struct {
     jobj *player;            /* the UnityPlayer object natives are called on */
     atomic_ulong frames;
     atomic_bool stop;
+    atomic_bool paused;
     pthread_t thread;
     bool thread_started;
 } U;
@@ -111,7 +112,14 @@ static void *unity_main(void *arg)
     NATIVE_VOID("nativeFocusChanged", "(Z)V", 1, 0);
 
     void *render = native_of("com/unity3d/player/UnityPlayer", "nativeRender", "()Z");
+    bool was_paused = false;
     while (render && !atomic_load(&U.stop)) {
+        if (atomic_load(&U.paused)) {
+            if (!was_paused) { NATIVE_VOID("nativeFocusChanged", "(Z)V", 0, 0); NATIVE_VOID("nativePause", "()Z", 0, 0); was_paused = true; tl_log_line("unity: paused"); }
+            usleep(20000);
+            continue;
+        }
+        if (was_paused) { NATIVE_VOID("nativeResume", "()V", 0, 0); NATIVE_VOID("nativeFocusChanged", "(Z)V", 1, 0); was_paused = false; tl_log_line("unity: resumed"); }
         uint8_t keep = ((uint8_t (*)(void *, void *))render)(tl_jni_env(), U.player);
         atomic_fetch_add(&U.frames, 1);
         if (!keep) { tl_log_line("unity: nativeRender returned false: the engine asked to quit"); break; }
@@ -198,6 +206,8 @@ void tl_unity_touch(int phase, int id, float x, float y)
     if (tl_jni_pending()) tl_jni_clear();
     tl_jni_unref(ev);
 }
+
+void tl_unity_set_paused(bool paused) { atomic_store(&U.paused, paused); }
 
 unsigned long tl_unity_frames(void) { return atomic_load(&U.frames); }
 void tl_unity_poke(int signo) { if (U.thread_started) pthread_kill(U.thread, signo); }

@@ -43,6 +43,9 @@ unsigned long tl_unity_frames(void);
  */
 void tl_unity_touch(int phase, int id, float x, float y);
 
+/* Pause the engine the way UnityPlayer.onPause does (and resume it). Safe from any thread. */
+void tl_unity_set_paused(bool paused);
+
 /* Send a signal to the UnityMain thread (diagnostics: a backtrace handler in the host). */
 void tl_unity_poke(int signo);
 

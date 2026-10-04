@@ -758,7 +758,21 @@ final class TLAttemptRunner: ObservableObject {
     }
 }
 
+/// Unity games run through the native runtime (src/translation-layer-next); everything else through the
+/// older prototype loader.
 struct TLAttemptView: View {
+    let app: TLApp
+
+    var body: some View {
+        if app.report?.engine?.hasPrefix("Unity") == true {
+            TLUnityAttemptView(app: app)
+        } else {
+            TLClassicAttemptView(app: app)
+        }
+    }
+}
+
+struct TLClassicAttemptView: View {
     let app: TLApp
     @StateObject private var runner = TLAttemptRunner()
     @Environment(\.dismiss) private var dismiss

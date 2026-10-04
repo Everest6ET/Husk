@@ -11,7 +11,9 @@
 #include <TargetConditionals.h>
 #include <libkern/OSCacheControl.h>
 #include <mach/mach.h>
+#if TARGET_OS_OSX
 #include <mach/mach_vm.h>
+#endif
 #endif
 
 #include "husk-tl-internal.h"

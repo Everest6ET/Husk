@@ -263,11 +263,15 @@ static void bionic_abort(void)
     abort();
 }
 
+/* When set, a guest exit() ends the guest, not the app that is hosting it. The hook does not return. */
+void (*tl_guest_exit_hook)(int status);
+
 static void bionic_exit(int status)
 {
     char where[200];
     describe_caller(__builtin_return_address(0), where, sizeof(where));
     tl_log_line("bionic: exit(%d) called from %s", status, where);
+    if (tl_guest_exit_hook) tl_guest_exit_hook(status);
     exit(status);
 }
 

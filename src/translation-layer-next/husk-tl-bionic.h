@@ -47,6 +47,8 @@ extern const tl_bionic_entry tl_tab_ndk[];
 extern const tl_bionic_entry tl_tab_egl[];
 void *tl_egl_resolve(const char *name);   /* husk-tl-egl.c: GLES by name, through ANGLE */
 
+extern void (*tl_guest_exit_hook)(int status);   /* set by an app host: exit() from guest code calls it instead of exiting */
+
 void *tl_bionic_find(const char *name);
 bool  tl_bionic_is_system_lib(const char *soname);
 

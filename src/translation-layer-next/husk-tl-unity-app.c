@@ -1,0 +1,223 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+#define _DARWIN_C_SOURCE
+#include "husk-tl-unity-app.h"
+
+#include <pthread.h>
+#include <signal.h>
+#include <stdatomic.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/ucontext.h>
+#include <unistd.h>
+
+#include "husk-tl-bionic.h"
+#include "husk-tl-internal.h"
+#include "husk-tl-jni.h"
+#include "husk-tl-ld.h"
+#include "husk-tl-unity.h"
+
+void tl_hle_set_ca_bundle(const char *path);
+
+static struct {
+    atomic_int state;
+    char apk[1024], data[1024], package[160], angle[1024], ca[1024];
+    void *layer;
+    int width, height;
+} A;
+
+/* -------------------------------------------------------------- crash report */
+
+static int find_lib(uintptr_t bias, const char *name, const void *phdr, unsigned phnum, void *user)
+{
+    struct { uintptr_t addr; const char *name; uintptr_t off; } *r = user;
+    const struct { uint32_t type, flags; uint64_t off, vaddr, paddr, filesz, memsz, align; } *p = phdr;
+    for (unsigned i = 0; i < phnum; i++)
+        if (p[i].type == 1 && r->addr >= bias + p[i].vaddr && r->addr < bias + p[i].vaddr + p[i].memsz) {
+            r->name = name; r->off = r->addr - bias;
+            return 1;
+        }
+    return 0;
+}
+
+static void where(char *out, size_t n, uintptr_t addr)
+{
+    struct { uintptr_t addr; const char *name; uintptr_t off; } r = { addr, NULL, 0 };
+    tl_ld_iterate(find_lib, &r);
+    if (r.name) snprintf(out, n, "%s+%#lx", r.name, (unsigned long)r.off);
+    else snprintf(out, n, "%#lx", (unsigned long)addr);
+}
+
+static struct sigaction g_prev[32];
+
+/*
+ * A fault in guest code ends the process, as it would on Android, but not before the log says where:
+ * the guest library and offset of the faulting instruction and of the code that called it. The app's
+ * own crash handling (which keeps the log file) runs after.
+ */
+static void on_fatal(int sig, siginfo_t *info, void *uctx)
+{
+    ucontext_t *uc = uctx;
+    char tn[40] = "", a[200], b[200], c[200];
+    pthread_getname_np(pthread_self(), tn, sizeof(tn));
+    where(a, sizeof(a), (uintptr_t)uc->uc_mcontext->__ss.__pc);
+    where(b, sizeof(b), (uintptr_t)uc->uc_mcontext->__ss.__lr);
+    where(c, sizeof(c), (uintptr_t)info->si_addr);
+    tl_log_line("=== FATAL signal %d on thread '%s': fault address %p (%s)", sig, tn, info->si_addr, c);
+    tl_log_line("    pc %s", a);
+    tl_log_line("    lr %s", b);
+    uintptr_t fp = uc->uc_mcontext->__ss.__fp;
+    for (int i = 0; i < 12 && fp && (fp & 7) == 0 && fp > 0x100000000ull; i++) {
+        uintptr_t *f = (uintptr_t *)fp;
+        char w[200];
+        where(w, sizeof(w), f[1]);
+        tl_log_line("    frame %s", w);
+        if (f[0] <= fp) break;
+        fp = f[0];
+    }
+    for (int i = 0; i < 29; i += 4)
+        tl_log_line("    x%d=%#llx x%d=%#llx x%d=%#llx x%d=%#llx", i, uc->uc_mcontext->__ss.__x[i], i + 1, uc->uc_mcontext->__ss.__x[i + 1],
+                    i + 2, i + 2 < 29 ? uc->uc_mcontext->__ss.__x[i + 2] : 0ull, i + 3, i + 3 < 29 ? uc->uc_mcontext->__ss.__x[i + 3] : 0ull);
+    if (g_prev[sig].sa_flags & SA_SIGINFO) {
+        if (g_prev[sig].sa_sigaction) { g_prev[sig].sa_sigaction(sig, info, uctx); return; }
+    } else if (g_prev[sig].sa_handler != SIG_DFL && g_prev[sig].sa_handler != SIG_IGN && g_prev[sig].sa_handler) {
+        g_prev[sig].sa_handler(sig);
+        return;
+    }
+    signal(sig, SIG_DFL);                       /* nobody else handles it: re-fault with the default action */
+}
+
+static void install_crash_reporter(void)
+{
+    static bool done;
+    if (done) return;
+    done = true;
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = on_fatal;
+    sa.sa_flags = SA_SIGINFO | SA_NODEFER;
+    sigemptyset(&sa.sa_mask);
+    static const int sigs[] = { SIGSEGV, SIGBUS, SIGILL };      /* not SIGTRAP: the app's brk guard owns it */
+    for (size_t i = 0; i < sizeof(sigs) / sizeof(sigs[0]); i++) sigaction(sigs[i], &sa, &g_prev[sigs[i]]);
+}
+
+/* ------------------------------------------------------------------- launch */
+
+/* exit() from the game ends the game, and the thread that asked. */
+static void guest_exit(int status)
+{
+    tl_log_line("unity: the game exited (%d)", status);
+    atomic_store(&A.state, HUSK_UNITY_ENDED);
+    pthread_exit(NULL);
+}
+
+static void *launch_thread(void *arg)
+{
+    (void)arg;
+    pthread_setname_np("husk-unity-start");
+    tl_guest_exit_hook = guest_exit;
+    install_crash_reporter();
+    tl_hle_set_ca_bundle(A.ca);
+
+    tl_unity_config cfg = {
+        .apk_path = A.apk, .data_dir = A.data, .package_name = A.package, .width = A.width, .height = A.height,
+        .metal_layer = A.layer, .angle_egl = A.angle, .angle_gles = NULL, .frame_dir = NULL, .frame_every = 0,
+    };
+    tl_log_line("unity: starting %s as %s, %dx%d", A.apk, A.package, A.width, A.height);
+    if (!tl_unity_start(&cfg) || !tl_unity_run()) {
+        tl_log_line("unity: the game could not be started");
+        atomic_store(&A.state, HUSK_UNITY_FAILED);
+        return NULL;
+    }
+    atomic_store(&A.state, HUSK_UNITY_RUNNING);
+    return NULL;
+}
+
+bool husk_unity_launch(const char *apk, const char *data_dir, void *metal_layer, int width, int height,
+                       const char *angle_dylib, const char *ca_bundle)
+{
+    int expected = HUSK_UNITY_IDLE;
+    if (!apk || !data_dir || !metal_layer || width <= 0 || height <= 0 || !angle_dylib) return false;
+    if (!atomic_compare_exchange_strong(&A.state, &expected, HUSK_UNITY_STARTING)) return false;
+    snprintf(A.apk, sizeof(A.apk), "%s", apk);
+    snprintf(A.data, sizeof(A.data), "%s", data_dir);
+    snprintf(A.angle, sizeof(A.angle), "%s", angle_dylib);
+    snprintf(A.ca, sizeof(A.ca), "%s", ca_bundle ? ca_bundle : "");
+    A.layer = metal_layer; A.width = width; A.height = height;
+    if (!husk_unity_package_name(apk, A.package, sizeof(A.package))) snprintf(A.package, sizeof(A.package), "com.unity.game");
+    pthread_attr_t at;
+    pthread_attr_init(&at);
+    pthread_attr_setstacksize(&at, 4u << 20);
+    pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+    pthread_t t;
+    int rc = pthread_create(&t, &at, launch_thread, NULL);
+    pthread_attr_destroy(&at);
+    if (rc) { atomic_store(&A.state, HUSK_UNITY_FAILED); return false; }
+    return true;
+}
+
+int husk_unity_state(void) { return atomic_load(&A.state); }
+unsigned long husk_unity_frames(void) { return tl_unity_frames(); }
+void husk_unity_touch(int phase, int id, float x, float y) { if (atomic_load(&A.state) == HUSK_UNITY_RUNNING) tl_unity_touch(phase, id, x, y); }
+void husk_unity_set_paused(bool paused) { if (atomic_load(&A.state) == HUSK_UNITY_RUNNING) tl_unity_set_paused(paused); }
+
+/* ------------------------------------------------------------- package name */
+
+static uint32_t rd32(const uint8_t *p) { return p[0] | (p[1] << 8) | (p[2] << 16) | ((uint32_t)p[3] << 24); }
+static uint16_t rd16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
+
+/* One string of an Android binary XML string pool, as UTF-8 into out. */
+static bool pool_string(const uint8_t *pool, size_t pool_size, uint32_t index, char *out, size_t n)
+{
+    uint32_t count = rd32(pool + 8), flags = rd32(pool + 16), strings = rd32(pool + 20);
+    if (index >= count || 28 + 4ull * index + 4 > pool_size) return false;
+    size_t off = strings + rd32(pool + 28 + 4 * index);
+    if (off + 4 > pool_size) return false;
+    const uint8_t *p = pool + off;
+    if (flags & 0x100) {                                        /* UTF-8: char length, byte length, bytes */
+        size_t l = *p++; if (l & 0x80) p++;
+        size_t b = *p++; if (b & 0x80) b = ((b & 0x7F) << 8) | *p++;
+        if (b >= n) b = n - 1;
+        memcpy(out, p, b); out[b] = 0;
+    } else {                                                    /* UTF-16 */
+        size_t l = rd16(p); p += 2;
+        if (l & 0x8000) { l = ((l & 0x7FFF) << 16) | rd16(p); p += 2; }
+        size_t k = 0;
+        for (size_t i = 0; i < l && k + 1 < n; i++) out[k++] = (char)rd16(p + 2 * i);   /* package names are ASCII */
+        out[k] = 0;
+    }
+    return true;
+}
+
+bool husk_unity_package_name(const char *apk, char *out, unsigned long out_len)
+{
+    tl_zip z;
+    char err[160];
+    if (!tl_zip_open(&z, apk, err, sizeof(err))) return false;
+    bool ok = false;
+    const tl_zip_entry *e = tl_zip_find(&z, "AndroidManifest.xml");
+    const uint8_t *data; size_t len; bool owned = false;
+    if (e && tl_zip_data(&z, e, 8u << 20, &data, &len, &owned, err, sizeof(err)) && len > 8 && rd16(data) == 0x0003) {
+        const uint8_t *pool = NULL; size_t pool_size = 0;
+        for (size_t off = rd16(data + 2); off + 8 <= len; ) {
+            uint16_t type = rd16(data + off); uint32_t size = rd32(data + off + 4);
+            if (size < 8 || off + size > len) break;
+            if (type == 0x0001) { pool = data + off; pool_size = size; }
+            else if (type == 0x0102 && pool) {                  /* the first element is <manifest> */
+                const uint8_t *el = data + off;
+                uint16_t astart = rd16(el + 24), asize = rd16(el + 26), acount = rd16(el + 28);
+                for (unsigned i = 0; i < acount; i++) {
+                    const uint8_t *at = el + 16 + astart + (size_t)i * asize;
+                    char name[40];
+                    if (pool_string(pool, pool_size, rd32(at + 4), name, sizeof(name)) && !strcmp(name, "package")
+                        && rd32(at + 8) != 0xFFFFFFFFu && pool_string(pool, pool_size, rd32(at + 8), out, out_len)) { ok = true; break; }
+                }
+                break;
+            }
+            off += size;
+        }
+    }
+    if (owned) free((void *)data);
+    tl_zip_close(&z);
+    return ok;
+}
