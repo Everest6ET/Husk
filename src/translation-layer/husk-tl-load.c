@@ -386,6 +386,16 @@ static void jit_icache(void *p, size_t n)
 
 static size_t g_prewarmed_used = 0;
 
+static bool is_valid_dual_mapping(const tl_dual_mapping *m)
+{
+    if (!m || !m->rw_addr || !m->rx_addr) return false;
+    /* Must be 16 KiB page-aligned on iOS. */
+    if (((uintptr_t)m->rw_addr & 0x3FFFull) != 0) return false;
+    if (((uintptr_t)m->rx_addr & 0x3FFFull) != 0) return false;
+    if (m->size < 1024 * 1024 || (m->size & 0x3FFFull) != 0) return false;
+    return true;
+}
+
 tl_dual_mapping *tl_find_stikdebug_prewarmed(void)
 {
     /* Ensure prewarm has been called in case this attempt ran before QEMU. */
@@ -397,8 +407,15 @@ tl_dual_mapping *tl_find_stikdebug_prewarmed(void)
     void *fn = dlsym(RTLD_DEFAULT, "husk_ios_jit_prewarm");
     if (!fn) return NULL;
 
+    /* 1. Try static offset in libqemu-aarch64-softmmu.dylib (_husk_prewarmed is at 0x1ce6920, prewarm at 0x35d788) */
+    tl_dual_mapping *m = (tl_dual_mapping *)((uintptr_t)fn + 0x1989198);
+    if (is_valid_dual_mapping(m)) {
+        return m;
+    }
+
+    /* 2. Decode the specific adrp+ldr right before epilogue (instruction 36) */
     const uint32_t *p = (const uint32_t *)fn;
-    for (int i = 0; i < 60; i++) {
+    for (int i = 30; i < 50; i++) {
         uint32_t insn = p[i];
         if ((insn & 0x9F000000u) == 0x90000000u) { /* adrp */
             uint32_t next = p[i + 1];
@@ -413,18 +430,13 @@ tl_dual_mapping *tl_find_stikdebug_prewarmed(void)
                     uintptr_t pc = (uintptr_t)&p[i];
                     uintptr_t page = (pc & ~0xFFFull) + (imm << 12);
                     uint64_t pimm = ((next >> 10) & 0xFFFu) << 3;
-                    tl_dual_mapping *m = (tl_dual_mapping *)(page + pimm);
-                    if (m && m->rw_addr && m->rx_addr && m->size >= 1024 * 1024) {
-                        return m;
+                    tl_dual_mapping *cand = (tl_dual_mapping *)(page + pimm);
+                    if (is_valid_dual_mapping(cand)) {
+                        return cand;
                     }
                 }
             }
         }
-    }
-    /* Fallback to static offset in libqemu-aarch64-softmmu.dylib */
-    tl_dual_mapping *fallback = (tl_dual_mapping *)((uintptr_t)fn + 0x1989198);
-    if (fallback && fallback->rw_addr && fallback->rx_addr && fallback->size >= 1024 * 1024) {
-        return fallback;
     }
     return NULL;
 }
