@@ -547,8 +547,8 @@ static void unmap_lib(tl_lib *L)
         return;
     }
     for (size_t i = 0; i < L->npages; i++) {
-        if (L->page_flags[i] & TL_PAGE_W) {
-            munmap(L->base + i * TL_PAGE, TL_PAGE);
+        if (L->page_flags[i] & TL_PAGE_CARVED) {
+            vm_deallocate(mach_task_self(), (vm_address_t)(L->base + i * TL_PAGE), TL_PAGE);
         }
     }
     if (!L->is_stikdebug) {
@@ -571,7 +571,19 @@ static uint32_t gnu_hash_name(const char *s)
 /* One loaded library's GNU hash table: find a defined symbol. */
 static void *lib_lookup(const tl_lib *L, const char *name)
 {
-    if (!L->gnu_hash || !L->symtab || !L->strtab) {
+    if (!L->symtab || !L->strtab) {
+        return NULL;
+    }
+    if (!L->gnu_hash) {
+        for (size_t i = 1; i < 8192; i++) {
+            const tl_sym *s = &L->symtab[i];
+            uint32_t name_off = ld32((const uint8_t *)&s->st_name);
+            if (name_off == 0 || name_off >= L->strsz) break;
+            const char *sn = (const char *)L->strtab + name_off;
+            if (!strcmp(sn, name) && s->st_value != 0) {
+                return L->base + (s->st_value - L->base_vaddr);
+            }
+        }
         return NULL;
     }
     const uint8_t *g = (const uint8_t *)L->gnu_hash;
@@ -661,7 +673,7 @@ static bool reloc_one(uint64_t off_in_image, uint32_t type, uint32_t symidx,
 {
     uint64_t offset = off_in_image - L->base_vaddr;
     size_t page_idx = (size_t)(offset / TL_PAGE);
-    uint8_t *place = (page_idx < L->npages && (L->page_flags[page_idx] & TL_PAGE_W))
+    uint8_t *place = (page_idx < L->npages && (L->page_flags[page_idx] & TL_PAGE_CARVED))
                    ? (L->base + offset)
                    : (L->base_rw ? L->base_rw + offset : L->base + offset);
 
@@ -826,16 +838,24 @@ static bool apply_relocations(tl_lib *L, lex *e, const ldyn *d)
         for (size_t i = 0; i < n; i++) {
             uint64_t word = ld64(w + i * 8);
             if (!(word & 1)) {
-                *(uint64_t *)(L->base + (word - L->base_vaddr)) =
-                    (uint64_t)L->base + word;
+                uint64_t offset = word - L->base_vaddr;
+                size_t p = (size_t)(offset / TL_PAGE);
+                uint8_t *target = (p < L->npages && (L->page_flags[p] & TL_PAGE_CARVED))
+                                ? (L->base + offset)
+                                : (L->base_rw ? L->base_rw + offset : L->base + offset);
+                *(uint64_t *)target = (uint64_t)L->base + word;
                 addr = word + 8;
                 done++;
             } else {
                 for (uint64_t bit = 1; bit != 0 && bit < (1ull << 63); bit <<= 1) {
                     if (word & bit) {
                         uint64_t a = addr + (bit >> 1);
-                        *(uint64_t *)(L->base + (a - L->base_vaddr)) =
-                            (uint64_t)L->base + a;
+                        uint64_t offset = a - L->base_vaddr;
+                        size_t p = (size_t)(offset / TL_PAGE);
+                        uint8_t *target = (p < L->npages && (L->page_flags[p] & TL_PAGE_CARVED))
+                                        ? (L->base + offset)
+                                        : (L->base_rw ? L->base_rw + offset : L->base + offset);
+                        *(uint64_t *)target = (uint64_t)L->base + a;
                         done++;
                     }
                 }
@@ -1058,22 +1078,57 @@ static bool load_library(const char *name, const uint8_t *file, size_t flen)
     size_t carved = 0;
     for (size_t i = 0; i < npages; i++) {
         if (flags[i] & TL_PAGE_W) {
-            void *r = mmap(base + i * TL_PAGE, TL_PAGE, PROT_READ | PROT_WRITE,
-                           MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0);
-            if (r == MAP_FAILED) {
-                tl_log_line("load: carving page %zu failed (%s)", i, strerror(errno));
-                if (!is_stikdebug) munmap(base, npages * TL_PAGE);
-                free(flags);
-                return false;
+            void *target = base + i * TL_PAGE;
+            bool ok_carve = false;
+
+            /* Try carving the page:
+             * On iOS/TXM, an existing RX mapping cannot be overwritten by mmap(MAP_FIXED)
+             * directly (returns EACCES / Permission denied).
+             * We first attempt to punch a hole by deallocating the page from the RX view,
+             * then allocating an ordinary RW page in its place. */
+            kern_return_t kr_dealloc = vm_deallocate(mach_task_self(), (vm_address_t)target, TL_PAGE);
+            if (kr_dealloc == KERN_SUCCESS) {
+                vm_address_t alloc_addr = (vm_address_t)target;
+                kern_return_t kr_alloc = vm_allocate(mach_task_self(), &alloc_addr, TL_PAGE, VM_FLAGS_FIXED);
+                if (kr_alloc == KERN_SUCCESS) {
+                    ok_carve = true;
+                } else {
+                    void *r = mmap(target, TL_PAGE, PROT_READ | PROT_WRITE,
+                                   MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0);
+                    if (r != MAP_FAILED) {
+                        ok_carve = true;
+                    }
+                }
+            } else {
+                /* vm_deallocate failed: try direct mmap (works on standard MAP_JIT) */
+                void *r = mmap(target, TL_PAGE, PROT_READ | PROT_WRITE,
+                               MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0);
+                if (r != MAP_FAILED) {
+                    ok_carve = true;
+                }
             }
-            carved++;
+
+            if (ok_carve) {
+                flags[i] |= TL_PAGE_CARVED;
+                carved++;
+            } else {
+                if (is_stikdebug) {
+                    tl_log_line("carve: page %zu could not be carved (%s), falling back to dual-mapped RW alias",
+                                i, kr_dealloc != KERN_SUCCESS ? mach_error_string(kr_dealloc) : strerror(errno));
+                } else {
+                    tl_log_line("load: carving page %zu failed (%s)", i, strerror(errno));
+                    munmap(base, npages * TL_PAGE);
+                    free(flags);
+                    return false;
+                }
+            }
         }
     }
     if (carved > 0) {
         tl_log_line("load: carved %zu writable page(s) beside executable memory", carved);
     }
 
-    /* Copy the segments in. Executable segments copy through base_rw;
+    /* Copy the segments in. Executable and dual-mapped segments copy through base_rw;
      * carved writable segments copy through base. */
     bool ok = true;
     for (int i = 0; i < nloads && ok; i++) {
@@ -1087,7 +1142,7 @@ static bool load_library(const char *name, const uint8_t *file, size_t flen)
         }
         uint64_t seg_off = v - base_vaddr;
         size_t start_page = (size_t)(seg_off / TL_PAGE);
-        uint8_t *dst = (flags[start_page] & TL_PAGE_W)
+        uint8_t *dst = (flags[start_page] & TL_PAGE_CARVED)
                      ? (base + seg_off)
                      : (base_rw + seg_off);
         memcpy(dst, file + fo, fs);
@@ -1202,6 +1257,7 @@ static bool load_library(const char *name, const uint8_t *file, size_t flen)
     jit_writable(false);
     if (L->init) {
         void (*fn)(void) = (void (*)(void))(base + (L->init - base_vaddr));
+        tl_log_line("init: %s calling DT_INIT %p", name, (void *)fn);
         fn();
     }
     if (L->init_array && L->init_arraysz) {
@@ -1209,9 +1265,15 @@ static bool load_library(const char *name, const uint8_t *file, size_t flen)
         for (size_t i = 0; i < n; i++) {
             uint64_t slot = L->init_array + i * 8;
             if (slot >= base_vaddr && slot - base_vaddr < npages * TL_PAGE) {
-                uint64_t fn_addr = *(uint64_t *)(base + (slot - base_vaddr));
+                uint64_t offset = slot - base_vaddr;
+                size_t p = (size_t)(offset / TL_PAGE);
+                uint8_t *src = (p < L->npages && (L->page_flags[p] & TL_PAGE_CARVED))
+                             ? (base + offset)
+                             : (base_rw ? base_rw + offset : base + offset);
+                uint64_t fn_addr = *(uint64_t *)src;
                 if (fn_addr) {
                     void (*fn)(void) = (void (*)(void))fn_addr;
+                    tl_log_line("init: %s calling init_array[%zu] %p", name, i, (void *)fn);
                     fn();
                 }
             }

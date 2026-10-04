@@ -112,6 +112,7 @@ enum {
     TL_PAGE_R = 1,          /* something is loaded here */
     TL_PAGE_X = 2,          /* code: must execute */
     TL_PAGE_W = 4,          /* data written after relocation: must be writable */
+    TL_PAGE_CARVED = 8,     /* carved into independent RW page */
 };
 
 typedef struct tl_segment {
