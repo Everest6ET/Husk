@@ -400,6 +400,12 @@ static bool is_valid_dual_mapping(const tl_dual_mapping *m)
 
 tl_dual_mapping *tl_find_stikdebug_prewarmed(void)
 {
+    tl_dual_mapping *(*get_fn)(void) = (tl_dual_mapping *(*)(void))dlsym(RTLD_DEFAULT, "husk_ios_jit_get_mapping");
+    if (get_fn) {
+        tl_dual_mapping *m = get_fn();
+        if (is_valid_dual_mapping(m)) return m;
+    }
+
     /* Ensure prewarm has been called in case this attempt ran before QEMU. */
     bool (*prewarm_fn)(size_t) = (bool (*)(size_t))dlsym(RTLD_DEFAULT, "husk_ios_jit_prewarm");
     if (prewarm_fn) {
@@ -583,7 +589,12 @@ static void *lib_lookup(const tl_lib *L, const char *name)
             if (name_off == 0 || name_off >= L->strsz) break;
             const char *sn = (const char *)L->strtab + name_off;
             if (!strcmp(sn, name) && s->st_value != 0) {
-                return L->base + (s->st_value - L->base_vaddr);
+                uint64_t target_off = s->st_value - L->base_vaddr;
+                size_t p = (size_t)(target_off / TL_PAGE);
+                if (L->is_stikdebug && p < L->npages && (L->page_flags[p] & TL_PAGE_W)) {
+                    return L->base_rw + target_off;
+                }
+                return L->base + target_off;
             }
         }
         return NULL;
@@ -615,7 +626,12 @@ static void *lib_lookup(const tl_lib *L, const char *name)
             const tl_sym *s = &L->symtab[i];
             const char *sn = (const char *)L->strtab + ld32((const uint8_t *)&s->st_name);
             if (sn && !strcmp(sn, name) && s->st_value != 0) {
-                return L->base + (s->st_value - L->base_vaddr);
+                uint64_t target_off = s->st_value - L->base_vaddr;
+                size_t p = (size_t)(target_off / TL_PAGE);
+                if (L->is_stikdebug && p < L->npages && (L->page_flags[p] & TL_PAGE_W)) {
+                    return L->base_rw + target_off;
+                }
+                return L->base + target_off;
             }
         }
         if (chain & 1) {
@@ -682,14 +698,27 @@ static bool reloc_one(uint64_t off_in_image, uint32_t type, uint32_t symidx,
     switch (type) {
     case R_AARCH64_NONE:
         return true;
-    case R_AARCH64_RELATIVE:
-        *(uint64_t *)place = (uint64_t)L->base + (uint64_t)addend;
+    case R_AARCH64_RELATIVE: {
+        uint64_t target_off = (uint64_t)addend - L->base_vaddr;
+        size_t target_p = (size_t)(target_off / TL_PAGE);
+        if (L->is_stikdebug && target_p < L->npages && (L->page_flags[target_p] & TL_PAGE_W)) {
+            *(uint64_t *)place = (uint64_t)L->base_rw + target_off;
+        } else {
+            *(uint64_t *)place = (uint64_t)L->base + target_off;
+        }
         return true;
+    }
     case R_AARCH64_ABS64:
     case R_AARCH64_GLOB_DAT:
     case R_AARCH64_JUMP_SLOT: {
         if (symidx == 0) {
-            *(uint64_t *)place = (uint64_t)L->base + (uint64_t)addend;
+            uint64_t target_off = (uint64_t)addend - L->base_vaddr;
+            size_t target_p = (size_t)(target_off / TL_PAGE);
+            if (L->is_stikdebug && target_p < L->npages && (L->page_flags[target_p] & TL_PAGE_W)) {
+                *(uint64_t *)place = (uint64_t)L->base_rw + target_off;
+            } else {
+                *(uint64_t *)place = (uint64_t)L->base + target_off;
+            }
             return true;
         }
         const tl_sym *s = &L->symtab[symidx];
@@ -712,7 +741,13 @@ static bool reloc_one(uint64_t off_in_image, uint32_t type, uint32_t symidx,
             *(uint64_t *)place = (uint64_t)addr;
             return true;
         }
-        *(uint64_t *)place = (uint64_t)L->base + s->st_value + (uint64_t)addend;
+        uint64_t target_off = s->st_value + (uint64_t)addend - L->base_vaddr;
+        size_t target_p = (size_t)(target_off / TL_PAGE);
+        if (L->is_stikdebug && target_p < L->npages && (L->page_flags[target_p] & TL_PAGE_W)) {
+            *(uint64_t *)place = (uint64_t)L->base_rw + target_off;
+        } else {
+            *(uint64_t *)place = (uint64_t)L->base + target_off;
+        }
         return true;
     }
     case R_AARCH64_IRELATIVE:
@@ -962,31 +997,67 @@ static uint32_t encode_adrp(uint32_t rt, const void *pc, const void *target)
     return 0x90000000u | ((imm & 3u) << 29) | ((imm >> 2) << 5) | (rt & 0x1Fu);
 }
 
-static void patch_tpidr_reads(uint8_t *code_rw, const uint8_t *code_rx, size_t len)
+static void patch_guest_code(uint8_t *code_rw, const uint8_t *code_rx, size_t len,
+                             const uint8_t *page_flags, size_t npages,
+                             bool is_stikdebug, ptrdiff_t delta_rw_rx)
 {
     g_bionic_tcb[0] = (uint64_t)(uintptr_t)g_bionic_tcb;
     g_bionic_tcb[1] = 1000;
     g_bionic_tcb[2] = 1000;
     g_bionic_tcb[5] = 0xdeadbeefcafebabeull; /* offset 0x28: stack canary guard */
 
-    size_t count = 0;
+    size_t count_tpidr = 0;
+    size_t count_adrp = 0;
     for (size_t off = 0; off + 4 <= len; off += 4) {
+        size_t p = off / TL_PAGE;
+        if (p < npages && !(page_flags[p] & TL_PAGE_X)) {
+            continue;
+        }
         uint32_t insn = *(uint32_t *)(code_rw + off);
         if ((insn & 0xFFFFFFE0u) == 0xD53BD040u) {
             uint32_t rt = insn & 0x1Fu;
             uint32_t new_insn = encode_adrp(rt, code_rx + off, g_bionic_tcb);
             *(uint32_t *)(code_rw + off) = new_insn;
-            count++;
+            count_tpidr++;
+            continue;
+        }
+
+        if (is_stikdebug && (insn & 0x9F000000u) == 0x90000000u) {
+            uint32_t immlo = (insn >> 29) & 3u;
+            uint32_t immhi = (insn >> 5) & 0x7FFFFu;
+            int64_t imm = (int64_t)((immhi << 2) | immlo);
+            if (imm & 0x100000) imm -= 0x200000;
+
+            const uint8_t *pc = code_rx + off;
+            uintptr_t target_page = ((uintptr_t)pc & ~0xFFFull) + (imm << 12);
+            if (target_page >= (uintptr_t)code_rx &&
+                target_page < (uintptr_t)code_rx + npages * TL_PAGE) {
+                size_t target_off = (size_t)(target_page - (uintptr_t)code_rx);
+                size_t target_p = target_off / TL_PAGE;
+                if (target_p < npages && (page_flags[target_p] & TL_PAGE_W)) {
+                    uint32_t rt = insn & 0x1Fu;
+                    const void *rw_target = (const void *)(target_page + delta_rw_rx);
+                    uint32_t new_insn = encode_adrp(rt, pc, rw_target);
+                    *(uint32_t *)(code_rw + off) = new_insn;
+                    count_adrp++;
+                }
+            }
         }
     }
-    if (count > 0) {
-        tl_log_line("patch: rewritten %zu 'mrs Xt, tpidr_el0' -> adrp stack guard", count);
+    if (count_tpidr > 0) {
+        tl_log_line("patch: rewritten %zu 'mrs Xt, tpidr_el0' -> adrp stack guard", count_tpidr);
+    }
+    if (count_adrp > 0) {
+        tl_log_line("patch: remapped %zu 'adrp' data references -> StikDebug RW alias", count_adrp);
     }
 }
 #else
-static void patch_tpidr_reads(uint8_t *code_rw, const uint8_t *code_rx, size_t len)
+static void patch_guest_code(uint8_t *code_rw, const uint8_t *code_rx, size_t len,
+                             const uint8_t *page_flags, size_t npages,
+                             bool is_stikdebug, ptrdiff_t delta_rw_rx)
 {
-    (void)code_rw; (void)code_rx; (void)len;
+    (void)code_rw; (void)code_rx; (void)len; (void)page_flags; (void)npages;
+    (void)is_stikdebug; (void)delta_rw_rx;
 }
 #endif
 
@@ -1118,45 +1189,15 @@ static bool load_library(const char *name, const uint8_t *file, size_t flen)
     }
 
     size_t carved = 0;
-    for (size_t i = 0; i < npages; i++) {
-        if (flags[i] & TL_PAGE_W) {
-            void *target = base + i * TL_PAGE;
-            bool ok_carve = false;
-
-            /* Try carving the page:
-             * On iOS/TXM, an existing RX mapping cannot be overwritten by mmap(MAP_FIXED)
-             * directly (returns EACCES / Permission denied).
-             * We first attempt to punch a hole by deallocating the page from the RX view,
-             * then allocating an ordinary RW page in its place. */
-            kern_return_t kr_dealloc = vm_deallocate(mach_task_self(), (vm_address_t)target, TL_PAGE);
-            if (kr_dealloc == KERN_SUCCESS) {
-                vm_address_t alloc_addr = (vm_address_t)target;
-                kern_return_t kr_alloc = vm_allocate(mach_task_self(), &alloc_addr, TL_PAGE, VM_FLAGS_FIXED);
-                if (kr_alloc == KERN_SUCCESS) {
-                    ok_carve = true;
-                } else {
-                    void *r = mmap(target, TL_PAGE, PROT_READ | PROT_WRITE,
-                                   MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0);
-                    if (r != MAP_FAILED) {
-                        ok_carve = true;
-                    }
-                }
-            } else {
-                /* vm_deallocate failed: try direct mmap (works on standard MAP_JIT) */
+    if (!is_stikdebug) {
+        for (size_t i = 0; i < npages; i++) {
+            if (flags[i] & TL_PAGE_W) {
+                void *target = base + i * TL_PAGE;
                 void *r = mmap(target, TL_PAGE, PROT_READ | PROT_WRITE,
                                MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0);
                 if (r != MAP_FAILED) {
-                    ok_carve = true;
-                }
-            }
-
-            if (ok_carve) {
-                flags[i] |= TL_PAGE_CARVED;
-                carved++;
-            } else {
-                if (is_stikdebug) {
-                    tl_log_line("carve: page %zu could not be carved (%s), falling back to dual-mapped RW alias",
-                                i, kr_dealloc != KERN_SUCCESS ? mach_error_string(kr_dealloc) : strerror(errno));
+                    flags[i] |= TL_PAGE_CARVED;
+                    carved++;
                 } else {
                     tl_log_line("load: carving page %zu failed (%s)", i, strerror(errno));
                     munmap(base, npages * TL_PAGE);
@@ -1165,9 +1206,15 @@ static bool load_library(const char *name, const uint8_t *file, size_t flen)
                 }
             }
         }
-    }
-    if (carved > 0) {
-        tl_log_line("load: carved %zu writable page(s) beside executable memory", carved);
+        if (carved > 0) {
+            tl_log_line("load: carved %zu writable page(s) beside executable memory", carved);
+        }
+    } else {
+        size_t nwrite = 0;
+        for (size_t i = 0; i < npages; i++) {
+            if (flags[i] & TL_PAGE_W) nwrite++;
+        }
+        tl_log_line("load: using StikDebug dual-mapped RW alias for %zu writable page(s) (no carving needed)", nwrite);
     }
 
     /* Copy the segments in. Executable and dual-mapped segments copy through base_rw;
@@ -1197,7 +1244,8 @@ static bool load_library(const char *name, const uint8_t *file, size_t flen)
         unmap_lib(&(tl_lib){ .base = base, .npages = npages, .page_flags = flags, .is_stikdebug = is_stikdebug });
         return false;
     }
-    patch_tpidr_reads(base_rw, base, npages * TL_PAGE);
+    patch_guest_code(base_rw, base, npages * TL_PAGE, flags, npages,
+                     is_stikdebug, (ptrdiff_t)(base_rw - base));
     jit_icache(base, npages * TL_PAGE);
 
     ldyn d;
