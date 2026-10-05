@@ -22,6 +22,7 @@
 #include "husk-tl-jni.h"
 #include "husk-tl-ld.h"
 #include "husk-tl-unity.h"
+#include "husk-tl-gamepad.h"
 #include "husk-tl-xmem.h"
 
 static void dump_pushes(void);
@@ -322,6 +323,16 @@ static void *control_thread(void *arg)
             if (sscanf(line, "tap %f %f", &a, &b) == 2) { tl_unity_touch(0, 0, a, b); sleep_ms(60); tl_unity_touch(2, 0, a, b); }
             else if (sscanf(line, "hold %f %f %ld", &a, &b, &ms) == 3) { tl_unity_touch(0, 0, a, b); sleep_ms(ms); tl_unity_touch(2, 0, a, b); }
             else if (sscanf(line, "swipe %f %f %f %f %ld", &a, &b, &c, &d, &ms) == 5) do_swipe(a, b, c, d, ms);
+            /* a virtual controller: padon / padoff, "pad <buttons hex> lx ly rx ry lt rt" (y down, as Android), padtap <button bit> <ms> */
+            else if (!strncmp(line, "padon", 5)) tl_pad_connect(0, "Xbox Wireless Controller");
+            else if (!strncmp(line, "padoff", 6)) tl_pad_disconnect(0);
+            else if (!strncmp(line, "padtap", 6) && sscanf(line + 6, "%f %ld", &a, &ms) == 2) {
+                tl_pad_state st = { .buttons = 1u << (int)a }; tl_pad_update(0, &st); sleep_ms(ms); st.buttons = 0; tl_pad_update(0, &st);
+            }
+            else if (!strncmp(line, "pad ", 4)) {
+                unsigned btn = 0; tl_pad_state st = { 0 };
+                if (sscanf(line + 4, "%x %f %f %f %f %f %f", &btn, &st.lx, &st.ly, &st.rx, &st.ry, &st.lt, &st.rt) >= 1) { st.buttons = btn; tl_pad_update(0, &st); }
+            }
             else if (sscanf(line, "wait %ld", &ms) == 1) sleep_ms(ms);
             else if (sscanf(line, "shot %399s", p) == 1) {
                 char cmd[900]; snprintf(cmd, sizeof(cmd), "sips -s format png '%s/latest.bmp' --out '%s' >/dev/null 2>&1", g_frame_dir, p);
@@ -372,6 +383,8 @@ int main(int argc, char **argv)
     if (getenv("TL_STOP_EARLY")) { tl_ld_iterate(print_lib, NULL); raise(SIGSTOP); }
     if (!tl_unity_run()) { fprintf(stderr, "unity: run failed\n"); return 1; }
     tl_ld_iterate(print_lib, NULL);
+    tl_unity_register_pad_sink();
+    if (getenv("TL_PAD")) tl_pad_connect(0, "Xbox Wireless Controller");
     if (getenv("TL_CTL")) { static pthread_t ct; pthread_create(&ct, NULL, control_thread, getenv("TL_CTL")); }
     if (getenv("TL_TOUCH")) { static pthread_t tt; pthread_create(&tt, NULL, touch_script, getenv("TL_TOUCH")); }
     if (getenv("TL_MONITOR")) { tl_ld_iterate(find_unity, NULL); pthread_t mt; pthread_create(&mt, NULL, monitor, NULL); }

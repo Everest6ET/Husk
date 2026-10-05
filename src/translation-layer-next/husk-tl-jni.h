@@ -96,6 +96,9 @@ jvalue tl_jni_get_field(jobj *o, const char *name, const char *sig);
 void tl_jni_set_static(const char *cls, const char *name, const char *sig, jvalue v);
 jvalue tl_jni_get_static(const char *cls, const char *name, const char *sig);
 
+/* An iterator over a fixed list of objects, for the Java collections implemented in C (each item gets a new reference as it is returned). */
+jobj *tl_jni_new_list_iterator(jobj *const *items, uint32_t n);
+
 /* Exceptions */
 void tl_jni_throw(const char *cls, const char *msg);
 bool tl_jni_pending(void);

@@ -44,6 +44,16 @@ void husk_cocos_request_text(void (*cb)(const char *utf8));    /* what the game'
 /* A link the game wants opened (terms of use, social buttons). The handler runs on the game's GL thread. */
 void husk_cocos_set_open_url_handler(void (*handler)(const char *url));
 
+/*
+ * Game controllers (GameController on iOS, so Bluetooth ones too). Report a controller when it connects and its state as often as it
+ * changes; what changed is sent to whichever game is running, as the Xbox-style controller Android games expect. `buttons` is a mask of
+ * 1 << TL_PAD_* (A, B, X, Y, L1, R1, left and right stick click, Start, Select, Mode, then D-pad up, down, left, right) -- see
+ * husk-tl-gamepad.h, or HuskGamepad.swift for the same list. Sticks are -1..1 with y up, as iOS reports them; triggers 0..1.
+ */
+void husk_gamepad_connect(int slot, const char *name);
+void husk_gamepad_disconnect(int slot);
+void husk_gamepad_update(int slot, unsigned buttons, float lx, float ly, float rx, float ry, float lt, float rt);
+
 /* The APK of the game started this session, or NULL. An engine cannot be loaded twice, nor two games at once. */
 const char *husk_native_loaded_apk(void);
 

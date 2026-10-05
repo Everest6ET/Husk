@@ -26,6 +26,7 @@
 #include "husk-tl-audio.h"
 #include "husk-tl-cocos.h"
 #include "husk-tl-gameactivity.h"
+#include "husk-tl-gamepad.h"
 
 void tl_hle_set_ca_bundle(const char *path);
 extern int tl_log_sink_fd;
@@ -170,6 +171,10 @@ static void *launch_thread(void *arg)
     install_crash_reporter();
     tl_hle_set_ca_bundle(A.ca);
 
+    /* Controllers go to the engine that is running. (GameActivity registers its own as it starts.) */
+    if (A.engine == ENGINE_UNITY) tl_unity_register_pad_sink();
+    else if (A.engine == ENGINE_COCOS) tl_cocos_register_pad_sink();
+
     bool ok;
     if (A.engine == ENGINE_GAMEACTIVITY) {
         tl_ga_config cfg = {
@@ -247,6 +252,16 @@ bool husk_gameactivity_launch(const char *apk, const char *data_dir, void *metal
                               const char *angle_dylib, const char *ca_bundle)
 {
     return launch(ENGINE_GAMEACTIVITY, apk, data_dir, metal_layer, width, height, angle_dylib, ca_bundle);
+}
+
+/* ---------------------------------------------------------------- controllers */
+
+void husk_gamepad_connect(int slot, const char *name) { tl_pad_connect(slot, name); }
+void husk_gamepad_disconnect(int slot) { tl_pad_disconnect(slot); }
+void husk_gamepad_update(int slot, unsigned buttons, float lx, float ly, float rx, float ry, float lt, float rt)
+{
+    tl_pad_state s = { .buttons = buttons, .lx = lx, .ly = -ly, .rx = rx, .ry = -ry, .lt = lt, .rt = rt };   /* iOS has y up; Android has it down */
+    tl_pad_update(slot, &s);
 }
 
 void husk_cocos_set_keyboard_handler(void (*handler)(int action)) { tl_cocos_keyboard_hook = handler; }

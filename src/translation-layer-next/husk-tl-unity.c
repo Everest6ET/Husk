@@ -14,6 +14,7 @@
 #include "husk-tl-bionic.h"
 #include "husk-tl-dexindex.h"
 #include "husk-tl-egl.h"
+#include "husk-tl-gamepad.h"
 #include "husk-tl-jni.h"
 #include "husk-tl-ld.h"
 
@@ -183,6 +184,7 @@ void tl_unity_touch(int phase, int id, float x, float y)
 {
     typedef uint8_t (*inject_fn)(void *env, void *self, void *event, uintptr_t source);
     inject_fn fn = (inject_fn)native_of("com/unity3d/player/UnityPlayer", "nativeInjectEvent", "(Landroid/view/InputEvent;I)Z");
+    if (!fn) fn = (inject_fn)native_of("com/unity3d/player/UnityPlayer", "nativeInjectEvent", "(Landroid/view/InputEvent;)Z");
     if (!fn) return;
     pthread_mutex_lock(&T.lock);
     int idx = -1;
@@ -221,6 +223,29 @@ void tl_unity_touch(int phase, int id, float x, float y)
     fn(tl_jni_env(), U.player, ev, 0);
     if (tl_jni_pending()) tl_jni_clear();
     tl_jni_unref(ev);
+}
+
+/* ------------------------------------------------------------ controller */
+
+/* The same entry point as a touch: the engine reads a KeyEvent or a joystick MotionEvent off what it is handed. */
+static void inject(jobj *ev)
+{
+    typedef uint8_t (*inject_fn)(void *env, void *self, void *event, uintptr_t source);
+    /* The newer players take (InputEvent, int), older ones only the event; the extra argument is harmless to those. */
+    inject_fn fn = (inject_fn)native_of("com/unity3d/player/UnityPlayer", "nativeInjectEvent", "(Landroid/view/InputEvent;I)Z");
+    if (!fn) fn = (inject_fn)native_of("com/unity3d/player/UnityPlayer", "nativeInjectEvent", "(Landroid/view/InputEvent;)Z");
+    if (fn) { fn(tl_jni_env(), U.player, ev, 0); if (tl_jni_pending()) tl_jni_clear(); }
+    tl_jni_unref(ev);
+}
+static void pad_key(jobj *ev, int device, int action, int keycode, int64_t down_ms, int64_t event_ms)
+{ (void)device; (void)action; (void)keycode; (void)down_ms; (void)event_ms; inject(ev); }
+static void pad_motion(jobj *ev, int device, int source, int64_t down_ms, int64_t event_ms)
+{ (void)device; (void)source; (void)down_ms; (void)event_ms; inject(ev); }
+
+void tl_unity_register_pad_sink(void)
+{
+    static const tl_pad_sink sink = { pad_key, pad_motion };
+    tl_pad_set_sink(&sink);
 }
 
 void tl_unity_perf_snapshot(tl_unity_perf *out)

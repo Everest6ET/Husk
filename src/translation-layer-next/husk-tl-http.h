@@ -3,7 +3,7 @@
  * One blocking HTTP(S) request on the host's own networking (NSURLSession), for the Java HTTP clients a game's
  * Java side would have used: Unity's UnityWebRequest runs on HttpURLConnection, which has no implementation here.
  *
- * Redirects are not followed (the caller reports the 3xx and the engine follows it itself, as it does on Android),
+ * Redirects are followed only when asked for (Unity reports the 3xx and follows it itself, as it does on Android),
  * and the whole body is read before this returns.
  */
 #ifndef HUSK_TL_HTTP_H
@@ -23,6 +23,7 @@ typedef struct tl_http_request {
     const char *const *header_names, *const *header_values;
     const uint8_t *body; size_t body_len;
     int timeout_ms;                       /* 0: no limit of its own */
+    bool follow_redirects;                /* follow up to 10 redirects, as OkHttp does; otherwise the 3xx itself is the answer */
 } tl_http_request;
 
 /* What went wrong, in the terms Unity's UnityWebRequest uses. */

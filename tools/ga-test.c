@@ -22,6 +22,7 @@
 #include <unistd.h>
 
 #include "husk-tl-gameactivity.h"
+#include "husk-tl-gamepad.h"
 #include "husk-tl-audio.h"
 #include "husk-tl-xmem.h"
 #include "husk-tl-jni.h"
@@ -123,6 +124,16 @@ static void *control_thread(void *arg)
                 char cmd[900]; snprintf(cmd, sizeof(cmd), "sips -s format png '%s/latest.bmp' --out '%s' >/dev/null 2>&1", g_frame_dir, p);
                 if (system(cmd)) fprintf(stderr, "ctl: shot failed\n");
                 else fprintf(stderr, "ctl: shot %s (frame %lu)\n", p, tl_ga_frames());
+            }
+            /* a virtual controller: padon / padoff, "pad <buttons hex> lx ly rx ry lt rt" (y down, as Android), padtap <button bit> <ms> */
+            else if (!strncmp(line, "padon", 5)) tl_pad_connect(0, "Xbox Wireless Controller");
+            else if (!strncmp(line, "padoff", 6)) tl_pad_disconnect(0);
+            else if (!strncmp(line, "padtap", 6) && sscanf(line + 6, "%f %ld", &a, &ms) == 2) {
+                tl_pad_state st = { .buttons = 1u << (int)a }; tl_pad_update(0, &st); sleep_ms(ms); st.buttons = 0; tl_pad_update(0, &st);
+            }
+            else if (!strncmp(line, "pad ", 4)) {
+                unsigned btn = 0; tl_pad_state st = { 0 };
+                if (sscanf(line + 4, "%x %f %f %f %f %f %f", &btn, &st.lx, &st.ly, &st.rx, &st.ry, &st.lt, &st.rt) >= 1) { st.buttons = btn; tl_pad_update(0, &st); }
             }
             else if (!strncmp(line, "pause", 5)) tl_ga_set_paused(true);
             else if (!strncmp(line, "resume", 6)) tl_ga_set_paused(false);
@@ -330,6 +341,7 @@ int main(int argc, char **argv)
                          .frame_dir = frames, .frame_every = getenv("TL_FRAMES") ? atoi(getenv("TL_FRAMES")) : -6 };
     g_frame_dir = frames;
     if (getenv("TL_AUDIO")) tl_audio_install();
+    if (getenv("TL_PAD")) tl_pad_connect(0, "Xbox Wireless Controller");
     if (!tl_ga_start(&cfg)) { fprintf(stderr, "minecraft: start failed\n"); return 1; }
     if (getenv("TL_MC_RAND_TEST")) {
         tl_lib *L = tl_ld_find_lib("libminecraftpe.so");

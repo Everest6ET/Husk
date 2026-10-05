@@ -39,6 +39,8 @@ bool tl_cocos_run(void);
 unsigned long tl_cocos_frames(void);
 
 /* A touch in surface pixels, y down. phase 0 down, 1 move, 2 up, 3 cancel all. Safe from any thread. */
+/* Route a connected controller to this engine (husk-tl-gamepad.h). */
+void tl_cocos_register_pad_sink(void);
 void tl_cocos_touch(int phase, int id, float x, float y);
 
 /* Text typed on the soft keyboard, a backspace, and a key (Android key codes: 4 is Back), delivered to the game on its GL thread. */

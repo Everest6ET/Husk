@@ -78,6 +78,8 @@ struct tl_lib {
 
     struct { uint64_t start, end; } code[16];   /* executable sections, as vaddrs: the only places instructions are patched */
     int ncode;
+    uint64_t *fde_start, *fde_end; size_t nfde;   /* the address ranges of the functions the unwind tables describe, sorted; none if the library has no tables */
+    size_t n_x18_data;             /* words naming x18 that lie outside every function: constant tables inside .text, left alone */
     size_t n_ctr;                  /* reads of CTR_EL0 replaced by a constant */
     size_t n_svc_far, n_adr_failed;   /* svc sites with no stub in branch range (answered ENOSYS), adr sites that could not be rewritten */
     size_t n_x18, n_x18_failed;    /* sites rewritten for the reserved register, and sites that could not be */
@@ -819,6 +821,16 @@ static int x18_rewrite(tl_lib *L, uint32_t *site_rw, const uint8_t *pc, ptrdiff_
     return X18_DONE;
 }
 
+static uint8_t *build_data_map(const tl_lib *L, const uint32_t *w, size_t n, uint64_t vstart, size_t *n_data);   /* below, with the unwind tables it reads */
+
+/* The cheap test x18_rewrite starts with, and what it would go on to decide: whether this word is an instruction that names x18. */
+static bool x18_rewrite_would_apply(uint32_t insn)
+{
+    if ((insn & 31u) != 18 && ((insn >> 5) & 31u) != 18 && ((insn >> 10) & 31u) != 18 && ((insn >> 16) & 31u) != 18) return false;
+    bool known;
+    return a64_uses_gpr(insn, 18, &known);
+}
+
 /* --------------------------------------------------------------- patching */
 
 #if defined(__aarch64__)
@@ -853,10 +865,25 @@ static void patch_image(tl_lib *L, size_t *n_tpidr, size_t *n_adrp, size_t *n_ad
         uint32_t *w = (uint32_t *)(L->rw + (L->code[r].start - L->base_vaddr));
         const uint8_t *x = L->rx + (L->code[r].start - L->base_vaddr);
         size_t nwords = (size_t)((L->code[r].end - L->code[r].start) / 4);
+        size_t ndata;
+        uint8_t *dmap = build_data_map(L, w, nwords, L->code[r].start, &ndata);
         for (size_t i = 0; i < nwords; i++) {
             uint32_t insn = w[i];
             const uint8_t *pc = x + i * 4;
-            int xr = x18_rewrite(L, &w[i], pc, delta);
+            /* a constant in the code section is not an instruction that happens to name x18 */
+            /* Only the x18 rewrite is held back: it matches a word on a handful of ordinary bit fields, and a quarter of a constant table does. The
+             * others (adrp, adr, mrs, svc) match fixed patterns that a constant almost never has, and the code beside a table needs them. */
+            bool is_data = dmap && ((dmap[i >> 3] >> (i & 7)) & 1);
+            /* TL_X18_RANGE=<lo>-<hi> (hex vaddrs) or TL_X18_OFF: rewrite fewer sites, to find one that is mishandled. A Mac does not clear x18, so leaving it is safe to test with. */
+            static int dbg = -1; static uint64_t dbg_lo, dbg_hi;
+            if (dbg < 0) { const char *e = getenv("TL_X18_RANGE"); dbg = getenv("TL_X18_OFF") ? 1 : 0; if (e) { dbg = 2; sscanf(e, "%llx-%llx", (unsigned long long *)&dbg_lo, (unsigned long long *)&dbg_hi); } }
+            uint64_t va = L->code[r].start + (uint64_t)i * 4;
+            bool skip_dbg = dbg == 1 || (dbg == 2 && !(va >= dbg_lo && va < dbg_hi));
+            int xr = (is_data || skip_dbg) ? X18_NONE : x18_rewrite(L, &w[i], pc, delta);
+            if (is_data && x18_rewrite_would_apply(insn)) {
+                L->n_x18_data++;
+                if (G.verbosity >= 3) tl_log_line("ld: %s: x18 word %08x at +%#llx left alone", L->name, insn, (unsigned long long)(L->code[r].start + (uint64_t)i * 4));
+            }
             if (xr == X18_DONE) { L->n_x18++; continue; }
             if (xr == X18_FAILED) { L->n_x18_failed++; continue; }
             if ((insn & 0xFFFFFFE0u) == 0xD53B0020u) {            /* mrs Xt, ctr_el0: privileged for user code on Apple silicon */
@@ -904,6 +931,7 @@ static void patch_image(tl_lib *L, size_t *n_tpidr, size_t *n_adrp, size_t *n_ad
                 }
             }
         }
+        free(dmap);
     }
 }
 #else
@@ -1122,6 +1150,198 @@ static bool ensure_tcb(void)
     return true;
 }
 
+
+/* ------------------------------------------------------------------ unwind ranges */
+
+/*
+ * Which words of the executable sections are code. Assembly files put their constant tables in .text (OpenSSL's SHA-256 and SHA-512 keep
+ * theirs right after the function), and a table word that happens to name x18 -- one constant in 40 does -- would be "rewritten" into a branch to
+ * a stub, which turns the constant into garbage and the hash into a wrong answer. The unwind tables list the extent of every function the
+ * compiler emitted, which is exactly the code; a word outside all of them is data, and the rewrites that only code deserves leave it alone.
+ * A library with no unwind tables, or tables this cannot read, is treated as code throughout, as before.
+ */
+static bool read_enc(const uint8_t *p, const uint8_t *end, uint8_t enc, uint64_t field_vaddr, int64_t *out, size_t *size)
+{
+    int64_t v = 0; size_t n;
+    switch (enc & 0x0F) {
+    case 0x00: case 0x04: case 0x0C: n = 8; if (p + n > end) return false; memcpy(&v, p, 8); break;
+    case 0x02: n = 2; if (p + n > end) return false; { uint16_t t; memcpy(&t, p, 2); v = t; } break;
+    case 0x0A: n = 2; if (p + n > end) return false; { int16_t t; memcpy(&t, p, 2); v = t; } break;
+    case 0x03: n = 4; if (p + n > end) return false; { uint32_t t; memcpy(&t, p, 4); v = t; } break;
+    case 0x0B: n = 4; if (p + n > end) return false; { int32_t t; memcpy(&t, p, 4); v = t; } break;
+    default: return false;
+    }
+    if ((enc & 0x70) == 0x10) v += (int64_t)field_vaddr;          /* pc-relative; the others (absolute, or relative to the table) do not occur for an FDE's range */
+    else if ((enc & 0x70) != 0x00) return false;
+    *out = v; *size = n;
+    return true;
+}
+static bool uleb(const uint8_t **p, const uint8_t *end, uint64_t *v)
+{
+    uint64_t r = 0; int sh = 0;
+    while (*p < end) { uint8_t b = *(*p)++; r |= (uint64_t)(b & 0x7F) << sh; sh += 7; if (!(b & 0x80)) { *v = r; return true; } if (sh > 63) return false; }
+    return false;
+}
+typedef struct { uint64_t s, e; } fde_range;
+static int cmp_range(const void *a, const void *b) { const fde_range *x = a, *y = b; return x->s < y->s ? -1 : x->s > y->s; }
+
+/* The encoding a CIE says its FDEs use for the address of the function (the 'R' augmentation); false if the record cannot be read. */
+static bool cie_fde_encoding(const uint8_t *cie, const uint8_t *end, uint8_t *enc)
+{
+    if (cie + 12 > end) return false;
+    uint32_t len; memcpy(&len, cie, 4);
+    const uint8_t *rec_end = cie + 4 + len;
+    if (len == 0 || len == 0xFFFFFFFFu || rec_end > end) return false;
+    const uint8_t *q = cie + 8;                               /* past the length and the zero id */
+    uint8_t version = *q++;
+    const char *aug = (const char *)q;
+    while (q < rec_end && *q) q++;
+    if (q >= rec_end) return false;
+    q++;
+    uint64_t t;
+    if (!uleb(&q, rec_end, &t) || !uleb(&q, rec_end, &t)) return false;          /* code and data alignment */
+    if (version == 1) q++; else if (!uleb(&q, rec_end, &t)) return false;         /* the return address register */
+    uint8_t fenc = 0;
+    if (aug[0] == 'z') {
+        uint64_t alen; if (!uleb(&q, rec_end, &alen)) return false;
+        const uint8_t *aend = q + alen;
+        for (const char *a = aug + 1; *a && q < aend; a++) {
+            if (*a == 'R') fenc = *q++;
+            else if (*a == 'L') q++;
+            else if (*a == 'P') { uint8_t penc = *q++; int64_t dummy; size_t psz; if (!read_enc(q, aend, (uint8_t)(penc & 0x0F), 0, &dummy, &psz)) return false; q += psz; }
+            else if (*a == 'S' || *a == 'B') { /* no data */ }
+            else break;
+        }
+    }
+    *enc = fenc;
+    return true;
+}
+
+static void load_unwind_ranges(tl_lib *L, const uint8_t *file, size_t flen, const elf_phdr *phs, unsigned phnum)
+{
+    const uint32_t PT_EH = 0x6474e550u;
+    size_t hdr_off = (size_t)-1; uint64_t hdr_vaddr = 0;
+    for (unsigned i = 0; i < phnum; i++) if (phs[i].p_type == PT_EH) { hdr_off = (size_t)phs[i].p_offset; hdr_vaddr = phs[i].p_vaddr; }
+    if (hdr_off == (size_t)-1 || hdr_off + 12 > flen) return;
+    const uint8_t *h = file + hdr_off, *fend = file + flen;
+    const char *why = "unsupported .eh_frame_hdr";
+    fde_range *r = NULL;
+    if (h[0] != 1 || h[2] == 0xFF || h[3] != 0x3B) goto fail;                   /* version 1, a count, a table of datarel sdata4 pairs */
+    {
+        int64_t ehf, count; size_t s1, s2;
+        if (!read_enc(h + 4, fend, h[1], hdr_vaddr + 4, &ehf, &s1) || !read_enc(h + 4 + s1, fend, h[2], 0, &count, &s2)) goto fail;
+        const uint8_t *tbl = h + 4 + s1 + s2;
+        if (count <= 0 || tbl + (size_t)count * 8 > fend) { why = "the FDE table does not fit the file"; goto fail; }
+        r = malloc((size_t)count * sizeof(*r));
+        size_t n = 0;
+        uint64_t last_cie = (uint64_t)-1; uint8_t last_enc = 0;
+        for (int64_t i = 0; i < count; i++) {
+            int32_t start_rel, fde_rel;
+            memcpy(&start_rel, tbl + i * 8, 4); memcpy(&fde_rel, tbl + i * 8 + 4, 4);
+            uint64_t fde_vaddr = hdr_vaddr + (uint64_t)(int64_t)fde_rel;
+            size_t fde_off = (size_t)-1;
+            for (unsigned q = 0; q < phnum; q++)
+                if (phs[q].p_type == PT_LOAD_ && fde_vaddr >= phs[q].p_vaddr && fde_vaddr < phs[q].p_vaddr + phs[q].p_filesz) { fde_off = (size_t)(phs[q].p_offset + (fde_vaddr - phs[q].p_vaddr)); break; }
+            if (fde_off == (size_t)-1 || fde_off + 12 > flen) { why = "an FDE is outside the file"; goto fail; }
+            const uint8_t *fde = file + fde_off;
+            uint32_t len, cie_ptr; memcpy(&len, fde, 4); memcpy(&cie_ptr, fde + 4, 4);
+            if (len == 0 || len == 0xFFFFFFFFu || fde_off + 4 + len > flen || cie_ptr == 0 || fde_off + 4 < cie_ptr) { why = "an FDE record is malformed"; goto fail; }
+            size_t cie_off = fde_off + 4 - cie_ptr;
+            if (cie_off != last_cie) {
+                if (!cie_fde_encoding(file + cie_off, fend, &last_enc)) { why = "a CIE record cannot be read"; goto fail; }
+                last_cie = cie_off;
+            }
+            int64_t pc_begin, range; size_t sz1, sz2;
+            const uint8_t *fld = fde + 8;
+            if (!read_enc(fld, fde + 4 + len, last_enc, fde_vaddr + 8, &pc_begin, &sz1)) { why = "an FDE address encoding is not supported"; goto fail; }
+            if (!read_enc(fld + sz1, fde + 4 + len, (uint8_t)(last_enc & 0x0F), 0, &range, &sz2)) { why = "an FDE range encoding is not supported"; goto fail; }
+            r[n].s = (uint64_t)pc_begin; r[n].e = (uint64_t)pc_begin + (uint64_t)range; n++;
+        }
+        qsort(r, n, sizeof(*r), cmp_range);
+        L->fde_start = malloc(n * sizeof(uint64_t)); L->fde_end = malloc(n * sizeof(uint64_t));
+        for (size_t i = 0; i < n; i++) { L->fde_start[i] = r[i].s; L->fde_end[i] = r[i].e; }
+        L->nfde = n;
+        free(r);
+        return;
+    }
+fail:
+    if (G.verbosity >= 1) tl_log_line("ld:   %s: unwind tables not used (%s)", L->name, why);
+    free(r);
+}
+
+/*
+ * Which words of an executable range are data. A word inside a function the unwind tables know of is code, always. Elsewhere (a library built without
+ * unwind tables has long stretches of code there, as well as the constant tables assembly files keep in .text) it is data when it lies in a cluster
+ * of words that no instruction can have: a table of 32-bit constants is a quarter unallocated encodings, so any 17 words of it hold three or more such
+ * words, while compiled code holds none. A word within 8 of such a cluster is counted in it, which takes in the edges of the table. Returns a bitmap, one bit
+ * per word, or NULL when no word is data.
+ */
+static bool plausible_word(uint32_t w)
+{
+    if ((w >> 16) == 0) return true;                 /* udf: the zero padding between functions, and traps */
+    unsigned g = (w >> 25) & 0xF;                    /* op0 of the A64 encoding space: 0000 reserved, 0001 and 0011 unallocated, 0010 SVE */
+    return g > 3;
+}
+
+static uint8_t *build_data_map(const tl_lib *L, const uint32_t *w, size_t n, uint64_t vstart, size_t *n_data)
+{
+    *n_data = 0;
+    if (n < 32) return NULL;
+    uint8_t *bad = calloc((n + 7) / 8, 1), *hot = calloc((n + 7) / 8, 1), *data = calloc((n + 7) / 8, 1);
+    size_t j = 0; uint64_t max_end = 0;
+#define BIT(m, i) (((m)[(i) >> 3] >> ((i) & 7)) & 1)
+#define SETBIT(m, i) ((m)[(i) >> 3] |= (uint8_t)(1u << ((i) & 7)))
+    for (size_t i = 0; i < n; i++) {                 /* words that are neither inside a function nor an instruction */
+        uint64_t a = vstart + (uint64_t)i * 4;
+        while (j < L->nfde && L->fde_start[j] <= a) { if (L->fde_end[j] > max_end) max_end = L->fde_end[j]; j++; }
+        if (a < max_end) continue;
+        if (!plausible_word(w[i])) SETBIT(bad, i);
+    }
+    int sum = 0;                                     /* the window of 17 words around i */
+    for (size_t i = 0; i < 8 && i < n; i++) sum += BIT(bad, i);
+    for (size_t i = 0; i < n; i++) {
+        if (i + 8 < n) sum += BIT(bad, i + 8);
+        if (i >= 9) sum -= BIT(bad, i - 9);
+        if (sum >= 3 && BIT(bad, i)) SETBIT(hot, i);
+    }
+    /* A table is the run of words between the first and last such word, as long as they come within 64 of each other (in a table of constants three
+     * in four words are fine on their own, but a gap of 64 without a bad one has odds of one in 20 million); and 32 words either side, which is as far
+     * as the first words of a table can be from its first bad one with any likelihood. */
+    long last = -1;
+    for (size_t i = 0; i < n; i++) {
+        if (!BIT(hot, i)) continue;
+        size_t from = (last >= 0 && (long)i - last <= 64) ? (size_t)last : (i >= 32 ? i - 32 : 0);
+        for (size_t k = from; k <= i; k++) SETBIT(data, k);
+        for (size_t k = i + 1; k <= i + 32 && k < n; k++) SETBIT(data, k);
+        last = (long)i;
+    }
+    /* function bodies are never clusters of data, whatever sits beside them; and the words a PC-relative load reads are data wherever they are */
+    j = 0; max_end = 0;
+    uint8_t *incode = hot;                       /* reused: the cluster test is done with it */
+    memset(incode, 0, (n + 7) / 8);
+    for (size_t i = 0; i < n; i++) {
+        uint64_t a = vstart + (uint64_t)i * 4;
+        while (j < L->nfde && L->fde_start[j] <= a) { if (L->fde_end[j] > max_end) max_end = L->fde_end[j]; j++; }
+        if (a < max_end) { SETBIT(incode, i); data[i >> 3] &= (uint8_t)~(1u << (i & 7)); }
+    }
+    for (size_t i = 0; i < n; i++) {
+        uint32_t insn = w[i];
+        if ((insn & 0x3B000000u) != 0x18000000u) continue;                 /* ldr Rt, <literal> */
+        if (BIT(data, i) && !BIT(incode, i)) continue;                       /* a lookalike inside a table is not a load */
+        int64_t imm = (int64_t)((insn >> 5) & 0x7FFFFu); if (imm & 0x40000) imm -= 0x80000;
+        int64_t t = (int64_t)i + imm;
+        unsigned opc = insn >> 30, v = (insn >> 26) & 1;
+        unsigned nw = v ? (opc == 0 ? 1 : opc == 1 ? 2 : opc == 2 ? 4 : 0) : (opc == 1 ? 2 : opc == 3 ? 0 : 1);     /* words read: s/w and ldrsw 1, d/x 2, q 4; prfm none */
+        for (unsigned k = 0; k < nw; k++) if (t + k >= 0 && (size_t)(t + k) < n) SETBIT(data, (size_t)(t + k));
+    }
+    for (size_t i = 0; i < n; i++) if (BIT(data, i)) (*n_data)++;
+#undef BIT
+#undef SETBIT
+    free(bad); free(hot);
+    if (!*n_data) { free(data); return NULL; }
+    return data;
+}
+
 static tl_lib *map_library(const char *name, uint8_t *file, size_t flen)
 {
     if (G.nlibs >= MAX_LIBS) { tl_log_line("ld: too many libraries"); return NULL; }
@@ -1234,6 +1454,7 @@ static tl_lib *map_library(const char *name, uint8_t *file, size_t flen)
     snprintf(L->name, sizeof(L->name), "%s", name);
     L->rx = rx; L->rw = rw; L->base_vaddr = base_vaddr; L->npages = npages; L->pflags = flags;
     L->phdr = phs; L->phnum = eh->e_phnum;
+    load_unwind_ranges(L, file, flen, phs, eh->e_phnum);
     for (int r = 0; r < ncode; r++) { L->code[r].start = code[r].vaddr; L->code[r].end = code[r].vaddr + code[r].size; }
     L->ncode = ncode;
     L->stub_rx = rx + npages * PAGE; L->stub_rw = rw + npages * PAGE; L->stub_used = 16; L->stub_cap = nstub * PAGE; L->nstub = nstub;
@@ -1292,6 +1513,7 @@ static bool relocate(tl_lib *L)
         if (sv) tl_log_line("ld:   %s: %zu raw system-call sites rewritten", L->name, sv);
         if (L->n_x18 || L->n_x18_failed) tl_log_line("ld:   %s: %zu instructions using x18 rewritten for the virtual register%s", L->name, L->n_x18,
                                                      L->n_x18_failed ? " (and some that could not be)" : "");
+        if (L->n_x18_data) tl_log_line("ld:   %s: %zu words that look like x18 instructions left alone: they are constants outside every function", L->name, L->n_x18_data);
     }
     return true;
 }

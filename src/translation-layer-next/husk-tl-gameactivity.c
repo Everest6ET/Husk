@@ -13,6 +13,7 @@
 #include "husk-tl-bionic.h"
 #include "husk-tl-dexindex.h"
 #include "husk-tl-egl.h"
+#include "husk-tl-gamepad.h"
 #include "husk-tl-jni.h"
 #include "husk-tl-ld.h"
 #include "husk-tl-xmem.h"
@@ -46,6 +47,8 @@ static void load_library(const char *name)
     tl_jni_call(tl_jni_class_object("java/lang/System"), "loadLibrary", "(Ljava/lang/String;)V", &a);
 }
 
+static void register_pad_sink(void);
+
 bool tl_ga_start(const tl_ga_config *cfg)
 {
     G.cfg = *cfg;
@@ -70,6 +73,7 @@ bool tl_ga_start(const tl_ga_config *cfg)
     tl_mc_hle_install(cfg->package_name, cfg->apk_path, cfg->data_dir, cfg->width, cfg->height);
     tl_security_install();
     tl_fmod_install();
+    register_pad_sink();
 
     G.activity = tl_jni_new_object(tl_jni_class(CLS_MAIN));
     tl_hle_set_activity(G.activity);
@@ -226,7 +230,7 @@ bool tl_ga_run(void)
 
 extern jobj *tl_input_motion_event(int action, int count, const int *ids, const float *xs, const float *ys, int64_t down_ms, int64_t event_ms);
 
-typedef struct { jobj *ev; int pointers, action; int64_t down_ms, event_ms; } touch_job;
+typedef struct { jobj *ev; int pointers, action, device, source; int64_t down_ms, event_ms; } touch_job;
 
 /* GameActivity.onTouchEventNative: the Java side hands over the event with its header fields already read out. The arguments past the
  * eighth go on the stack, one eight-byte slot each on the guest's ABI, so they are declared eight bytes wide here. */
@@ -238,7 +242,7 @@ static void touch_run(void *arg)
                                 uint64_t action_button, uint64_t button_state, uint64_t classification, uint64_t edge_flags,
                                 float precision_x, float precision_y);
     touch_fn fn = (touch_fn)GA_NATIVE("onTouchEventNative", "(JLandroid/view/MotionEvent;IIIIIJJIIIIIIFF)Z");
-    if (fn && G.handle) fn(tl_jni_env(), G.activity, G.handle, t->ev, t->pointers, 0, 0, 0x1002 /* SOURCE_TOUCHSCREEN */, (uint64_t)t->action,
+    if (fn && G.handle) fn(tl_jni_env(), G.activity, G.handle, t->ev, t->pointers, 0, t->device, t->source, (uint64_t)t->action,
                            t->event_ms, t->down_ms, 0, 0, 0, 0, 0, 0, 1.0f, 1.0f);
     tl_jni_unref(t->ev);
     free(t);
@@ -272,7 +276,7 @@ void tl_ga_touch(int phase, int id, float x, float y)
     }
     touch_job *t = calloc(1, sizeof(*t));
     t->ev = tl_input_motion_event(action, T.n, T.ids, T.x, T.y, T.down_ms, now);
-    t->pointers = T.n; t->action = action; t->down_ms = T.down_ms; t->event_ms = now;
+    t->pointers = T.n; t->action = action; t->device = 0; t->source = 0x1002 /* SOURCE_TOUCHSCREEN */; t->down_ms = T.down_ms; t->event_ms = now;
     /* An ended touch leaves the set after the event that reports it. */
     if (phase == 2 && idx >= 0) {
         float lx[10], ly[10]; int li[10];
@@ -285,6 +289,43 @@ void tl_ga_touch(int phase, int id, float x, float y)
     }
     pthread_mutex_unlock(&T.lock);
     tl_ga_post(touch_run, t);
+}
+
+/* ------------------------------------------------------------- controller */
+
+typedef struct { jobj *ev; bool down; } key_job;
+
+/* GameActivity.onKeyDownNative / onKeyUpNative(handle, KeyEvent): a controller's button, on the UI thread like every input. */
+static void key_run(void *arg)
+{
+    key_job *k = arg;
+    typedef uint8_t (*key_fn)(void *env, void *self, int64_t h, void *ev);
+    key_fn fn = k->down ? (key_fn)GA_NATIVE("onKeyDownNative", "(JLandroid/view/KeyEvent;)Z") : (key_fn)GA_NATIVE("onKeyUpNative", "(JLandroid/view/KeyEvent;)Z");
+    if (fn && G.handle) fn(tl_jni_env(), G.activity, G.handle, k->ev);
+    tl_jni_unref(k->ev);
+    free(k);
+}
+
+static void pad_key(jobj *ev, int device, int action, int keycode, int64_t down_ms, int64_t event_ms)
+{
+    (void)device; (void)keycode; (void)down_ms; (void)event_ms;
+    key_job *k = calloc(1, sizeof(*k));
+    k->ev = ev; k->down = action == 0;
+    tl_ga_post(key_run, k);
+}
+
+/* A controller's sticks arrive as a touch-event call whose source is a joystick: the game reads the axes off the event. */
+static void pad_motion(jobj *ev, int device, int source, int64_t down_ms, int64_t event_ms)
+{
+    touch_job *t = calloc(1, sizeof(*t));
+    t->ev = ev; t->pointers = 1; t->action = 2 /* ACTION_MOVE */; t->device = device; t->source = source; t->down_ms = down_ms; t->event_ms = event_ms;
+    tl_ga_post(touch_run, t);
+}
+
+static void register_pad_sink(void)
+{
+    static const tl_pad_sink sink = { pad_key, pad_motion };
+    tl_pad_set_sink(&sink);
 }
 /* Leaving the screen is Activity.onPause/onStop with the focus gone; coming back is onStart/onResume with it returned. The game stops
  * updating and drawing on the pause, which is what keeps it off the GPU while the app is in the background. */

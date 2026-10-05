@@ -457,6 +457,7 @@ struct TLCocosAttemptView: View {
     @AppStorage("husk.tl.unity.showLog") private var showLogSetting = false
     @AppStorage(TranslationLayer.devInfoKey) private var devInfo = false
     @State private var stats = "starting"
+    @ObservedObject private var pads = HuskGamepads.shared
     private var showLog: Bool { get { showLogSetting && devInfo } nonmutating set { showLogSetting = newValue } }
 
     /// Geometry Dash and the like are cocos2d-x; Minecraft is built on GameActivity. Both are landscape.
@@ -515,6 +516,10 @@ struct TLCocosAttemptView: View {
             Text(model.state == Int32(HUSK_UNITY_RUNNING) ? app.label : model.statusText)
                 .font(.system(size: 12, weight: .medium)).foregroundStyle(.white.opacity(0.85)).lineLimit(1)
             Spacer()
+            if !pads.names.isEmpty {
+                Label(pads.names.count == 1 ? pads.names[0] : "\(pads.names.count) controllers", systemImage: "gamecontroller.fill")
+                    .font(.system(size: 11, weight: .medium)).foregroundStyle(.white.opacity(0.7)).lineLimit(1)
+            }
             if model.state == Int32(HUSK_UNITY_RUNNING) {
                 Text(stats).font(.technical(11)).foregroundStyle(.white.opacity(0.7)).lineLimit(1)
             }

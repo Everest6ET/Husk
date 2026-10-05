@@ -36,7 +36,7 @@ static void put_message(tl_http_response *out, int error, NSString *text)
     snprintf(out->message, sizeof(out->message), "%s", text.UTF8String ?: "");
 }
 
-bool tl_http_perform(const tl_http_request *req, tl_http_response *out)
+static bool perform_once(const tl_http_request *req, tl_http_response *out)
 {
     memset(out, 0, sizeof(*out));
     @autoreleasepool {
@@ -90,6 +90,37 @@ bool tl_http_perform(const tl_http_request *req, tl_http_response *out)
         if (data.length) { out->body = malloc(data.length); memcpy(out->body, data.bytes, data.length); out->body_len = data.length; }
         return true;
     }
+}
+
+/* 301/302/303 turn a request into a GET without a body; 307/308 repeat it as it was. */
+bool tl_http_perform(const tl_http_request *req, tl_http_response *out)
+{
+    tl_http_request cur = *req;
+    char *owned_url = NULL, *owned_method = NULL;
+    bool ok = false;
+    for (int hops = 0; ; hops++) {
+        if (hops) tl_http_response_free(out);            /* the answer to the redirect it is about to follow */
+        ok = perform_once(&cur, out);
+        if (!ok || !req->follow_redirects || hops >= 10) break;
+        int st = out->status;
+        if (st != 301 && st != 302 && st != 303 && st != 307 && st != 308) break;
+        const char *location = NULL;
+        for (int i = 1; i < out->nheaders; i++) if (!strcasecmp(out->header_names[i], "location")) location = out->header_values[i];
+        if (!location) break;
+        @autoreleasepool {
+            NSURL *base = [NSURL URLWithString:@(cur.url)];
+            NSURL *next = [NSURL URLWithString:@(location) relativeToURL:base].absoluteURL;
+            if (!next) break;
+            free(owned_url); owned_url = strdup(next.absoluteString.UTF8String);
+            cur.url = owned_url;
+        }
+        if (st != 307 && st != 308) {
+            if (strcasecmp(cur.method ? cur.method : "GET", "HEAD")) { free(owned_method); owned_method = strdup("GET"); cur.method = owned_method; }
+            cur.body = NULL; cur.body_len = 0;
+        }
+    }
+    free(owned_url); free(owned_method);
+    return ok;
 }
 
 void tl_http_response_free(tl_http_response *r)

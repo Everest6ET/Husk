@@ -168,7 +168,8 @@ static int b_open(const char *path, int flags, unsigned mode)
     return fd;
 }
 static int b___open_2(const char *path, int flags) { return b_open(path, flags, 0); }
-static int b_close(int fd) { TL_ERRNO_BEGIN(); int r = close(fd); TL_ERRNO_END(); return r; }
+static bool net_trace_fd(int fd);
+static int b_close(int fd) { bool sock = net_trace_fd(fd); TL_ERRNO_BEGIN(); int r = close(fd); TL_ERRNO_END(); if (sock) tl_log_line("net: close(fd %d)", fd); return r; }
 static bool net_trace_fd(int fd)
 {
     static int on = -1;
@@ -181,6 +182,7 @@ static long b_read(int fd, void *p, size_t n)
 {
     TL_ERRNO_BEGIN(); long r = read(fd, p, n); int e = errno; TL_ERRNO_END();
     if (net_trace_fd(fd)) tl_log_line("net: read(fd %d, %zu) -> %ld errno %d", fd, n, r, r < 0 ? e : 0);
+    { static int tr = -1, said; if (tr < 0) tr = getenv("TL_FILE_TRACE") ? 1 : 0; if (tr && n == 32 && said++ < 20) tl_log_line("file: read(fd %d, 32) -> %ld errno %d", fd, r, r < 0 ? e : 0); }
     return r;
 }
 static long b___read_chk(int fd, void *p, size_t n, size_t bufsz)
@@ -211,7 +213,14 @@ static int b_flock(int fd, int op) { TL_ERRNO_BEGIN(); int r = flock(fd, op); TL
 PATH1(int, unlink, unlink)
 PATH1(int, rmdir, rmdir)
 static int b_mkdir(const char *p, unsigned mode) { char b[1024]; TL_ERRNO_BEGIN(); int r = mkdir(tl_path_resolve(p, b, sizeof(b)), (mode_t)mode); TL_ERRNO_END(); return r; }
-static int b_access(const char *p, int m) { char b[1024]; TL_ERRNO_BEGIN(); int r = access(tl_path_resolve(p, b, sizeof(b)), m); TL_ERRNO_END(); return r; }
+/* TL_FILE_TRACE also says what is asked of the file system without opening anything: which paths a game probes for, and whether they are there. */
+static void ftrace(const char *what, const char *path, int r, int e)
+{
+    static int tr = -1;
+    if (tr < 0) tr = getenv("TL_FILE_TRACE") ? 1 : 0;
+    if (tr) tl_log_line("file: %s(%s) -> %d%s", what, path ? path : "(null)", r, r < 0 ? (e == ENOENT ? " ENOENT" : " error") : "");
+}
+static int b_access(const char *p, int m) { char b[1024]; TL_ERRNO_BEGIN(); int r = access(tl_path_resolve(p, b, sizeof(b)), m); int e = errno; TL_ERRNO_END(); ftrace("access", p, r, e); return r; }
 static int b_chmod(const char *p, unsigned m) { char b[1024]; TL_ERRNO_BEGIN(); int r = chmod(tl_path_resolve(p, b, sizeof(b)), (mode_t)m); TL_ERRNO_END(); return r; }
 static int b_fchmod(int fd, unsigned m) { TL_ERRNO_BEGIN(); int r = fchmod(fd, (mode_t)m); TL_ERRNO_END(); return r; }
 static int b_link(const char *a, const char *b2) { char x[1024], y[1024]; TL_ERRNO_BEGIN(); int r = link(tl_path_resolve(a, x, sizeof(x)), tl_path_resolve(b2, y, sizeof(y))); TL_ERRNO_END(); return r; }
@@ -262,7 +271,8 @@ static int b_stat(const char *p, guest_stat *g)
 {
     char b[1024], c[8192]; struct stat s;
     if (synth_content(p, c, sizeof(c))) { memset(g, 0, sizeof(*g)); g->st_mode = S_IFREG | 0444; g->st_nlink = 1; return 0; }
-    TL_ERRNO_BEGIN(); int r = stat(tl_path_resolve(p, b, sizeof(b)), &s); TL_ERRNO_END();
+    TL_ERRNO_BEGIN(); int r = stat(tl_path_resolve(p, b, sizeof(b)), &s); int e = errno; TL_ERRNO_END();
+    ftrace("stat", p, r, e);
     if (r == 0) fill_stat(g, &s);
     return r;
 }
@@ -338,7 +348,8 @@ typedef struct { DIR *dir; guest_dirent ent; } guest_dir;
 static void *b_opendir(const char *p)
 {
     char b[1024];
-    TL_ERRNO_BEGIN(); DIR *d = opendir(tl_path_resolve(p, b, sizeof(b))); TL_ERRNO_END();
+    TL_ERRNO_BEGIN(); DIR *d = opendir(tl_path_resolve(p, b, sizeof(b))); int e = errno; TL_ERRNO_END();
+    ftrace("opendir", p, d ? 0 : -1, e);
     if (!d) return NULL;
     guest_dir *g = calloc(1, sizeof(*g));
     g->dir = d;
@@ -787,17 +798,40 @@ static long linux_syscall_impl(long a0, long a1, long a2, long a3, long a4, long
 
 /* ------------------------------------------------------- poll, select, etc. */
 
+/*
+ * Apple's poll() does not work on character devices: asked about /dev/urandom it answers POLLNVAL (invalid), where Linux says "readable".
+ * OpenSSL seeds its random generator by polling that device before reading it, so it never read anything and refused to make a TLS
+ * connection ("PRNG not seeded"). A descriptor that is valid but that poll() refuses is asked again through select(), which does handle them.
+ */
+static int poll_devices_via_select(struct pollfd *fds, unsigned long n, int r)
+{
+    for (unsigned long i = 0; i < n; i++) {
+        if (!(fds[i].revents & POLLNVAL) || fcntl(fds[i].fd, F_GETFD) < 0 || fds[i].fd >= FD_SETSIZE) continue;
+        fd_set rs, ws; FD_ZERO(&rs); FD_ZERO(&ws);
+        if (fds[i].events & POLLIN) FD_SET(fds[i].fd, &rs);
+        if (fds[i].events & POLLOUT) FD_SET(fds[i].fd, &ws);
+        struct timeval zero = { 0, 0 };
+        int x = select(fds[i].fd + 1, &rs, &ws, NULL, &zero);
+        short rev = 0;
+        if (x > 0) { if (FD_ISSET(fds[i].fd, &rs)) rev |= POLLIN; if (FD_ISSET(fds[i].fd, &ws)) rev |= POLLOUT; }
+        fds[i].revents = rev;
+        if (!rev) r--;
+    }
+    return r;
+}
 static int b_poll(struct pollfd *fds, unsigned long n, int timeout)
 {
     TL_ERRNO_BEGIN(); int r = poll(fds, (nfds_t)n, timeout); TL_ERRNO_END();
+    if (r > 0) r = poll_devices_via_select(fds, n, r);
     for (unsigned long i = 0; i < n && i < 4; i++)
         if (net_trace_fd(fds[i].fd)) { tl_log_line("net: poll(%lu fds, fd[%lu] %d ev %#x, timeout %d) -> %d rev %#x", n, i, fds[i].fd, fds[i].events, timeout, r, r > 0 ? fds[i].revents : 0); break; }
     return r;
 }
 static int b_select(int n, fd_set *r, fd_set *w, fd_set *e, struct timeval *tv)
 {
-    TL_ERRNO_BEGIN(); int x = select(n, r, w, e, tv); TL_ERRNO_END();
+    TL_ERRNO_BEGIN(); int x = select(n, r, w, e, tv); int er = errno; TL_ERRNO_END();
     if (net_trace_fd(n - 1)) tl_log_line("net: select(%d, %s%s) -> %d", n, r ? "r" : "", w ? "w" : "", x);
+    { static int tr = -1, said; if (tr < 0) tr = getenv("TL_FILE_TRACE") ? 1 : 0; if (tr && said++ < 40) tl_log_line("file: select(%d, %s%s%s, timeout %ldus) -> %d errno %d", n, r ? "r" : "", w ? "w" : "", e ? "e" : "", tv ? (long)tv->tv_sec * 1000000 + tv->tv_usec : -1L, x, x < 0 ? er : 0); }
     return x;
 }
 static void b___FD_SET_chk(int fd, uint64_t *set, size_t size)

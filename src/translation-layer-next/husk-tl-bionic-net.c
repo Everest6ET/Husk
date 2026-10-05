@@ -287,8 +287,10 @@ static int b_getpeername(int fd, void *g, socklen_t *glen)
     struct sockaddr_storage s; socklen_t sl = sizeof(s);
     TL_ERRNO_BEGIN();
     int r = getpeername(fd, (struct sockaddr *)&s, &sl);
+    int e = errno;
     if (r == 0) *glen = sa_from_darwin((struct sockaddr *)&s, g, *glen);
     TL_ERRNO_END();
+    NTRACE("getpeername(fd %d) -> %d errno %d", fd, r, r < 0 ? e : 0);
     return r;
 }
 
@@ -331,8 +333,10 @@ static int b_getsockopt(int fd, int level, int name, void *val, socklen_t *len)
     if (!opt_to_darwin(level, name, &dl, &dn)) { tl_set_guest_errno(G_ENOPROTOOPT); return -1; }
     TL_ERRNO_BEGIN();
     int r = getsockopt(fd, dl, dn, val, len);
+    int e = errno;
     if (r == 0 && level == G_SOL_SOCKET && name == 4 && *len >= sizeof(int)) *(int *)val = tl_errno_to_guest(*(int *)val);   /* SO_ERROR holds an errno */
     TL_ERRNO_END();
+    NTRACE("getsockopt(fd %d, level %d, opt %d) -> %d errno %d value %d", fd, level, name, r, r < 0 ? e : 0, r == 0 && val && *len >= sizeof(int) ? *(int *)val : -1);
     return r;
 }
 

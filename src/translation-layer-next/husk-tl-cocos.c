@@ -13,6 +13,7 @@
 #include "husk-tl-bionic.h"
 #include "husk-tl-dexindex.h"
 #include "husk-tl-egl.h"
+#include "husk-tl-gamepad.h"
 #include "husk-tl-jni.h"
 #include "husk-tl-ld.h"
 
@@ -166,6 +167,25 @@ void tl_cocos_touch(int phase, int id, float x, float y)
 void tl_cocos_insert_text(const char *utf8) { if (utf8) enqueue((event){ .kind = EV_INSERT, .text = strdup(utf8) }); }
 void tl_cocos_delete_backward(void) { enqueue((event){ .kind = EV_DELETE }); }
 void tl_cocos_key_down(int keycode) { enqueue((event){ .kind = EV_KEY, .id = keycode }); }
+/*
+ * A controller in a cocos2d-x game (Geometry Dash plays by touch): its B button is Back, the one key the game listens for.
+ * The rest of the controller has nothing to drive.
+ */
+static void pad_key(jobj *ev, int device, int action, int keycode, int64_t down_ms, int64_t event_ms)
+{
+    (void)device; (void)down_ms; (void)event_ms;
+    if (action == 0 && keycode == 97 /* BUTTON_B */) tl_cocos_key_down(4 /* KEYCODE_BACK */);
+    tl_jni_unref(ev);
+}
+static void pad_motion(jobj *ev, int device, int source, int64_t down_ms, int64_t event_ms)
+{ (void)device; (void)source; (void)down_ms; (void)event_ms; tl_jni_unref(ev); }
+
+void tl_cocos_register_pad_sink(void)
+{
+    static const tl_pad_sink sink = { pad_key, pad_motion };
+    tl_pad_set_sink(&sink);
+}
+
 void tl_cocos_request_content_text(void (*cb)(const char *utf8)) { if (cb) enqueue((event){ .kind = EV_CONTENT, .cb = cb }); }
 
 static void drain_events(void)

@@ -202,11 +202,154 @@ static const tl_jhle k_net[] = {
     { NULL, NULL, NULL, NULL }
 };
 
+
+/* ------------------------------------------------- Xbox's HttpClientRequest */
+
+/*
+ * Minecraft's web calls (Xbox services, the store) go through Microsoft's libHttpClient, whose Android side is a Java class over OkHttp.
+ * The library builds a com.xbox.httpclient.HttpClientRequest, fills it in, calls doRequestAsync(call) and waits to be told, through
+ * native methods on that class, how it went: OnRequestCompleted(call, response) -- after which it asks the response for its status, its headers
+ * and (getResponseBodyBytes) its body, which the Java streams back through another native -- or OnRequestFailed. Here the request goes to the
+ * host's network stack. It is carried out on the thread that asked, which is one of the library's workers, so the guest code that reports the
+ * outcome runs where it expects to.
+ */
+#include "husk-tl-ld.h"
+
+#define XREQ "com/xbox/httpclient/HttpClientRequest"
+#define XRES "com/xbox/httpclient/HttpClientResponse"
+#define XIN  "com/xbox/httpclient/HttpClientRequestBody$NativeInputStream"
+#define XOUT "com/xbox/httpclient/HttpClientResponse$NativeOutputStream"
+
+static void *x_native(const char *cls, const char *name, const char *sig, const char *mangled)
+{
+    void *fn = tl_jni_native(cls, name, sig);
+    if (!fn) { tl_lib *lib = tl_ld_find_lib("libHttpClient.Android.so"); if (lib) fn = tl_ld_sym(lib, mangled); }
+    if (!fn) tl_log_line("http: native %s.%s%s is not provided by libHttpClient", cls, name, sig);
+    return fn;
+}
+
+typedef struct { char *url, *method, *ctype; char **hn, **hv; int nh, cap; int64_t call, clen; } xreq;
+typedef struct { int64_t call; tl_http_response rs; } xres;
+
+static xreq *XQ(jobj *o) { if (!o->native) o->native = calloc(1, sizeof(xreq)); return o->native; }
+
+static void XReq_init(tl_jcall *c) { (void)XQ(c->self); }
+static void XReq_url(tl_jcall *c) { xreq *q = XQ(c->self); free(q->url); q->url = strdup(S(c->args[0].l)); }
+static void XReq_header(tl_jcall *c)
+{
+    xreq *q = XQ(c->self);
+    if (q->nh == q->cap) { q->cap = q->cap ? q->cap * 2 : 8; q->hn = realloc(q->hn, (size_t)q->cap * sizeof(char *)); q->hv = realloc(q->hv, (size_t)q->cap * sizeof(char *)); }
+    q->hn[q->nh] = strdup(S(c->args[0].l)); q->hv[q->nh] = strdup(S(c->args[1].l)); q->nh++;
+}
+static void XReq_methodAndBody(tl_jcall *c)
+{
+    /* (String method, long call, String contentType, long contentLength) */
+    xreq *q = XQ(c->self);
+    free(q->method); q->method = strdup(S(c->args[0].l));
+    q->call = c->args[1].j;
+    free(q->ctype); q->ctype = c->args[2].l ? strdup(S(c->args[2].l)) : NULL;
+    q->clen = c->args[3].j;
+}
+
+static void XReq_do(tl_jcall *c)
+{
+    xreq *q = XQ(c->self);
+    int64_t call = c->args[0].j;
+    void *env = tl_jni_env(), *self = c->self;
+    typedef void (*done_fn)(void *env, void *self, int64_t call, void *response);
+    typedef void (*fail_fn)(void *env, void *self, int64_t call, void *cls, void *trace, void *net, uint8_t unknown_host);
+    typedef int (*read_fn)(void *env, void *stream, int64_t call, int64_t offset, void *buf, int64_t buf_off, int64_t len);
+    done_fn done = x_native(XREQ, "OnRequestCompleted", "(JLcom/xbox/httpclient/HttpClientResponse;)V", "Java_com_xbox_httpclient_HttpClientRequest_OnRequestCompleted");
+    fail_fn fail = x_native(XREQ, "OnRequestFailed", "(JLjava/lang/String;Ljava/lang/String;Ljava/lang/String;Z)V", "Java_com_xbox_httpclient_HttpClientRequest_OnRequestFailed");
+    if (!done || !fail) return;
+
+    /* the body, which the library holds and hands over in pieces on request */
+    uint8_t *body = NULL; size_t body_len = 0;
+    if (q->clen > 0) {
+        read_fn rd = x_native(XIN, "nativeRead", "(JJ[BJJ)I", "Java_com_xbox_httpclient_HttpClientRequestBody_00024NativeInputStream_nativeRead");
+        if (rd) {
+            const int64_t CH = 64 * 1024;
+            jobj *buf = tl_jni_new_prim_array('B', (uint32_t)CH);
+            jobj *stream = tl_jni_new_object(tl_jni_class(XIN));
+            for (;;) {
+                int n = rd(env, stream, call, (int64_t)body_len, buf, 0, CH);
+                if (n <= 0) break;
+                body = realloc(body, body_len + (size_t)n);
+                memcpy(body + body_len, buf->arr.data, (size_t)n);
+                body_len += (size_t)n;
+            }
+            tl_jni_unref(buf); tl_jni_unref(stream);
+        }
+    }
+
+    tl_http_request rq = { .url = q->url, .method = q->method, .nheaders = q->nh, .header_names = (const char *const *)q->hn,
+                           .header_values = (const char *const *)q->hv, .body = body, .body_len = body_len, .timeout_ms = 60000, .follow_redirects = true };
+    xres *res = calloc(1, sizeof(*res));
+    res->call = call;
+    tl_log_line("http: %s %s (%zu bytes sent)", q->method ? q->method : "GET", q->url ? q->url : "", body_len);
+    if (!tl_http_perform(&rq, &res->rs)) {
+        tl_log_line("http: %s failed: %s", q->url ? q->url : "", res->rs.message);
+        const char *cls = res->rs.error == TL_HTTP_UNKNOWN_HOST ? "java.net.UnknownHostException" : res->rs.error == TL_HTTP_TIMEOUT ? "java.net.SocketTimeoutException"
+                        : (res->rs.error == TL_HTTP_SSL || res->rs.error == TL_HTTP_SSL_UNTRUSTED) ? "javax.net.ssl.SSLHandshakeException" : "java.io.IOException";
+        jobj *a = tl_jni_new_string(cls), *b = tl_jni_new_string(res->rs.message), *n = tl_jni_new_string("Has active network: true");
+        fail(env, self, call, a, b, n, res->rs.error == TL_HTTP_UNKNOWN_HOST);
+        tl_jni_unref(a); tl_jni_unref(b); tl_jni_unref(n);
+        tl_http_response_free(&res->rs); free(res);
+    } else {
+        tl_log_line("http: %s -> %d (%zu bytes)", q->url ? q->url : "", res->rs.status, res->rs.body_len);
+        jobj *r = tl_jni_new_object(tl_jni_class(XRES));
+        r->native = res;
+        done(env, self, call, r);                 /* the library reads the response back, through the methods below */
+        tl_jni_unref(r);
+    }
+    free(body);
+}
+
+static xres *XR(const tl_jcall *c) { return c->self ? c->self->native : NULL; }
+static void XRes_code(tl_jcall *c) { const xres *r = XR(c); c->ret = vi(r ? r->rs.status : 0); }
+static void XRes_numHeaders(tl_jcall *c) { const xres *r = XR(c); c->ret = vi(r && r->rs.nheaders > 1 ? r->rs.nheaders - 1 : 0); }   /* the first is the status line */
+static void XRes_headerName(tl_jcall *c) { const xres *r = XR(c); int i = c->args[0].i + 1; c->ret = vl(r && i > 0 && i < r->rs.nheaders ? tl_jni_new_string(r->rs.header_names[i]) : NULL); }
+static void XRes_headerValue(tl_jcall *c) { const xres *r = XR(c); int i = c->args[0].i + 1; c->ret = vl(r && i > 0 && i < r->rs.nheaders ? tl_jni_new_string(r->rs.header_values[i]) : NULL); }
+static void XRes_body(tl_jcall *c)
+{
+    xres *r = XR(c);
+    typedef void (*write_fn)(void *env, void *stream, int64_t call, void *bytes, int off, int len);
+    write_fn wr = x_native(XOUT, "nativeWrite", "(J[BII)V", "Java_com_xbox_httpclient_HttpClientResponse_00024NativeOutputStream_nativeWrite");
+    if (!r || !wr) return;
+    void *env = tl_jni_env();
+    jobj *stream = tl_jni_new_object(tl_jni_class(XOUT));
+    const size_t CH = 64 * 1024;
+    jobj *buf = tl_jni_new_prim_array('B', (uint32_t)CH);
+    for (size_t off = 0; off < r->rs.body_len;) {
+        size_t n = r->rs.body_len - off < CH ? r->rs.body_len - off : CH;
+        memcpy(buf->arr.data, r->rs.body + off, n);
+        wr(env, stream, r->call, buf, 0, (int)n);
+        off += n;
+    }
+    tl_jni_unref(buf); tl_jni_unref(stream);
+    free(r->rs.body); r->rs.body = NULL; r->rs.body_len = 0;
+}
+
+static const tl_jhle k_xbox[] = {
+    M_(XREQ, "<init>", "(Landroid/content/Context;)V", XReq_init), M_(XREQ, "setHttpUrl", "(Ljava/lang/String;)V", XReq_url),
+    M_(XREQ, "setHttpHeader", "(Ljava/lang/String;Ljava/lang/String;)V", XReq_header),
+    M_(XREQ, "setHttpMethodAndBody", "(Ljava/lang/String;JLjava/lang/String;J)V", XReq_methodAndBody), M_(XREQ, "doRequestAsync", "(J)V", XReq_do),
+    M_(XRES, "getResponseCode", "()I", XRes_code), M_(XRES, "getNumHeaders", "()I", XRes_numHeaders),
+    M_(XRES, "getHeaderNameAtIndex", "(I)Ljava/lang/String;", XRes_headerName), M_(XRES, "getHeaderValueAtIndex", "(I)Ljava/lang/String;", XRes_headerValue),
+    M_(XRES, "getResponseBodyBytes", "()V", XRes_body),
+    M_("com/xbox/httpclient/NetworkObserver", "Initialize", "(Landroid/content/Context;)V", Noop), M_("com/xbox/httpclient/NetworkObserver", "Cleanup", "(Landroid/content/Context;)V", Noop),
+    { NULL, NULL, NULL, NULL }
+};
+
 void tl_http_install(void)
 {
     tl_jni_declare("android/net/NetworkInfo", "java/lang/Object"); tl_jni_declare("android/net/Network", "java/lang/Object");
     tl_jni_declare("android/net/NetworkCapabilities", "java/lang/Object");
     tl_jni_register_hle(k_net);
+    tl_jni_declare("com/xbox/httpclient/HttpClientRequest", "java/lang/Object"); tl_jni_declare("com/xbox/httpclient/HttpClientResponse", "java/lang/Object");
+    tl_jni_declare("com/xbox/httpclient/HttpClientRequestBody$NativeInputStream", "java/lang/Object"); tl_jni_declare("com/xbox/httpclient/HttpClientResponse$NativeOutputStream", "java/lang/Object");
+    tl_jni_declare("com/xbox/httpclient/NetworkObserver", "java/lang/Object");
+    tl_jni_register_hle(k_xbox);
     tl_jni_declare("java/util/HashMap", "java/lang/Object");
     tl_jni_declare(CLS, "java/lang/Object");
     tl_jni_register_hle(k_hle);

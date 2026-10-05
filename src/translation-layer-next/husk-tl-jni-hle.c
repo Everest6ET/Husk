@@ -420,7 +420,25 @@ static void SP_getBoolean(tl_jcall *c) { c->ret = vz(c->args[1].z); }
 static void SP_edit(tl_jcall *c) { c->ret = vl(make("android/content/SharedPreferences$Editor")); }
 static void Editor_self(tl_jcall *c) { c->ret = vl(tl_jni_ref(c->self)); }
 static void Editor_noop(tl_jcall *c) { (void)c; }
-static void Iterator_hasNext(tl_jcall *c) { c->ret = vz(0); }
+/* An iterator is empty unless it was made over a list (tl_jni_new_list_iterator). */
+typedef struct { jobj **items; uint32_t n, i; } list_iter;
+static void Iterator_hasNext(tl_jcall *c) { const list_iter *it = c->self ? c->self->native : NULL; c->ret = vz(it && it->i < it->n); }
+static void Iterator_next(tl_jcall *c)
+{
+    list_iter *it = c->self ? c->self->native : NULL;
+    if (!it || it->i >= it->n) { tl_jni_throw("java/util/NoSuchElementException", ""); c->ret = vl(NULL); return; }
+    c->ret = vl(tl_jni_ref(it->items[it->i++]));
+}
+jobj *tl_jni_new_list_iterator(jobj *const *items, uint32_t n)
+{
+    jobj *o = make("java/util/Iterator");
+    list_iter *it = calloc(1, sizeof(*it));
+    it->items = malloc((n ? n : 1) * sizeof(jobj *));
+    for (uint32_t i = 0; i < n; i++) it->items[i] = tl_jni_ref(items[i]);
+    it->n = n;
+    o->native = it;
+    return o;
+}
 
 
 /* ------------------------------------------------ strings and builders */
@@ -753,7 +771,7 @@ static const tl_jhle k_hle[] = {
     M("android/content/SharedPreferences$Editor", "putString", "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/SharedPreferences$Editor;", Editor_self),
     M("android/content/SharedPreferences$Editor", "putBoolean", "(Ljava/lang/String;Z)Landroid/content/SharedPreferences$Editor;", Editor_self),
     M("android/content/SharedPreferences$Editor", "apply", "()V", Editor_noop),
-    M("java/util/Iterator", "hasNext", "()Z", Iterator_hasNext),
+    M("java/util/Iterator", "hasNext", "()Z", Iterator_hasNext), M("java/util/Iterator", "next", "()Ljava/lang/Object;", Iterator_next),
     M("java/lang/String", "<init>", "()V", String_init_empty), M("java/lang/String", "<init>", "([B)V", String_init_bytes),
     M("java/lang/String", "<init>", "([BLjava/lang/String;)V", String_init_bytes), M("java/lang/String", "<init>", "([BII)V", String_init_bytes_range),
     M("java/lang/String", "<init>", "([BIILjava/lang/String;)V", String_init_bytes_range), M("java/lang/String", "<init>", "(Ljava/lang/String;)V", String_init_string),
