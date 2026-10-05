@@ -74,7 +74,7 @@ StikDebug's AGPL app:
 
 | Thing | License | Where |
 |---|---|---|
-| StikJIT 1.9.0 XCFramework, unmodified ([`StikDebug/StikJIT` tag `1.9.0`](https://github.com/StikDebug/StikJIT/tree/1.9.0), `StikJIT.xcframework.zip` SHA-256 `806664393770c68e75f2b6429955bfdd88cfaad09fec2ba70f8ed615ff90c060`) | MPL-2.0 | `src/app/Frameworks/`, embedded in the `HuskJITHelper` extension only |
+| StikJIT 1.9.0 XCFramework, unmodified ([`StikDebug/StikJIT` tag `1.9.0`](https://github.com/StikDebug/StikJIT/tree/1.9.0), `StikJIT.xcframework.zip` SHA-256 `806664393770c68e75f2b6429955bfdd88cfaad09fec2ba70f8ed615ff90c060`) | MPL-2.0 | `src/app/Frameworks/`, embedded in `Husk.app/Frameworks` and used only by the `HuskJITHelper` extension |
 | [idevice](https://github.com/jkcoxson/idevice), inside StikJIT and in `libhusk_rppairing.a` (0.1.68) | MIT | linked |
 | idevice's Rust dependencies, pinned by `src/rppairing-ios/Cargo.lock` | MIT, Apache-2.0, BSD-3-Clause or ISC | static in the app |
 | Husk's pairing wrapper (`src/rppairing-ios`) | GPL-2.0-or-later | static in the app |

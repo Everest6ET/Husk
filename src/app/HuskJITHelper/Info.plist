@@ -4,6 +4,8 @@
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>CFBundleDisplayName</key>
+	<string>Husk JIT Helper</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -18,13 +20,35 @@
 	<string>0.6.1</string>
 	<key>CFBundleVersion</key>
 	<string>9</string>
-	<!-- Must name the extension point Husk declares (JITBuiltIn.swift), which
-	     takes the app's bundle identifier. HUSK_BUNDLE_IDENTIFIER in project.yml
-	     keeps the two in step. -->
-	<key>EXAppExtensionAttributes</key>
+	<!-- A classic app extension, started by its own bundle identifier
+	     (JITBuiltIn.swift), as LiveContainer starts its LiveProcess. Nothing
+	     here names Husk's bundle identifier, so an install a sideloader has
+	     renamed still finds it. The extension point only has to exist and take
+	     a principal class; FALSEPREDICATE keeps it out of every share sheet. -->
+	<key>NSExtension</key>
 	<dict>
-		<key>EXExtensionPointIdentifier</key>
-		<string>$(HUSK_BUNDLE_IDENTIFIER).HuskJITHelper</string>
+		<key>NSExtensionAttributes</key>
+		<dict>
+			<key>NSExtensionActivationRule</key>
+			<string>FALSEPREDICATE</string>
+		</dict>
+		<key>NSExtensionPointIdentifier</key>
+		<string>com.apple.ar.viewer</string>
+		<key>NSExtensionPrincipalClass</key>
+		<string>HuskJITHelperHandler</string>
+		<key>NSExtensionContextClass</key>
+		<string>NSExtensionContext</string>
+		<key>NSExtensionContextHostClass</key>
+		<string>NSExtensionContext</string>
+	</dict>
+	<key>XPCService</key>
+	<dict>
+		<key>ServiceType</key>
+		<string>Application</string>
+		<key>_MultipleInstances</key>
+		<true/>
+		<key>_ProcessType</key>
+		<string>App</string>
 	</dict>
 </dict>
 </plist>

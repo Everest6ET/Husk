@@ -127,9 +127,9 @@ done
 
 # Built-in StikJIT's helper. Without it the app still installs and runs with
 # StikDebug, but its JIT setup would offer a method that can only fail.
-HELPER="$APP/Extensions/HuskJITHelper.appex"
-for f in "$HELPER/HuskJITHelper" "$HELPER/Frameworks/StikJIT.framework/StikJIT" \
-         "$HELPER/Frameworks/StikJIT.framework/Info.plist"; do
+for f in "$APP/PlugIns/HuskJITHelper.appex/HuskJITHelper" \
+         "$APP/Frameworks/StikJIT.framework/StikJIT" \
+         "$APP/Frameworks/StikJIT.framework/Info.plist"; do
     if [ ! -f "$f" ]; then
         echo "  MISSING  ${f#$APP/}" >&2
         rc=1
