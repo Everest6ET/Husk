@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import Foundation
 
-/// Codable messages shared by Husk and its iOS 26 JIT helper extension.
-/// Compiled into both targets.
+/// Codable messages shared by Husk and its JIT helper extension. Compiled into
+/// both targets. Each travels as JSON in an extension request's item
+/// (userInfo[itemKey]), to the helper and back.
 struct HuskJITRequest: Codable, Sendable {
+    static let itemKey = "husk-jit-request"
+
     enum Operation: String, Codable, Sendable {
         /// Check LocalDevVPN and download, mount and verify the Developer Disk Image.
         case prepare
@@ -34,6 +37,7 @@ struct HuskJITRequest: Codable, Sendable {
     }
 
     struct Response: Codable, Sendable {
+        static let itemKey = "husk-jit-response"
         let success: Bool
         let message: String
         let txmPresent: Bool?

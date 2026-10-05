@@ -1,28 +1,17 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-import ExtensionFoundation
 import Foundation
 import StikJIT
-import XPC
 
 /// The debugger half of Built-in StikJIT (docs/06-built-in-jit.md).
 ///
 /// A process cannot synchronously debug itself, so Husk starts this extension,
 /// sends it its PID, the pairing file and husk-jit.js, and StikJIT attaches over
 /// LocalDevVPN and services the script's trap requests until Husk detaches.
-private struct HuskJITMessageHandler: XPCPeerHandler {
-    private static let queue = DispatchQueue(label: "com.husk.app.jit-helper")
+private enum HuskJITWork {
+    /// One request at a time: enabling JIT holds this queue while the debugger is attached.
+    static let queue = DispatchQueue(label: "com.husk.app.jit-helper")
 
-    func handleIncomingRequest(_ message: XPCReceivedMessage) -> (any Encodable)? {
-        guard let request = try? message.decode(as: HuskJITRequest.self) else {
-            return HuskJITRequest.Response(success: false,
-                                           message: "The helper could not read Husk's request.",
-                                           txmPresent: nil)
-        }
-        // Enabling JIT holds this queue for as long as the debugger is attached.
-        return message.handoffReply(to: Self.queue) { message.reply(handle(request)) }
-    }
-
-    private func handle(_ request: HuskJITRequest) -> HuskJITRequest.Response {
+    static func handle(_ request: HuskJITRequest) -> HuskJITRequest.Response {
         let manager = FileManager.default
         let root = manager.urls(for: .libraryDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("StikJIT", isDirectory: true)
@@ -87,11 +76,26 @@ private struct HuskJITMessageHandler: XPCPeerHandler {
     }
 }
 
-@main
-struct HuskJITHelperExtension: AppExtension {
-    var configuration: some AppExtensionConfiguration {
-        ConnectionHandler(onSessionRequest: { request in
-            request.accept { _ in HuskJITMessageHandler() }
-        })
+/// NSExtensionPrincipalClass (Info.plist). The request arrives as JSON in the
+/// first input item; the response goes back as JSON in the item the request
+/// completes with. Enable completes only once Husk's script has detached, so
+/// the request, and this process, last as long as the debugger does.
+@objc(HuskJITHelperHandler)
+final class HuskJITHelperHandler: NSObject, NSExtensionRequestHandling {
+    func beginRequest(with context: NSExtensionContext) {
+        let info = (context.inputItems.first as? NSExtensionItem)?.userInfo
+        let data = info?[HuskJITRequest.itemKey] as? Data
+        HuskJITWork.queue.async {
+            let response: HuskJITRequest.Response
+            if let data, let request = try? JSONDecoder().decode(HuskJITRequest.self, from: data) {
+                response = HuskJITWork.handle(request)
+            } else {
+                response = .init(success: false, message: "Husk's JIT helper received no request.",
+                                 txmPresent: nil)
+            }
+            let item = NSExtensionItem()
+            item.userInfo = [HuskJITRequest.Response.itemKey: (try? JSONEncoder().encode(response)) ?? Data()]
+            context.completeRequest(returningItems: [item], completionHandler: nil)
+        }
     }
 }

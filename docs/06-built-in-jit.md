@@ -76,9 +76,13 @@ own helper process.
 ### The helper
 
 A process cannot synchronously debug itself, so StikJIT runs in
-`HuskJITHelper`, an iOS 26 ExtensionKit extension embedded at
-`Husk.app/Extensions/HuskJITHelper.appex`. Husk sends it its PID, the pairing
-file and `husk-jit.js` over XPC (`HuskJITMessages.swift`). The helper calls
+`HuskJITHelper`, an app extension embedded at
+`Husk.app/PlugIns/HuskJITHelper.appex`. It is a classic app extension on the
+`com.apple.ar.viewer` extension point, never offered anywhere, and Husk starts it
+through `NSExtension` by its bundle identifier, as LiveContainer starts its
+LiveProcess. Husk sends it its PID, the pairing file and `husk-jit.js` as JSON in
+the extension request (`HuskJITMessages.swift`). StikJIT.framework sits in
+`Husk.app/Frameworks`, where the helper loads it from. The helper calls
 StikJIT with `forceScript` and stays attached while the script services trap
 requests. Husk polls `CS_DEBUGGED`, then claims its JIT region exactly as after
 a StikDebug attach, and detaches; that detach is what ends the helper's request.
@@ -95,12 +99,17 @@ library's host tests.
 
 ## Signing and installation
 
-The app and `HuskJITHelper` must be signed together, and the sideloader must
-keep the embedded ExtensionKit extension. If it cannot, use StikDebug.
+The app, `HuskJITHelper` and StikJIT.framework must be signed together, and the
+sideloader must keep app extensions. If it cannot, use StikDebug.
+
+Sideloaders that sign with the user's own Apple ID (SideStore, AltStore, Plume,
+Impactor) append their team ID to the bundle identifiers. Husk reads the
+helper's identifier from `PlugIns/HuskJITHelper.appex/Info.plist` at run time,
+so that works. An earlier helper was an ExtensionKit extension, found through an
+extension point named after Husk's original identifier; renamed installs failed
+with "Failed to add observer".
 
 To build under another bundle identifier, set `HUSK_BUNDLE_IDENTIFIER` in
-`src/app/project.yml`. The app, the helper (`<id>.JITHelper`) and the helper's
-extension point (`<id>.HuskJITHelper`) all follow it; changing only
-`PRODUCT_BUNDLE_IDENTIFIER` leaves the helper unfindable.
+`src/app/project.yml`. The app and the helper (`<id>.JITHelper`) follow it.
 
 Licensing of the bundled pieces is in [01-licensing.md](01-licensing.md).

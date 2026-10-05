@@ -70,7 +70,6 @@
 		8E10E866080B28D4D397970A /* HuskGLView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F337AAF2A6860FCB03810AA6 /* HuskGLView.swift */; };
 		945DD86A7A210B74B2C7FF17 /* TLScreenView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66DDBC0AF7BE5742AA867515 /* TLScreenView.swift */; };
 		9883B80CE2F3C84E5D6E0A8F /* husk-tl-elf.c in Sources */ = {isa = PBXBuildFile; fileRef = D08FCD7F480D6E2F65F26636 /* husk-tl-elf.c */; };
-		9A5BAE8A8DB2E5490961C392 /* HuskJITHelper.appex in Embed ExtensionKit Extensions */ = {isa = PBXBuildFile; fileRef = C48A9F257449472675C4201A /* HuskJITHelper.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		9FA806201E1AF87FE7581742 /* husk-tl-jni-security.c in Sources */ = {isa = PBXBuildFile; fileRef = 85D8F83C8952092997CE071C /* husk-tl-jni-security.c */; };
 		AAF3739690794B605F5D7CAE /* husk-tl-dexindex.c in Sources */ = {isa = PBXBuildFile; fileRef = AA12F6AB59959C0162BB8928 /* husk-tl-dexindex.c */; };
 		AC5C07974C7A8658358A55C9 /* husk-tl-a64.c in Sources */ = {isa = PBXBuildFile; fileRef = 3ADCEA1477DA816D867C1EBB /* husk-tl-a64.c */; };
@@ -79,6 +78,7 @@
 		BA42565FACC0AAC10D8FEAF6 /* husk-tl-bionic-io.c in Sources */ = {isa = PBXBuildFile; fileRef = 7CC582FAC1F17C1C659C9D47 /* husk-tl-bionic-io.c */; };
 		BBA9636793435EF7679E62F1 /* HuskAudio.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14E50E2B9CCFF7B1FEF73608 /* HuskAudio.swift */; };
 		BC3BB676A454632D3686E110 /* husk-tl-shim.c in Sources */ = {isa = PBXBuildFile; fileRef = 08B65F9A6BAA4E2376A0CBD8 /* husk-tl-shim.c */; };
+		BCE050943992B8B07A7B70A9 /* HuskJITHelper.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = C48A9F257449472675C4201A /* HuskJITHelper.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		BEDEEECE3AEB59701665C0D3 /* StikJIT.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = BBCF8D04E0CEDAB3542C5271 /* StikJIT.xcframework */; };
 		C1A4C57DAA6BFD79AAE5FD88 /* JITBuiltIn.swift in Sources */ = {isa = PBXBuildFile; fileRef = 43C233A62FB57030C0818489 /* JITBuiltIn.swift */; };
 		C561B0A164BC213A2A56D9C9 /* husk-tl-zip.c in Sources */ = {isa = PBXBuildFile; fileRef = 9E133BDBB6CB711003066815 /* husk-tl-zip.c */; };
@@ -131,15 +131,15 @@
 			name = "Embed Frameworks";
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		684C4468A19E61E45D320D8A /* Embed ExtensionKit Extensions */ = {
+		669F9F78828E3A31EB56311E /* Embed Foundation Extensions */ = {
 			isa = PBXCopyFilesBuildPhase;
 			buildActionMask = 2147483647;
-			dstPath = "$(EXTENSIONS_FOLDER_PATH)";
-			dstSubfolderSpec = 16;
+			dstPath = "";
+			dstSubfolderSpec = 13;
 			files = (
-				9A5BAE8A8DB2E5490961C392 /* HuskJITHelper.appex in Embed ExtensionKit Extensions */,
+				BCE050943992B8B07A7B70A9 /* HuskJITHelper.appex in Embed Foundation Extensions */,
 			);
-			name = "Embed ExtensionKit Extensions";
+			name = "Embed Foundation Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXCopyFilesBuildPhase section */
@@ -243,7 +243,7 @@
 		BE31FE0E8BF0D132E6298CE9 /* cacert.pem */ = {isa = PBXFileReference; path = cacert.pem; sourceTree = "<group>"; };
 		C1F2A4FC567A4CCC74209DD4 /* AppDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDetailView.swift; sourceTree = "<group>"; };
 		C2150DD286E82127CB5B7C8B /* husk-tl-bionic-pthread.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "husk-tl-bionic-pthread.c"; sourceTree = "<group>"; };
-		C48A9F257449472675C4201A /* HuskJITHelper.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.extensionkit-extension"; includeInIndex = 0; path = HuskJITHelper.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		C48A9F257449472675C4201A /* HuskJITHelper.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = HuskJITHelper.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		C575FDA8867C3A75AB2392E3 /* husk-tl-jni-fmod.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "husk-tl-jni-fmod.c"; sourceTree = "<group>"; };
 		C6541CC4432CA2CE74901320 /* HuskLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HuskLog.swift; sourceTree = "<group>"; };
 		CB3F6E9B90C81C37AAABE363 /* husk-tl-blit.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "husk-tl-blit.c"; sourceTree = "<group>"; };
@@ -503,7 +503,6 @@
 			buildPhases = (
 				6EF7ED4658C7B5F891B70541 /* Sources */,
 				23F0338B4C1A9AD45F8C348B /* Frameworks */,
-				84D7D18FF828F710C2682ED3 /* Embed StikJIT */,
 			);
 			buildRules = (
 			);
@@ -514,7 +513,7 @@
 			);
 			productName = HuskJITHelper;
 			productReference = C48A9F257449472675C4201A /* HuskJITHelper.appex */;
-			productType = "com.apple.product-type.extensionkit-extension";
+			productType = "com.apple.product-type.app-extension";
 		};
 		725A795AE76B023A1B291246 /* Husk */ = {
 			isa = PBXNativeTarget;
@@ -524,8 +523,9 @@
 				7DFCC5382FEB416913A42FFC /* Sources */,
 				38EFBD1C571AB7D069663D9B /* Resources */,
 				81868A41ECA70F0BF20AC3EF /* Frameworks */,
-				684C4468A19E61E45D320D8A /* Embed ExtensionKit Extensions */,
+				669F9F78828E3A31EB56311E /* Embed Foundation Extensions */,
 				519A6523ED45941660EDDD39 /* Embed Frameworks */,
+				5C79258825AC47DF0D7016EC /* Embed StikJIT */,
 			);
 			buildRules = (
 			);
@@ -623,7 +623,7 @@
 			shellPath = /bin/sh;
 			shellScript = "set -e\nGUEST=\"$SRCROOT/../../guests/phase0\"\nif [ ! -f \"$GUEST/vmlinuz-virt\" ]; then\n  echo \"error: guest missing. Run ./scripts/fetch_phase0_guest.sh\" >&2\n  exit 1\nfi\nmkdir -p \"$BUILT_PRODUCTS_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH\"\ncp \"$GUEST/vmlinuz-virt\" \"$GUEST/initramfs-virt\" \\\n   \"$BUILT_PRODUCTS_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/\"\n\n# QEMU loads option ROMs by name from its data directory (-L). The full\n# pc-bios tree is 24 MB and almost entirely firmware for architectures\n# we will never boot (sparc64, riscv, loongarch, x86, ppc), so ship only\n# the network boot ROMs -- 1.6 MB, and the only ones -M virt asks for.\nBIOS=\"$SRCROOT/../../third_party/build/qemu-10.0.12-utm/pc-bios\"\nDEST=\"$BUILT_PRODUCTS_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/pc-bios\"\nmkdir -p \"$DEST\"\ncp \"$BIOS\"/efi-*.rom \"$BIOS\"/pxe-*.rom \"$DEST/\" 2>/dev/null || true\n\n# UEFI firmware for the Phase 1 guest: Debian's cloud image boots through\n# GRUB under UEFI, so this is required. It is 64 MiB but almost all zeros,\n# so the IPA's own zip squeezes it to about a megabyte -- cheaper than\n# carrying a decompressor to unpack it at runtime.\nFW=\"$BUILT_PRODUCTS_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/edk2-aarch64-code.fd\"\nif [ ! -f \"$FW\" ]; then\n  bunzip2 -c \"$BIOS/edk2-aarch64-code.fd.bz2\" > \"$FW\"\nfi\n\n# These two qcow2 files are tiny sparse seeds (64 MiB and 16 GiB\n# virtual). The app copies them into Documents on first launch; the\n# pre-booted snapshot later replaces the userdata seed in place.\nQEMU_IMG=\"$(command -v qemu-img || true)\"\nif [ -z \"$QEMU_IMG\" ]; then\n  echo \"error: qemu-img is required to generate the firmware and userdata seeds\" >&2\n  exit 1\nfi\nVARS_SEED=\"$BUILT_PRODUCTS_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/lineage-efi-vars-seed.fd\"\nVDB_SEED=\"$BUILT_PRODUCTS_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/lineage-vdb-seed.qcow2\"\nrm -f \"$VARS_SEED\" \"$VDB_SEED\"\n\"$QEMU_IMG\" create -f qcow2 \"$VARS_SEED\" 64M\n\"$QEMU_IMG\" create -f qcow2 \"$VDB_SEED\" 16G\n";
 		};
-		84D7D18FF828F710C2682ED3 /* Embed StikJIT */ = {
+		5C79258825AC47DF0D7016EC /* Embed StikJIT */ = {
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;
 			buildActionMask = 2147483647;
@@ -640,7 +640,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -e\nSRC=\"$SRCROOT/Frameworks/StikJIT.xcframework/ios-arm64/StikJIT.framework\"\nDST=\"$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH/StikJIT.framework\"\nrm -rf \"$DST\"\nmkdir -p \"$(dirname \"$DST\")\"\nditto \"$SRC\" \"$DST\"\nrm -rf \"$DST/Headers\" \"$DST/Modules\"\nPLIST=\"$DST/Info.plist\"\nif [ ! -f \"$PLIST\" ]; then\n  plutil -create xml1 \"$PLIST\"\n  plutil -insert CFBundleIdentifier -string com.stikdebug.StikJIT \"$PLIST\"\n  plutil -insert CFBundleExecutable -string StikJIT \"$PLIST\"\n  plutil -insert CFBundleName -string StikJIT \"$PLIST\"\n  plutil -insert CFBundlePackageType -string FMWK \"$PLIST\"\n  plutil -insert CFBundleInfoDictionaryVersion -string 6.0 \"$PLIST\"\n  plutil -insert CFBundleShortVersionString -string 1.9.0 \"$PLIST\"\n  plutil -insert CFBundleVersion -string 1.9.0 \"$PLIST\"\n  plutil -insert MinimumOSVersion -string 17.4 \"$PLIST\"\n  plutil -insert CFBundleSupportedPlatforms -array \"$PLIST\"\n  plutil -insert CFBundleSupportedPlatforms.0 -string iPhoneOS \"$PLIST\"\nfi\nif [ -n \"$EXPANDED_CODE_SIGN_IDENTITY\" ] && [ \"$CODE_SIGNING_ALLOWED\" != \"NO\" ]; then\n  codesign --force --sign \"$EXPANDED_CODE_SIGN_IDENTITY\" --timestamp=none \"$DST\"\nfi\n";
+			shellScript = "set -e\nSRC=\"$SRCROOT/Frameworks/StikJIT.xcframework/ios-arm64/StikJIT.framework\"\nDST=\"$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH/StikJIT.framework\"\nrm -rf \"$DST\"\nmkdir -p \"$(dirname \"$DST\")\"\nditto \"$SRC\" \"$DST\"\nrm -rf \"$DST/Headers\" \"$DST/Modules\"\nPLIST=\"$DST/Info.plist\"\nif [ ! -f \"$PLIST\" ]; then\n  plutil -create xml1 \"$PLIST\"\n  plutil -insert CFBundleIdentifier -string \"$PRODUCT_BUNDLE_IDENTIFIER.StikJIT\" \"$PLIST\"\n  plutil -insert CFBundleExecutable -string StikJIT \"$PLIST\"\n  plutil -insert CFBundleName -string StikJIT \"$PLIST\"\n  plutil -insert CFBundlePackageType -string FMWK \"$PLIST\"\n  plutil -insert CFBundleInfoDictionaryVersion -string 6.0 \"$PLIST\"\n  plutil -insert CFBundleShortVersionString -string 1.9.0 \"$PLIST\"\n  plutil -insert CFBundleVersion -string 1.9.0 \"$PLIST\"\n  plutil -insert MinimumOSVersion -string 17.4 \"$PLIST\"\n  plutil -insert CFBundleSupportedPlatforms -array \"$PLIST\"\n  plutil -insert CFBundleSupportedPlatforms.0 -string iPhoneOS \"$PLIST\"\nfi\nif [ -n \"$EXPANDED_CODE_SIGN_IDENTITY\" ] && [ \"$CODE_SIGNING_ALLOWED\" != \"NO\" ]; then\n  codesign --force --sign \"$EXPANDED_CODE_SIGN_IDENTITY\" --timestamp=none \"$DST\"\nfi\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -756,7 +756,6 @@
 			buildSettings = {
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_STYLE = Automatic;
-				EX_ENABLE_EXTENSION_POINT_GENERATION = YES;
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
 					"\"Frameworks\"",
@@ -766,7 +765,7 @@
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
-					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "$(HUSK_BUNDLE_IDENTIFIER).JITHelper";
 				SDKROOT = iphoneos;
@@ -783,7 +782,6 @@
 				CODE_SIGN_ENTITLEMENTS = "$(HUSK_ENTITLEMENTS)";
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				EX_ENABLE_EXTENSION_POINT_GENERATION = YES;
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
 					"\"../../build/ios-arm64/lib\"",
@@ -810,8 +808,6 @@
 					"-framework",
 					Security,
 					"-lhusk_rppairing",
-					"-weak_framework",
-					ExtensionFoundation,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "$(HUSK_BUNDLE_IDENTIFIER)";
 				SDKROOT = iphoneos;
@@ -829,7 +825,6 @@
 				CODE_SIGN_ENTITLEMENTS = "$(HUSK_ENTITLEMENTS)";
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				EX_ENABLE_EXTENSION_POINT_GENERATION = YES;
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
 					"\"../../build/ios-arm64/lib\"",
@@ -856,8 +851,6 @@
 					"-framework",
 					Security,
 					"-lhusk_rppairing",
-					"-weak_framework",
-					ExtensionFoundation,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "$(HUSK_BUNDLE_IDENTIFIER)";
 				SDKROOT = iphoneos;
@@ -999,7 +992,6 @@
 			buildSettings = {
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_STYLE = Automatic;
-				EX_ENABLE_EXTENSION_POINT_GENERATION = YES;
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
 					"\"Frameworks\"",
@@ -1009,7 +1001,7 @@
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
-					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "$(HUSK_BUNDLE_IDENTIFIER).JITHelper";
 				SDKROOT = iphoneos;
