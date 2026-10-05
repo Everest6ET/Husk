@@ -298,14 +298,19 @@ static int bionic___register_atfork(void *prepare, void *parent, void *child, vo
 static int bionic_pthread_atfork(void *prepare, void *parent, void *child) { (void)prepare; (void)parent; (void)child; return 0; }
 
 typedef struct { void (*fn)(void *); void *arg; void *dso; } atexit_ent;
-static atexit_ent g_atexit[1024];
-static int g_natexit;
+static atexit_ent *g_atexit;       /* grows: a big C++ program registers a destructor per static object, thousands of them */
+static int g_natexit, g_capatexit;
 static pthread_mutex_t g_atexit_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static int bionic___cxa_atexit(void (*fn)(void *), void *arg, void *dso)
 {
     pthread_mutex_lock(&g_atexit_lock);
-    int ok = g_natexit < 1024;
+    if (g_natexit == g_capatexit) {
+        int cap = g_capatexit ? g_capatexit * 2 : 1024;
+        atexit_ent *n = realloc(g_atexit, (size_t)cap * sizeof(atexit_ent));
+        if (n) { g_atexit = n; g_capatexit = cap; }
+    }
+    int ok = g_natexit < g_capatexit;
     if (ok) g_atexit[g_natexit++] = (atexit_ent){ fn, arg, dso };
     pthread_mutex_unlock(&g_atexit_lock);
     return ok ? 0 : -1;
@@ -604,7 +609,7 @@ const tl_bionic_entry tl_tab_core[] = {
 
 /* ----------------------------------------------------------------- lookup */
 
-static const tl_bionic_entry *const k_tables[] = { tl_tab_core, tl_tab_str, tl_tab_io, tl_tab_net, tl_tab_pthread, tl_tab_ndk, tl_tab_egl, tl_tab_cxx };
+static const tl_bionic_entry *const k_tables[] = { tl_tab_core, tl_tab_str, tl_tab_io, tl_tab_io2, tl_tab_str2, tl_tab_net, tl_tab_pthread, tl_tab_ndk, tl_tab_egl, tl_tab_cxx };
 
 typedef struct { const char *name; void *addr; } slot;
 static slot *g_slots;

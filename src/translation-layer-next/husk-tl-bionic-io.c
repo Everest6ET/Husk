@@ -663,7 +663,16 @@ static long futex_call(uint32_t *addr, int op, uint32_t val, const struct timesp
     return -38;
 }
 
+static long linux_syscall_impl(long a0, long a1, long a2, long a3, long a4, long a5, long nr);
 long tl_linux_syscall(long a0, long a1, long a2, long a3, long a4, long a5, long nr)
+{
+    static int trace = -1;
+    if (trace < 0) trace = getenv("TL_SYSCALL_TRACE") ? 1 : 0;
+    long r = linux_syscall_impl(a0, a1, a2, a3, a4, a5, nr);
+    if (trace) tl_log_line("syscall %ld(%#lx, %#lx, %#lx) -> %ld", nr, a0, a1, a2, r);
+    return r;
+}
+static long linux_syscall_impl(long a0, long a1, long a2, long a3, long a4, long a5, long nr)
 {
     (void)a4; (void)a5;
     switch (nr) {
@@ -776,5 +785,75 @@ const tl_bionic_entry tl_tab_io[] = {
     TL_WRAP("__FD_ISSET_chk", b___FD_ISSET_chk), TL_WRAP("__cmsg_nxthdr", b___cmsg_nxthdr),
     TL_WRAP("epoll_create1", b_epoll_create1), TL_WRAP("epoll_ctl", b_epoll_ctl), TL_WRAP("epoll_wait", b_epoll_wait),
     TL_WRAP("eventfd", b_eventfd), TL_WRAP("inotify_init", b_inotify_init), TL_WRAP("inotify_add_watch", b_inotify_add_watch),
+    TL_END
+};
+
+/* ------------------------------------------------------- *at, stat64, statvfs */
+
+/* The guest's AT_FDCWD is -100. With it (or an absolute path) the call is the plain one; with a real directory
+ * descriptor Darwin resolves the path against it, which is what the guest meant. */
+#define G_AT_FDCWD (-100)
+#define G_AT_REMOVEDIR 0x200
+#define G_AT_SYMLINK_NOFOLLOW 0x100
+static bool at_plain(int dirfd, const char *p) { return dirfd == G_AT_FDCWD || (p && p[0] == '/'); }
+static int b_openat(int dirfd, const char *path, int flags, unsigned mode)
+{
+    if (at_plain(dirfd, path)) return b_open(path, flags, mode);
+    TL_ERRNO_BEGIN(); int fd = openat(dirfd, path, oflags_to_darwin(flags), mode); TL_ERRNO_END();
+    return fd;
+}
+static int b_unlinkat(int dirfd, const char *path, int flags)
+{
+    if (at_plain(dirfd, path)) return (flags & G_AT_REMOVEDIR) ? b_rmdir(path) : b_unlink(path);
+    TL_ERRNO_BEGIN(); int r = unlinkat(dirfd, path, (flags & G_AT_REMOVEDIR) ? AT_REMOVEDIR : 0); TL_ERRNO_END();
+    return r;
+}
+static int b_fchmodat(int dirfd, const char *path, unsigned mode, int flags)
+{
+    (void)flags;
+    if (at_plain(dirfd, path)) return b_chmod(path, mode);
+    TL_ERRNO_BEGIN(); int r = fchmodat(dirfd, path, (mode_t)mode, 0); TL_ERRNO_END();
+    return r;
+}
+static int b_fchown(int fd, unsigned u, unsigned g) { TL_ERRNO_BEGIN(); int r = fchown(fd, u, g); TL_ERRNO_END(); return r; }
+static int b_chdir(const char *p) { char b[1024]; TL_ERRNO_BEGIN(); int r = chdir(tl_path_resolve(p, b, sizeof(b))); TL_ERRNO_END(); return r; }
+static int b_utimensat(int dirfd, const char *path, const struct timespec ts[2], int flags)
+{
+    struct timespec d[2];
+    if (ts) for (int i = 0; i < 2; i++) {
+        d[i] = ts[i];
+        if (ts[i].tv_nsec == 0x3fffffff) d[i].tv_nsec = UTIME_NOW;            /* Linux UTIME_NOW  */
+        else if (ts[i].tv_nsec == 0x3ffffffe) d[i].tv_nsec = UTIME_OMIT;      /* Linux UTIME_OMIT */
+    }
+    char b[1024];
+    TL_ERRNO_BEGIN();
+    int r = utimensat(at_plain(dirfd, path) ? AT_FDCWD : dirfd, at_plain(dirfd, path) ? tl_path_resolve(path, b, sizeof(b)) : path, ts ? d : NULL,
+                      (flags & G_AT_SYMLINK_NOFOLLOW) ? AT_SYMLINK_NOFOLLOW : 0);
+    TL_ERRNO_END();
+    return r;
+}
+/* bionic's struct statvfs on LP64: the fields are all 8 bytes */
+typedef struct { uint64_t f_bsize, f_frsize, f_blocks, f_bfree, f_bavail, f_files, f_ffree, f_favail, f_fsid, f_flag, f_namemax; int32_t spare[6]; } guest_statvfs;
+static int b_statvfs(const char *p, guest_statvfs *g)
+{
+    char b[1024]; struct statfs s;
+    TL_ERRNO_BEGIN(); int r = statfs(tl_path_resolve(p, b, sizeof(b)), &s); TL_ERRNO_END();
+    if (r == 0) {
+        memset(g, 0, sizeof(*g));
+        g->f_bsize = (uint64_t)s.f_bsize; g->f_frsize = (uint64_t)s.f_bsize; g->f_blocks = s.f_blocks; g->f_bfree = s.f_bfree; g->f_bavail = s.f_bavail;
+        g->f_files = s.f_files; g->f_ffree = s.f_ffree; g->f_favail = s.f_ffree; g->f_namemax = 255;
+    }
+    return r;
+}
+static long b_pathconf(const char *p, int name)
+{
+    (void)p;
+    switch (name) { case 3: return 255; case 4: return 4096; case 5: return 4096; case 6: return 0x10000; default: return -1; }
+}
+
+const tl_bionic_entry tl_tab_io2[] = {
+    TL_WRAP("openat", b_openat), TL_WRAP("unlinkat", b_unlinkat), TL_WRAP("fchmodat", b_fchmodat), TL_WRAP("fchown", b_fchown),
+    TL_WRAP("chdir", b_chdir), TL_WRAP("utimensat", b_utimensat), TL_WRAP("stat64", b_stat), TL_WRAP("statvfs", b_statvfs),
+    TL_WRAP("statvfs64", b_statvfs), TL_WRAP("pathconf", b_pathconf),
     TL_END
 };

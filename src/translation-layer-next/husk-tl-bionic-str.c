@@ -11,6 +11,7 @@
 #include <fnmatch.h>
 #include <getopt.h>
 #include <locale.h>
+#include <net/if.h>
 #include <math.h>
 #include <setjmp.h>
 #include <stdarg.h>
@@ -584,5 +585,40 @@ const tl_bionic_entry tl_tab_str[] = {
     TL_WRAP("fprintf", tl_va_fprintf), TL_WRAP("sscanf", tl_va_sscanf), TL_WRAP("fscanf", tl_va_fscanf),
     TL_WRAP("vsnprintf", b_vsnprintf), TL_WRAP("__vsnprintf_chk", b___vsnprintf_chk), TL_WRAP("__vsprintf_chk", b___vsprintf_chk),
     TL_WRAP("vprintf", b_vprintf), TL_WRAP("vfprintf", b_vfprintf), TL_WRAP("vasprintf", b_vasprintf), TL_WRAP("vsscanf", b_vsscanf),
+    TL_END
+};
+
+/* -------------------------------------------- fortified string functions, stdio odds, more math */
+
+static char *b___strcpy_chk(char *d, const char *s, size_t dl) { size_t n = strlen(s); if (n >= dl) chk_fail("__strcpy_chk"); memcpy(d, s, n + 1); return d; }
+static char *b___strcat_chk(char *d, const char *s, size_t dl) { size_t a = strlen(d), n = strlen(s); if (a + n >= dl) chk_fail("__strcat_chk"); memcpy(d + a, s, n + 1); return d; }
+static char *b___strncpy_chk(char *d, const char *s, size_t n, size_t dl) { if (n > dl) chk_fail("__strncpy_chk"); return strncpy(d, s, n); }
+static size_t b___strlcpy_chk(char *d, const char *s, size_t n, size_t dl) { if (n > dl) chk_fail("__strlcpy_chk"); return strlcpy(d, s, n); }
+static char *b___strrchr_chk(const char *s, int c, size_t len) { (void)len; return strrchr(s, c); }
+static char *b___fgets_chk(char *buf, int size, size_t bufsize, void *f) { if ((size_t)size > bufsize) chk_fail("__fgets_chk"); return b_fgets(buf, size, f); }
+/* Linux's fd_set is an array of longs, a bit per descriptor */
+static void b___FD_CLR_chk(int fd, uint64_t *set, size_t size) { if (fd < 0 || (size_t)fd >= size * 8) chk_fail("__FD_CLR_chk"); set[fd / 64] &= ~(1ull << (fd % 64)); }
+
+static FILE *g_stdin_var = (FILE *)&g_sF[0], *g_stdout_var = (FILE *)&g_sF[SF_SIZE], *g_stderr_var = (FILE *)&g_sF[2 * SF_SIZE];
+static void b_perror(const char *msg) { tl_log_line("perror: %s: %s", msg ? msg : "", strerror(errno)); }
+static void b_rewind(void *f) { rewind(map_stream(f)); }
+static wint_t b_fputwc(wchar_t c, void *f) { return fputwc(c, map_stream(f)); }
+static void *b_popen(const char *cmd, const char *mode) { (void)cmd; (void)mode; tl_set_guest_errno(38); return NULL; }
+static int b_pclose(void *f) { (void)f; tl_set_guest_errno(10); return -1; }
+static FILE *b_tmpfile(void) { TL_ERRNO_BEGIN(); FILE *f = tmpfile(); TL_ERRNO_END(); return f; }
+/* bionic's mbstate_t is 8 bytes, Darwin's is not; the conversion state is dropped */
+static size_t b_wcsrtombs(char *dst, const wchar_t **src, size_t len, void *ps) { (void)ps; return wcsrtombs(dst, src, len, NULL); }
+
+const tl_bionic_entry tl_tab_str2[] = {
+    TL_WRAP("__strcpy_chk", b___strcpy_chk), TL_WRAP("__strcat_chk", b___strcat_chk), TL_WRAP("__strncpy_chk", b___strncpy_chk),
+    TL_WRAP("__strlcpy_chk", b___strlcpy_chk), TL_WRAP("__strrchr_chk", b___strrchr_chk), TL_WRAP("__fgets_chk", b___fgets_chk),
+    TL_WRAP("__FD_CLR_chk", b___FD_CLR_chk),
+    TL_DATA("stdin", &g_stdin_var), TL_DATA("stdout", &g_stdout_var), TL_DATA("stderr", &g_stderr_var),
+    TL_WRAP("perror", b_perror), TL_WRAP("rewind", b_rewind), TL_WRAP("fputwc", b_fputwc), TL_WRAP("popen", b_popen), TL_WRAP("pclose", b_pclose),
+    TL_WRAP("tmpfile", b_tmpfile), TL_WRAP("wcsrtombs", b_wcsrtombs),
+    TL_DIRECT(strncat), TL_DIRECT(strptime), TL_DIRECT(ldiv), TL_DIRECT(sleep), TL_DIRECT(pause), TL_DIRECT(arc4random_buf), TL_DIRECT(nan), TL_DIRECT(nanf),
+    TL_DIRECT(ceil), TL_DIRECT(floor), TL_DIRECT(fabs), TL_DIRECT(trunc), TL_DIRECT(cbrt), TL_DIRECT(acosh), TL_DIRECT(atanh), TL_DIRECT(cosh),
+    TL_DIRECT(sinh), TL_DIRECT(exp2), TL_DIRECT(expm1), TL_DIRECT(log1p), TL_DIRECT(hypotf), TL_DIRECT(ilogbf), TL_DIRECT(nextafter),
+    TL_DIRECT(nextafterf), TL_DIRECT(frexpf), TL_DIRECT(if_indextoname),
     TL_END
 };

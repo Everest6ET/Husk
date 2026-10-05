@@ -795,6 +795,10 @@ void tl_hle_configure(const char *pkg, const char *apk, const char *data, int w,
 }
 
 jobj *tl_hle_activity(void) { return H.activity; }
+/* An app whose activity is its own class (Minecraft's MainActivity) swaps its instance in for the generic one. */
+void tl_hle_set_activity(jobj *a) { H.activity = a; }
+jobj *tl_hle_assets(void) { return H.assets; }
+jobj *tl_hle_config(void) { return H.config; }
 
 extern void tl_loop_install(void);
 extern void tl_input_install(void);
@@ -812,7 +816,7 @@ void tl_jni_hle_install(void)
     H.resources = make("android/content/res/Resources");
     H.assets = make("android/content/res/AssetManager");
     H.config = make("android/content/res/Configuration");
-    set_int(H.config, "orientation", 1);            /* ORIENTATION_PORTRAIT */
+    set_int(H.config, "orientation", H.width > H.height ? 2 : 1);     /* ORIENTATION_LANDSCAPE / PORTRAIT */
     set_float(H.config, "fontScale", 1.0f);
     set_int(H.config, "screenLayout", 0x22); set_int(H.config, "keyboard", 1); set_int(H.config, "navigation", 1);
     set_int(H.config, "touchscreen", 3); set_int(H.config, "screenWidthDp", (int)(H.width / H.density));

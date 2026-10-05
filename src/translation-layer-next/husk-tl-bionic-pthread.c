@@ -15,6 +15,7 @@
  */
 #define _DARWIN_C_SOURCE
 #include "husk-tl-bionic.h"
+#include "husk-tl-ld.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -22,7 +23,9 @@
 #include <semaphore.h>
 #include <signal.h>
 #include <stdatomic.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <string.h>
 #include <time.h>
 
@@ -82,9 +85,43 @@ static int b_mutex_destroy(void *g)
     o->value = v;
     return 0;
 }
-static int b_mutex_lock(void *g)    { return rc(pthread_mutex_lock(obj_host(g, make_mutex))); }
-static int b_mutex_trylock(void *g) { return rc(pthread_mutex_trylock(obj_host(g, make_mutex))); }
-static int b_mutex_unlock(void *g)  { return rc(pthread_mutex_unlock(obj_host(g, make_mutex))); }
+/*
+ * TL_MUTEX_TRACE: remember who last locked each mutex (in the spare bytes of the guest's 40-byte object, which it never
+ * touches) and say, when a lock has waited five seconds, who holds it and from where it was locked. For finding what a
+ * stuck game is waiting for.
+ */
+static bool mutex_trace(void) { static int on = -1; if (on < 0) on = getenv("TL_MUTEX_TRACE") ? 1 : 0; return on; }
+static void note_owner(void *g, void *lr) { uint64_t *w = g; w[2] = (uint64_t)(uintptr_t)pthread_self(); w[3] = (uint64_t)(uintptr_t)lr; }
+static void describe_site(char *out, size_t n, uint64_t addr)
+{
+    const char *lib = NULL; const void *sa = NULL;
+    const char *sym = tl_ld_symbol_at((void *)(uintptr_t)addr, &lib, &sa);
+    if (lib) snprintf(out, n, "%s %s+%#lx", lib, sym ? sym : "?", sa ? (unsigned long)(addr - (uintptr_t)sa) : 0ul);
+    else snprintf(out, n, "%#llx", (unsigned long long)addr);
+}
+static int b_mutex_lock(void *g)
+{
+    pthread_mutex_t *m = obj_host(g, make_mutex);
+    if (!mutex_trace()) return rc(pthread_mutex_lock(m));
+    void *lr = __builtin_return_address(0);
+    for (long i = 0;; i++) {
+        int r = pthread_mutex_trylock(m);
+        if (r == 0) { note_owner(g, lr); return 0; }
+        if (r != EBUSY) return rc(r);
+        usleep(200);
+        if (i == 25000) {
+            uint64_t *w = g; char owner[40] = "?", site[200], waiter[200];
+            pthread_t t = (pthread_t)(uintptr_t)w[2];
+            if (t) pthread_getname_np(t, owner, sizeof(owner));
+            describe_site(site, sizeof(site), w[3]);
+            describe_site(waiter, sizeof(waiter), (uint64_t)(uintptr_t)lr);
+            char me[40] = ""; pthread_getname_np(pthread_self(), me, sizeof(me));
+            tl_log_line("mutex: '%s' has waited 5 s on mutex %p, held by '%s' (locked from %s); waiting at %s", me, g, owner, site, waiter);
+        }
+    }
+}
+static int b_mutex_trylock(void *g) { int r = pthread_mutex_trylock(obj_host(g, make_mutex)); if (r == 0 && mutex_trace()) note_owner(g, __builtin_return_address(0)); return rc(r); }
+static int b_mutex_unlock(void *g)  { if (mutex_trace()) ((uint64_t *)g)[2] = 0; return rc(pthread_mutex_unlock(obj_host(g, make_mutex))); }
 
 static int b_mutexattr_init(long *a)    { *a = 0; return 0; }
 static int b_mutexattr_destroy(long *a) { (void)a; return 0; }

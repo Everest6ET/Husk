@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "husk-tl-bionic.h"
+#include "husk-tl-xmem.h"
 
 void *tl_nwindow_native(void *window);
 int tl_nwindow_width(void *window);
@@ -29,6 +30,7 @@ typedef unsigned EGLBoolean, EGLenum;
 #define EGL_TRUE 1
 
 static struct {
+    char egl_path[600], gles_path[600];
     void *egl, *gles;
     bool ready;
     char frame_dir[512];
@@ -78,6 +80,8 @@ bool tl_egl_init(const char *egl_path, const char *gles_path, const char *frame_
 {
     pthread_mutex_lock(&E.lock);
     if (E.ready) { pthread_mutex_unlock(&E.lock); return true; }
+    snprintf(E.egl_path, sizeof(E.egl_path), "%s", egl_path);
+    snprintf(E.gles_path, sizeof(E.gles_path), "%s", gles_path ? gles_path : egl_path);
     E.egl = dlopen(egl_path, RTLD_NOW | RTLD_LOCAL);
     if (!E.egl) { tl_log_line("egl: cannot load %s: %s", egl_path, dlerror()); pthread_mutex_unlock(&E.lock); return false; }
     E.gles = gles_path ? dlopen(gles_path, RTLD_NOW | RTLD_LOCAL) : E.egl;
@@ -125,8 +129,31 @@ static EGLDisplay w_eglGetDisplay(void *native)
 PASS_BOOL(eglInitialize, (EGLDisplay d, EGLint *a, EGLint *b), (d, a, b))
 PASS_BOOL(eglTerminate, (EGLDisplay d), (d))
 PASS_BOOL(eglGetConfigs, (EGLDisplay d, EGLConfig *c, EGLint n, EGLint *r), (d, c, n, r))
-PASS_BOOL(eglChooseConfig, (EGLDisplay d, const EGLint *at, EGLConfig *c, EGLint n, EGLint *r), (d, at, c, n, r))
-PASS_BOOL(eglGetConfigAttrib, (EGLDisplay d, EGLConfig c, EGLint at, EGLint *v), (d, c, at, v))
+static EGLBoolean w_eglChooseConfig(EGLDisplay d, const EGLint *at, EGLConfig *c, EGLint n, EGLint *r)
+{
+    /* Android-only attributes (EGL_RECORDABLE_ANDROID, EGL_FRAMEBUFFER_TARGET_ANDROID) match nothing in ANGLE: every
+     * config would be refused over a property it cannot have. They are dropped from the request. */
+    EGLint filtered[128]; int nf = 0;
+    for (int i = 0; at && at[i] != EGL_NONE && nf < 124; i += 2) {
+        if (at[i] == 0x3142 || at[i] == 0x3147) continue;
+        filtered[nf++] = at[i]; filtered[nf++] = at[i + 1];
+    }
+    filtered[nf] = EGL_NONE;
+    EGLBoolean ok = a_eglChooseConfig(d, at ? filtered : NULL, c, n, r);
+    static int trace = -1;
+    if (trace < 0) trace = getenv("TL_EGL_TRACE") ? 1 : 0;
+    if (trace || !ok || (r && *r == 0)) {
+        char buf[512]; size_t k = 0;
+        for (int i = 0; at && at[i] != EGL_NONE && i < 60 && k + 24 < sizeof(buf); i += 2) k += (size_t)snprintf(buf + k, sizeof(buf) - k, " %#x=%d", at[i], at[i + 1]);
+        tl_log_line("egl: eglChooseConfig(%s ) -> %s, %d config(s)", buf, ok ? "true" : "false", r ? *r : -1);
+    }
+    return ok;
+}
+static EGLBoolean w_eglGetConfigAttrib(EGLDisplay d, EGLConfig c, EGLint at, EGLint *v)
+{
+    if (at == 0x3142 /* EGL_RECORDABLE_ANDROID */) { if (v) *v = 1; return EGL_TRUE; }
+    return a_eglGetConfigAttrib(d, c, at, v);
+}
 PASS_BOOL(eglDestroyContext, (EGLDisplay d, EGLContext c), (d, c))
 PASS_BOOL(eglDestroySurface, (EGLDisplay d, EGLSurface s), (d, s))
 PASS_BOOL(eglQuerySurface, (EGLDisplay d, EGLSurface s, EGLint at, EGLint *v), (d, s, at, v))
@@ -260,11 +287,59 @@ static void w_glUniformMatrix4fv(int l, int c, unsigned t, const float *v) { r_g
 static void (*r_glSampleCoverage)(float, unsigned);
 static void w_glSampleCoverage(float v, unsigned i) { r_glSampleCoverage(v, i & 0xff); }
 
+
+/*
+ * Extensions ANGLE advertises that do not work well enough to use. EXT_disjoint_timer_query is the one that matters:
+ * its queries never report a result on Metal, and an engine that times its GPU work (bgfx, so Minecraft) waits for the
+ * result forever. Taken out of the extension lists, the engine never asks.
+ */
+static const char *const k_hidden_ext[] = { "GL_EXT_disjoint_timer_query", "GL_EXT_disjoint_timer_query_webgl2", NULL };
+static bool ext_hidden(const char *name, size_t n)
+{
+    for (int i = 0; k_hidden_ext[i]; i++) if (strlen(k_hidden_ext[i]) == n && !strncmp(k_hidden_ext[i], name, n)) return true;
+    return false;
+}
+
+static const unsigned char *(*r_glGetString)(unsigned);
+static const unsigned char *w_glGetString(unsigned name)
+{
+    if (!r_glGetString && a_eglGetProcAddress) r_glGetString = a_eglGetProcAddress("glGetString");
+    const unsigned char *s = r_glGetString ? r_glGetString(name) : NULL;
+    if (name != 0x1F03 /* GL_EXTENSIONS */ || !s) return s;
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    static const unsigned char *source; static char *filtered;
+    pthread_mutex_lock(&mu);
+    if (source != s) {
+        free(filtered);
+        size_t len = strlen((const char *)s);
+        filtered = malloc(len + 1);
+        size_t k = 0;
+        for (const char *p = (const char *)s; *p;) {
+            const char *e = strchr(p, ' ');
+            size_t n = e ? (size_t)(e - p) : strlen(p);
+            if (n && !ext_hidden(p, n)) { if (k) filtered[k++] = ' '; memcpy(filtered + k, p, n); k += n; }
+            p += n; if (e) p++;
+        }
+        filtered[k] = 0;
+        source = s;
+    }
+    pthread_mutex_unlock(&mu);
+    return (const unsigned char *)filtered;
+}
+
+static const unsigned char *(*r_glGetStringi)(unsigned, unsigned);
+static const unsigned char *w_glGetStringi(unsigned name, unsigned index)
+{
+    const unsigned char *s = r_glGetStringi ? r_glGetStringi(name, index) : NULL;
+    if (name == 0x1F03 && s && ext_hidden((const char *)s, strlen((const char *)s))) return (const unsigned char *)"GL_ANGLE_husk_hidden_extension";
+    return s;
+}
+
 #define ADAPT(name) { #name, (void *)w_##name, (void **)&r_##name }
 static const struct { const char *name; void *wrap; void **real; } k_adapt[] = {
     ADAPT(glBlitFramebuffer), ADAPT(glTexSubImage3D), ADAPT(glCompressedTexSubImage3D), ADAPT(glCopyImageSubData),
     ADAPT(glColorMask), ADAPT(glDepthMask), ADAPT(glVertexAttribPointer), ADAPT(glUniformMatrix2fv),
-    ADAPT(glUniformMatrix3fv), ADAPT(glUniformMatrix4fv), ADAPT(glSampleCoverage),
+    ADAPT(glUniformMatrix3fv), ADAPT(glUniformMatrix4fv), ADAPT(glSampleCoverage), ADAPT(glGetString), ADAPT(glGetStringi),
 };
 
 static const struct { const char *name; void *fn; } k_egl[] = {
@@ -283,27 +358,116 @@ static const struct { const char *name; void *fn; } k_egl[] = {
     { "eglGetFrameTimestampsANDROID", w_eglGetFrameTimestampsANDROID }, { "eglGetCompositorTimingANDROID", w_eglGetCompositorTimingANDROID },
 };
 
+
+/* ----------------------------------------------------------- GL call tracing */
+
+/*
+ * TL_GL_TRACE: every GL function the guest is given is wrapped in a trampoline that notes its name in a ring and then
+ * tail-calls the real function with the registers (and stack) as they were, so any signature works. A crash report
+ * can then say which calls came last (tl_egl_recent_calls). The trampolines live in the executable region.
+ */
+#define GLT_RING 256
+static const char *volatile g_glt_ring[GLT_RING];
+static atomic_ulong g_glt_n;
+
+void tl_glt_note(const char *name) { g_glt_ring[atomic_fetch_add(&g_glt_n, 1) % GLT_RING] = name; }
+
+void tl_egl_recent_calls(char *out, size_t n, int count)
+{
+    size_t k = 0;
+    unsigned long total = atomic_load(&g_glt_n);
+    out[0] = 0;
+    for (int i = count; i >= 1 && k + 40 < n; i--) {
+        if (total < (unsigned long)i) continue;
+        const char *nm = g_glt_ring[(total - (unsigned long)i) % GLT_RING];
+        if (nm) k += (size_t)snprintf(out + k, n - k, "%s%s", k ? " " : "", nm);
+    }
+}
+
+__attribute__((naked, used)) static void glt_common(void)
+{
+#if defined(__aarch64__)
+    __asm__ volatile(
+        "stp x29, x30, [sp, #-16]!\n"
+        "sub sp, sp, #176\n"
+        "stp x0, x1, [sp, #0]\n" "stp x2, x3, [sp, #16]\n" "stp x4, x5, [sp, #32]\n" "stp x6, x7, [sp, #48]\n"
+        "stp x8, x17, [sp, #64]\n"
+        "stp d0, d1, [sp, #80]\n" "stp d2, d3, [sp, #96]\n" "stp d4, d5, [sp, #112]\n" "stp d6, d7, [sp, #128]\n"
+        "mov x0, x16\n"
+        "bl _tl_glt_note\n"
+        "ldp x0, x1, [sp, #0]\n" "ldp x2, x3, [sp, #16]\n" "ldp x4, x5, [sp, #32]\n" "ldp x6, x7, [sp, #48]\n"
+        "ldp x8, x17, [sp, #64]\n"
+        "ldp d0, d1, [sp, #80]\n" "ldp d2, d3, [sp, #96]\n" "ldp d4, d5, [sp, #112]\n" "ldp d6, d7, [sp, #128]\n"
+        "add sp, sp, #176\n"
+        "ldp x29, x30, [sp], #16\n"
+        "br x17\n");
+#endif
+}
+
+static void *glt_wrap(const char *name, void *real)
+{
+    static struct { const char *name; void *thunk; } cache[4096];
+    static int n;
+    static uint8_t *page_rx, *page_rw;
+    static int used = 256;
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&mu);
+    for (int i = 0; i < n; i++) if (!strcmp(cache[i].name, name)) { void *t = cache[i].thunk; pthread_mutex_unlock(&mu); return t; }
+    void *thunk = real;
+    char err[120];
+    if (n < 4096 && tl_xmem_open(768u << 20, err, sizeof(err))) {
+        if (used == 256) { used = 0; if (!tl_xmem_alloc(TL_XMEM_PAGE, &page_rx, &page_rw)) page_rx = page_rw = NULL; }
+        if (page_rx) {
+            uint8_t *trx = page_rx + (size_t)used * 64, *trw = page_rw + (size_t)used * 64;
+            used++;
+            /* ldr x16, <name>; ldr x17, <real>; ldr x15, <common>; br x15 -- then the three 8-byte literals */
+            uint32_t ins[4] = { 0x58000000u | ((16u / 4) << 5) | 16, 0x58000000u | ((20u / 4) << 5) | 17, 0x58000000u | ((24u / 4) << 5) | 15, 0xD61F01E0u };
+            memcpy(trw, ins, 16);
+            uint64_t lit[3] = { (uint64_t)(uintptr_t)strdup(name), (uint64_t)(uintptr_t)real, (uint64_t)(uintptr_t)glt_common };
+            memcpy(trw + 16, lit, 24);
+            tl_xmem_flush(trx, 64);
+            thunk = trx;
+        }
+    }
+    cache[n].name = strdup(name); cache[n].thunk = thunk; n++;
+    pthread_mutex_unlock(&mu);
+    return thunk;
+}
+
+/* Debug labels and groups name objects for a graphics debugger and change nothing else. ANGLE's versions of them are not
+ * worth reaching (one dereferences a null while the guest names a buffer), so they do nothing. */
+static void w_gl_noop(void) {}
+static const char *const k_noop_names[] = {
+    "glObjectLabel", "glObjectLabelKHR", "glObjectPtrLabel", "glObjectPtrLabelKHR", "glLabelObjectEXT", "glInsertEventMarkerEXT",
+    "glPushGroupMarkerEXT", "glPopGroupMarkerEXT", "glPushDebugGroup", "glPushDebugGroupKHR", "glPopDebugGroup", "glPopDebugGroupKHR",
+    "glDebugMessageInsert", "glDebugMessageInsertKHR", "glDebugMessageCallback", "glDebugMessageCallbackKHR", "glDebugMessageControl",
+    "glDebugMessageControlKHR", NULL
+};
+
 void *tl_egl_resolve(const char *name)
 {
+    for (int i = 0; k_noop_names[i]; i++) if (!strcmp(k_noop_names[i], name)) return (void *)w_gl_noop;
     for (size_t i = 0; i < sizeof(k_egl) / sizeof(k_egl[0]); i++) if (!strcmp(k_egl[i].name, name)) return k_egl[i].fn;
     if (!E.ready || !a_eglGetProcAddress) return NULL;
     void *real = a_eglGetProcAddress(name);
-    if (!real && E.gles) real = dlsym(E.gles, name);
-    if (!real) return NULL;
-    for (size_t i = 0; i < sizeof(k_adapt) / sizeof(k_adapt[0]); i++) {
-        if (!strcmp(k_adapt[i].name, name)) { *k_adapt[i].real = real; return k_adapt[i].wrap; }
+    if (!real && E.gles) {
+        /* dlsym on the handle also searches what ANGLE links against, and on a Mac that is the system's desktop OpenGL:
+         * glPolygonMode and its kin would resolve there, and a GLES guest that calls one must not reach them. */
+        real = dlsym(E.gles, name);
+        Dl_info di;
+        if (real && dladdr(real, &di) && di.dli_fname && strcmp(di.dli_fname, E.gles_path) != 0 && strcmp(di.dli_fname, E.egl_path) != 0) real = NULL;
     }
-    return real;
+    if (!real) return NULL;
+    static int trace = -1;
+    if (trace < 0) trace = getenv("TL_GL_TRACE") ? 1 : 0;
+    for (size_t i = 0; i < sizeof(k_adapt) / sizeof(k_adapt[0]); i++) {
+        if (!strcmp(k_adapt[i].name, name)) { *k_adapt[i].real = real; return trace ? glt_wrap(name, k_adapt[i].wrap) : k_adapt[i].wrap; }
+    }
+    return trace && name[0] == 'g' && name[1] == 'l' ? glt_wrap(name, real) : real;
 }
 
 /* eglGetProcAddress for the guest */
 static void *w_eglGetProcAddress(const char *name) { return tl_egl_resolve(name); }
-static const unsigned char *w_glGetString(unsigned name)
-{
-    const unsigned char *(*f)(unsigned) = tl_egl_resolve("glGetString");
-    return f ? f(name) : NULL;
-}
-
 const tl_bionic_entry tl_tab_egl[] = {
     TL_WRAP("eglGetProcAddress", w_eglGetProcAddress), TL_WRAP("glGetString", w_glGetString),
     { "eglGetDisplay", w_eglGetDisplay }, { "eglInitialize", w_eglInitialize }, { "eglTerminate", w_eglTerminate },

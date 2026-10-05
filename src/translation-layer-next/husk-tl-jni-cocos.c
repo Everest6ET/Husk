@@ -23,6 +23,8 @@
 #include "husk-tl-bionic.h"
 #include "husk-tl-cocos.h"
 
+void tl_fmod_install(void);
+
 static struct {
     char pkg[128], apk[1024], data[512], files[600], ext[700], prefs[700];
     int width, height;
@@ -37,6 +39,10 @@ static jvalue vd(double d) { jvalue v; v.j = 0; v.d = d; return v; }
 static const char *S(const jobj *o) { const char *s = tl_jni_string(o); return s ? s : ""; }
 
 static void Noop(tl_jcall *c) { (void)c; }
+
+/* Hooks the app may install: a link the game wants opened, and the soft keyboard. */
+void (*tl_cocos_open_url_hook)(const char *url);
+void (*tl_cocos_keyboard_hook)(int action);
 static void RetTrue(tl_jcall *c) { c->ret = vz(1); }
 static void RetFalse(tl_jcall *c) { c->ret = vz(0); }
 
@@ -203,49 +209,6 @@ static void Act_setKeyboardState(tl_jcall *c) { g_keyboard_active = c->args[0].z
 static void GL_openIME(tl_jcall *c) { (void)c; tl_log_line("cocos: keyboard: open"); if (tl_cocos_keyboard_hook) tl_cocos_keyboard_hook(1); }
 static void GL_closeIME(tl_jcall *c) { (void)c; tl_log_line("cocos: keyboard: close"); if (tl_cocos_keyboard_hook) tl_cocos_keyboard_hook(2); }
 
-/* --------------------------------------------------------------------- FMOD */
-
-/*
- * FMOD, the game's audio engine, has no Android audio API it can reach here, so it falls back to
- * its Java output: an AudioTrack that its mixer thread writes into. The write blocks for as long as
- * the audio takes to play, which is what paces the mixer; the samples go to the host's audio output
- * when the app has installed one (tl_cocos_audio_hook), and are dropped otherwise.
- */
-void (*tl_cocos_audio_hook)(const int16_t *samples, int frames, int channels, int rate);
-void (*tl_cocos_open_url_hook)(const char *url);
-void (*tl_cocos_keyboard_hook)(int action);
-
-static void FMOD_sampleRate(tl_jcall *c) { c->ret = vi(48000); }
-static void FMOD_blockSize(tl_jcall *c) { c->ret = vi(1024); }
-static void FMOD_fd(tl_jcall *c) { (void)c; c->ret = vi(-1); }
-static void FMOD_assets(tl_jcall *c) { c->ret = vl(tl_jni_new_object(tl_jni_class("android/content/res/AssetManager"))); }
-
-static void Audio_init(tl_jcall *c)
-{
-    /* init(int channels, int sampleRate, int bufferLength, int bufferCount) */
-    tl_jni_set_field(c->self, "channels", "I", vi(c->args[0].i));
-    tl_jni_set_field(c->self, "rate", "I", vi(c->args[1].i));
-    tl_log_line("cocos: audio output opened: %d channel(s) at %d Hz, buffer %d x %d", c->args[0].i, c->args[1].i, c->args[2].i, c->args[3].i);
-    c->ret = vz(1);
-}
-
-static void Audio_write(tl_jcall *c)
-{
-    jobj *arr = c->args[0].l;
-    int n = c->args[1].i;                                    /* samples (not frames) */
-    int ch = tl_jni_get_field(c->self, "channels", "I").i, rate = tl_jni_get_field(c->self, "rate", "I").i;
-    if (ch <= 0) ch = 2;
-    if (rate <= 0) rate = 48000;
-    if (!arr || arr->kind != TL_K_PRIM_ARRAY || n <= 0) return;
-    if ((uint32_t)n > arr->arr.len) n = (int)arr->arr.len;
-    if (tl_cocos_audio_hook) {
-        tl_cocos_audio_hook((const int16_t *)arr->arr.data, n / ch, ch, rate);     /* the hook blocks until it has room */
-    } else {
-        struct timespec ts = { 0, (long)((double)(n / ch) * 1e9 / rate) };
-        nanosleep(&ts, NULL);
-    }
-}
-
 /* ------------------------------------------------------------------- tables */
 
 static const struct { const char *name, *super; } k_classes[] = {
@@ -256,7 +219,6 @@ static const struct { const char *name, *super; } k_classes[] = {
     { "org/cocos2dx/lib/Cocos2dxActivity", "com/customRobTop/BaseRobTopActivity" },
     { "com/robtopx/geometryjump/GeometryJump", "org/cocos2dx/lib/Cocos2dxActivity" },
     { "com/customRobTop/JniToCpp", "java/lang/Object" }, { "com/customRobTop/SimpleCrypto", "java/lang/Object" },
-    { "org/fmod/FMOD", "java/lang/Object" }, { "org/fmod/AudioDevice", "java/lang/Object" }, { "org/fmod/MediaCodec", "java/lang/Object" },
 };
 
 #define HELPER "org/cocos2dx/lib/Cocos2dxHelper"
@@ -308,15 +270,6 @@ static const tl_jhle k_hle[] = {
     M(ROBTOP, "showLeaderboards", "()V", Noop), M(ROBTOP, "updateTopScoreLeaderboard", "(I)V", Noop),
     M(ROBTOP, "setupEveryplay", "()V", Noop), M(ROBTOP, "logEvent", "(Ljava/lang/String;)V", Noop),
 
-    M("org/fmod/FMOD", "checkInit", "()Z", RetTrue),
-    M("org/fmod/FMOD", "getOutputSampleRate", "()I", FMOD_sampleRate), M("org/fmod/FMOD", "getOutputBlockSize", "()I", FMOD_blockSize),
-    M("org/fmod/FMOD", "supportsLowLatency", "()Z", RetFalse), M("org/fmod/FMOD", "supportsAAudio", "()Z", RetFalse),
-    M("org/fmod/FMOD", "lowLatencyFlag", "()Z", RetFalse), M("org/fmod/FMOD", "proAudioFlag", "()Z", RetFalse),
-    M("org/fmod/FMOD", "isBluetoothOn", "()Z", RetFalse), M("org/fmod/FMOD", "fileDescriptorFromUri", "(Ljava/lang/String;)I", FMOD_fd),
-    M("org/fmod/FMOD", "getAssetManager", "()Landroid/content/res/AssetManager;", FMOD_assets),
-    M("org/fmod/AudioDevice", "<init>", "()V", Noop), M("org/fmod/AudioDevice", "init", "(IIII)Z", Audio_init),
-    M("org/fmod/AudioDevice", "write", "([SI)V", Audio_write), M("org/fmod/AudioDevice", "close", "()V", Noop),
-    M("org/fmod/MediaCodec", "<init>", "()V", Noop), M("org/fmod/MediaCodec", "init", "(J)Z", RetFalse),
     { NULL, NULL, NULL, NULL }
 };
 
@@ -334,4 +287,5 @@ void tl_cocos_hle_install(const char *pkg, const char *apk, const char *data, in
     prefs_load();
     for (size_t i = 0; i < sizeof(k_classes) / sizeof(k_classes[0]); i++) tl_jni_declare(k_classes[i].name, k_classes[i].super);
     tl_jni_register_hle(k_hle);
+    tl_fmod_install();
 }

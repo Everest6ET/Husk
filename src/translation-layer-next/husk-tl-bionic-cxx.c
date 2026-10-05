@@ -10,7 +10,12 @@
 
 #include <errno.h>
 #include <pthread.h>
+#include <malloc/malloc.h>
+#include <pthread.h>
+#include <sched.h>
 #include <setjmp.h>
+#include <sys/resource.h>
+#include <sys/time.h>
 #include <sys/stat.h>
 #include <signal.h>
 #include <stdatomic.h>
@@ -107,7 +112,62 @@ static int b_sigprocmask(int how, const uint64_t *set, uint64_t *old)
     return 0;
 }
 
+/* ------------------------------------------------------- limits, scheduling, threads */
+
+/* Linux and Darwin number the resource limits differently */
+static int rlimit_to_darwin(int r)
+{
+    static const int m[] = { RLIMIT_CPU, RLIMIT_FSIZE, RLIMIT_DATA, RLIMIT_STACK, RLIMIT_CORE, RLIMIT_RSS, RLIMIT_NPROC, RLIMIT_NOFILE, RLIMIT_MEMLOCK, RLIMIT_AS };
+    return r >= 0 && r < 10 ? m[r] : -1;
+}
+static int b_getrlimit(int res, uint64_t *out)
+{
+    struct rlimit rl; int d = rlimit_to_darwin(res);
+    if (d < 0) { tl_set_guest_errno(22); return -1; }
+    TL_ERRNO_BEGIN(); int r = getrlimit(d, &rl); TL_ERRNO_END();
+    if (r == 0) { out[0] = rl.rlim_cur == RLIM_INFINITY ? ~0ull : rl.rlim_cur; out[1] = rl.rlim_max == RLIM_INFINITY ? ~0ull : rl.rlim_max; }
+    return r;
+}
+static int b_setrlimit(int res, const uint64_t *in)
+{
+    struct rlimit rl; int d = rlimit_to_darwin(res);
+    if (d < 0) { tl_set_guest_errno(22); return -1; }
+    rl.rlim_cur = in[0] == ~0ull ? RLIM_INFINITY : in[0]; rl.rlim_max = in[1] == ~0ull ? RLIM_INFINITY : in[1];
+    TL_ERRNO_BEGIN(); int r = setrlimit(d, &rl); TL_ERRNO_END();
+    return r;
+}
+/* struct rusage has the same layout on both: two timevals and fourteen longs */
+static int b_getrusage(int who, void *out)
+{
+    TL_ERRNO_BEGIN(); int r = getrusage(who == -1 ? RUSAGE_CHILDREN : RUSAGE_SELF, out); TL_ERRNO_END();
+    return r;
+}
+static int b_sched_get_priority_max(int policy) { return policy == 1 || policy == 2 ? 99 : 0; }
+static int b_sched_get_priority_min(int policy) { return policy == 1 || policy == 2 ? 1 : 0; }
+static int b_pthread_setschedparam(pthread_t t, int policy, const int *param) { (void)t; (void)policy; (void)param; return 0; }
+static int b_pthread_getschedparam(pthread_t t, int *policy, int *param) { (void)t; if (policy) *policy = 0; if (param) *param = 0; return 0; }
+static int b_pthread_attr_setschedparam(void *attr, const int *param) { (void)attr; (void)param; return 0; }
+static int b_pthread_gettid_np(pthread_t t) { uint64_t id = 0; pthread_threadid_np(t, &id); return (int)id; }
+
+/* pthread_cleanup_push/pop expand to calls with a record on the caller's stack: {prev, routine, arg} */
+typedef struct cleanup_rec { struct cleanup_rec *prev; void (*routine)(void *); void *arg; } cleanup_rec;
+static __thread cleanup_rec *t_cleanup;
+static void b___pthread_cleanup_push(cleanup_rec *c, void (*routine)(void *), void *arg) { c->routine = routine; c->arg = arg; c->prev = t_cleanup; t_cleanup = c; }
+static void b___pthread_cleanup_pop(cleanup_rec *c, int execute) { t_cleanup = c->prev; if (execute && c->routine) c->routine(c->arg); }
+
+/* bionic's struct mallinfo is ten ints; Darwin keeps no such numbers */
+static void b_mallinfo(int *out) { memset(out, 0, 10 * sizeof(int)); }
+static size_t b_malloc_usable_size(void *p) { return p ? malloc_size(p) : 0; }
+
+static int b_epoll_create(int size) { (void)size; tl_set_guest_errno(38); return -1; }
+
 const tl_bionic_entry tl_tab_cxx[] = {
+    TL_WRAP("getrlimit", b_getrlimit), TL_WRAP("setrlimit", b_setrlimit), TL_WRAP("getrusage", b_getrusage),
+    TL_WRAP("sched_get_priority_max", b_sched_get_priority_max), TL_WRAP("sched_get_priority_min", b_sched_get_priority_min),
+    TL_WRAP("pthread_setschedparam", b_pthread_setschedparam), TL_WRAP("pthread_getschedparam", b_pthread_getschedparam),
+    TL_WRAP("pthread_attr_setschedparam", b_pthread_attr_setschedparam), TL_WRAP("pthread_gettid_np", b_pthread_gettid_np),
+    TL_WRAP("__pthread_cleanup_push", b___pthread_cleanup_push), TL_WRAP("__pthread_cleanup_pop", b___pthread_cleanup_pop),
+    TL_WRAP("mallinfo", b_mallinfo), TL_WRAP("malloc_usable_size", b_malloc_usable_size), TL_WRAP("epoll_create", b_epoll_create),
     TL_WRAP("_Znwm", b_new), TL_WRAP("_Znam", b_new), TL_WRAP("_ZnwmRKSt9nothrow_t", b_new_nothrow), TL_WRAP("_ZnamRKSt9nothrow_t", b_new_nothrow),
     TL_WRAP("_ZdlPv", b_delete), TL_WRAP("_ZdaPv", b_delete), TL_WRAP("_ZdlPvm", b_delete_sized), TL_WRAP("_ZdaPvm", b_delete_sized),
     TL_WRAP("_ZdlPvRKSt9nothrow_t", b_delete_sized), TL_WRAP("_ZdaPvRKSt9nothrow_t", b_delete_sized),

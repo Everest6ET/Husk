@@ -73,9 +73,13 @@ struct tl_lib {
 
     uint8_t *stub_rx, *stub_rw;    /* pages after the image: stubs for rewritten `svc` and x18 sites */
     size_t stub_used, stub_cap, nstub;
+    uint8_t *isl_rx, *isl_rw;      /* a second pool of stubs inside the image: the dead tail of the relocation table, for sites too far from the stub pages */
+    size_t isl_used, isl_cap;
 
     struct { uint64_t start, end; } code[16];   /* executable sections, as vaddrs: the only places instructions are patched */
     int ncode;
+    size_t n_ctr;                  /* reads of CTR_EL0 replaced by a constant */
+    size_t n_svc_far, n_adr_failed;   /* svc sites with no stub in branch range (answered ENOSYS), adr sites that could not be rewritten */
     size_t n_x18, n_x18_failed;    /* sites rewritten for the reserved register, and sites that could not be */
     int state;                     /* 0 mapped, 1 relocating, 2 relocated, 3 initialising, 4 initialised */
     uint32_t n_unresolved;
@@ -537,13 +541,63 @@ bool tl_ld_probe(tl_lib *L, uint64_t vaddr, void (*cb)(uint64_t *regs))
     return true;
 }
 
-/* A 32-byte stub for the `svc` at site_rx; returns its executable address. */
+static bool stub_in_range(const uint8_t *site, const uint8_t *stub)
+{
+    int64_t to = ((int64_t)stub - (int64_t)site) / 4;
+    return to > -(1 << 25) && to < (1 << 25);
+}
+
+/*
+ * A 32-byte slot for a site, as writable and executable addresses, from whichever of the library's two stub pools is
+ * within branch range of the site (a branch reaches 128 MiB, and Minecraft's code spans 220 MiB). `*lit` is the
+ * pool's literal slot, which holds the address of the shared handler.
+ */
+static bool stub_slot(tl_lib *L, const uint8_t *site_rx, uint8_t **rx, uint8_t **rw, const uint8_t **lit)
+{
+    if (L->stub_used + 32 <= L->stub_cap && stub_in_range(site_rx, L->stub_rx + L->stub_used)) {
+        *rx = L->stub_rx + L->stub_used; *rw = L->stub_rw + L->stub_used; *lit = L->stub_rx;
+        L->stub_used += 32;
+        return true;
+    }
+    if (L->isl_used + 32 <= L->isl_cap && stub_in_range(site_rx, L->isl_rx + L->isl_used)) {
+        *rx = L->isl_rx + L->isl_used; *rw = L->isl_rw + L->isl_used; *lit = L->isl_rx;
+        L->isl_used += 32;
+        return true;
+    }
+    return false;
+}
+
+/*
+ * `adr Xd, label` where the label is writable data. adr reaches only a megabyte, and the writable view of the
+ * image is somewhere else entirely, so the instruction is replaced by a branch to a stub that builds the writable
+ * view's address in Xd (four moves) and branches back. Linkers turn adrp+add pairs into adr when the target is
+ * close, which is why small libraries have these and Unity's did not.
+ */
+static bool adr_stub(tl_lib *L, const uint8_t *site_rx, uint32_t rd, uint64_t target, uint32_t *branch)
+{
+    uint8_t *rx, *rw; const uint8_t *lit;
+    if (!stub_slot(L, site_rx, &rx, &rw, &lit)) return false;
+    int64_t to = ((int64_t)rx - (int64_t)site_rx) / 4;
+    int64_t back = ((int64_t)(site_rx + 4) - (int64_t)(rx + 16)) / 4;
+    uint32_t code[8] = {
+        0xD2800000u | ((uint32_t)(target & 0xFFFF) << 5) | rd,                  /* movz Xd, #bits 0..15 */
+        0xF2A00000u | ((uint32_t)((target >> 16) & 0xFFFF) << 5) | rd,          /* movk Xd, #bits 16..31, lsl 16 */
+        0xF2C00000u | ((uint32_t)((target >> 32) & 0xFFFF) << 5) | rd,          /* movk Xd, #bits 32..47, lsl 32 */
+        0xF2E00000u | ((uint32_t)((target >> 48) & 0xFFFF) << 5) | rd,          /* movk Xd, #bits 48..63, lsl 48 */
+        0x14000000u | ((uint32_t)back & 0x3FFFFFFu),                            /* b site+4 */
+        0xD503201Fu, 0xD503201Fu, 0xD503201Fu,
+    };
+    memcpy(rw, code, 32);
+    *branch = 0x14000000u | ((uint32_t)to & 0x3FFFFFFu);
+    return true;
+}
+
+/* A 32-byte stub for the `svc` at site_rx; returns its executable address, or NULL when no pool has room within range. */
 static uint8_t *svc_stub(tl_lib *L, const uint8_t *site_rx)
 {
-    if (L->stub_used + 32 > L->stub_cap) return NULL;
-    uint8_t *rx = L->stub_rx + L->stub_used, *rw = L->stub_rw + L->stub_used;
-    L->stub_used += 32;
-    uint32_t imm19 = (uint32_t)(((int64_t)L->stub_rx - (int64_t)(rx + 8)) / 4) & 0x7FFFFu;
+    uint8_t *rx, *rw; const uint8_t *lit;
+    if (!stub_slot(L, site_rx, &rx, &rw, &lit)) return NULL;
+    uint32_t imm19 = (uint32_t)(((int64_t)lit - (int64_t)(rx + 8)) / 4) & 0x7FFFFu;
     int64_t back = ((int64_t)(site_rx + 4) - (int64_t)(rx + 24)) / 4;
     uint32_t code[8] = {
         0xA9BF7BFDu,                    /* stp x29, x30, [sp, #-16]! */
@@ -805,7 +859,13 @@ static void patch_image(tl_lib *L, size_t *n_tpidr, size_t *n_adrp, size_t *n_ad
             int xr = x18_rewrite(L, &w[i], pc, delta);
             if (xr == X18_DONE) { L->n_x18++; continue; }
             if (xr == X18_FAILED) { L->n_x18_failed++; continue; }
-            if ((insn & 0xFFFFFFE0u) == 0xD53BD040u) {            /* mrs Xt, tpidr_el0 */
+            if ((insn & 0xFFFFFFE0u) == 0xD53B0020u) {            /* mrs Xt, ctr_el0: privileged for user code on Apple silicon */
+                /* The cache type register: the smallest cache lines the program may assume. Code that flushes the
+                 * instruction cache (V8) reads it to step by line; 64 bytes is right for Apple's and safe for any. */
+                uint32_t branch;
+                if (adr_stub(L, pc, insn & 0x1Fu, 0x8444c004ull, &branch)) { w[i] = branch; L->n_ctr++; }
+                else L->n_adr_failed++;
+            } else if ((insn & 0xFFFFFFE0u) == 0xD53BD040u) {            /* mrs Xt, tpidr_el0 */
                 w[i] = encode_adrp(insn & 0x1Fu, pc, G.tcb_rw);
                 (*n_tpidr)++;
             } else if ((insn & 0x9F000000u) == 0x90000000u) {     /* adrp */
@@ -826,7 +886,11 @@ static void patch_image(tl_lib *L, size_t *n_tpidr, size_t *n_adrp, size_t *n_ad
                     w[i] = 0x14000000u | ((uint32_t)off & 0x3FFFFFFu);
                     (*n_svc)++;
                 } else {
-                    tl_log_line("ld: %s: could not rewrite an svc site", L->name);
+                    /* A branch reaches 128 MiB, and a big library's stubs are at its far end. Such a site gets the
+                     * answer a kernel without the call gives -- ENOSYS -- which is what the code around it (a crash
+                     * reporter's raw-syscall wrappers, in Minecraft's case) is written to cope with. */
+                    w[i] = 0x92800000u | (37u << 5);                /* movn x0, #37  (x0 = -ENOSYS) */
+                    L->n_svc_far++;
                 }
             } else if ((insn & 0x9F000000u) == 0x10000000u) {     /* adr */
                 int64_t imm = (int64_t)((((insn >> 5) & 0x7FFFFu) << 2) | ((insn >> 29) & 3u));
@@ -834,7 +898,9 @@ static void patch_image(tl_lib *L, size_t *n_tpidr, size_t *n_adrp, size_t *n_ad
                 uintptr_t tp = (uintptr_t)pc + (uintptr_t)imm;
                 if (tp >= (uintptr_t)L->rx && tp < (uintptr_t)L->rx + L->npages * PAGE
                     && (L->pflags[(tp - (uintptr_t)L->rx) / PAGE] & TL_PAGE_W)) {
-                    (*n_adr)++;
+                    uint32_t branch;
+                    if (adr_stub(L, pc, insn & 0x1Fu, (uint64_t)(tp + (uintptr_t)delta), &branch)) { w[i] = branch; (*n_adr)++; }
+                    else L->n_adr_failed++;
                 }
             }
         }
@@ -1128,6 +1194,13 @@ static tl_lib *map_library(const char *name, uint8_t *file, size_t flen)
         for (size_t k = 0, cnt = (size_t)(code[r].size / 4); k < cnt; k++) {
             uint32_t v = wv[k];
             if (v == 0xD4000001u) stub_bytes += 32;
+            else if ((v & 0xFFFFFFE0u) == 0xD53B0020u) stub_bytes += 32;                 /* mrs Xt, CTR_EL0 */
+            else if ((v & 0x9F000000u) == 0x10000000u) {                 /* adr: a stub if it reaches writable data */
+                int64_t imm = (int64_t)((((v >> 5) & 0x7FFFFu) << 2) | ((v >> 29) & 3u));
+                if (imm & 0x100000) imm -= 0x200000;
+                int64_t tv = (int64_t)(code[r].vaddr + k * 4) + imm - (int64_t)base_vaddr;
+                if (tv >= 0 && (size_t)tv < npages * PAGE && (flags[(size_t)tv / PAGE] & TL_PAGE_W)) stub_bytes += 32;
+            }
             else if (((v & 31u) == 18 || ((v >> 5) & 31u) == 18 || ((v >> 10) & 31u) == 18 || ((v >> 16) & 31u) == 18) && a64_uses_gpr(v, 18, NULL))
                 stub_bytes += X18_STUB_BYTES;
         }
@@ -1192,6 +1265,17 @@ static bool relocate(tl_lib *L)
     free(L->symcache);
     L->symcache = NULL;
     if (!ok) { tl_log_line("ld: %s: relocation failed", L->name); return false; }
+    /* The relocation table is dead now that the image is relocated. Its tail becomes a second pool of stubs, for the
+     * sites that are out of branch range of the stub pages after a very large image. */
+    if (L->relasz >= (1u << 20) && L->rela >= L->base_vaddr) {
+        uint64_t end = (L->rela + L->relasz) & ~(uint64_t)(PAGE - 1), cap = 256u << 10;
+        if (end - L->rela > cap + PAGE) {
+            size_t off = (size_t)(end - cap - L->base_vaddr);
+            L->isl_rx = L->rx + off; L->isl_rw = L->rw + off; L->isl_cap = cap; L->isl_used = 16;
+            memset(L->isl_rw, 0, cap);
+            uint64_t h = (uint64_t)(uintptr_t)tl_svc_common; memcpy(L->isl_rw, &h, 8);
+        }
+    }
     size_t t = 0, a = 0, ad = 0, sv = 0;
     patch_image(L, &t, &a, &ad, &sv);
     tl_xmem_flush(L->rx, (L->npages + L->nstub) * PAGE);
@@ -1201,7 +1285,10 @@ static bool relocate(tl_lib *L)
                     (double)(L->npages * PAGE) / 1048576.0, count, t, a,
                     L->n_unresolved ? ", unresolved imports: " : "", "");
         if (L->n_unresolved) tl_log_line("ld:   %s: %u imports bound to logging stubs", L->name, L->n_unresolved);
-        if (ad) tl_log_line("ld:   %s: %zu 'adr' instructions reach writable data through the read-only view", L->name, ad);
+        if (ad) tl_log_line("ld:   %s: %zu 'adr' instructions that reach writable data rewritten", L->name, ad);
+        if (L->n_adr_failed) tl_log_line("ld:   %s: %zu 'adr' instructions reach writable data and could not be rewritten", L->name, L->n_adr_failed);
+        if (L->n_ctr) tl_log_line("ld:   %s: %zu reads of CTR_EL0 replaced by a constant", L->name, L->n_ctr);
+        if (L->n_svc_far) tl_log_line("ld:   %s: %zu raw system-call sites are out of branch range of the stubs and answer ENOSYS", L->name, L->n_svc_far);
         if (sv) tl_log_line("ld:   %s: %zu raw system-call sites rewritten", L->name, sv);
         if (L->n_x18 || L->n_x18_failed) tl_log_line("ld:   %s: %zu instructions using x18 rewritten for the virtual register%s", L->name, L->n_x18,
                                                      L->n_x18_failed ? " (and some that could not be)" : "");

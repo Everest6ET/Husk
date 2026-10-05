@@ -27,10 +27,12 @@
  * to a pipe. Unity's main thread polls it between frames. This one has the wake pipe
  * and nothing else registered on it: no file descriptors, no callbacks.
  */
-typedef struct tl_looper { int wake[2]; atomic_int refs; pthread_t thread; struct tl_looper *next; } tl_looper;
+typedef struct looper_fd { int fd, ident, events; void *callback, *data; struct looper_fd *next; } looper_fd;
+typedef struct tl_looper { int wake[2]; atomic_int refs; pthread_t thread; struct tl_looper *next; pthread_mutex_t mu; looper_fd *fds; } tl_looper;
 static __thread tl_looper *t_looper;
 
 enum { ALOOPER_POLL_WAKE = -1, ALOOPER_POLL_CALLBACK = -2, ALOOPER_POLL_TIMEOUT = -3, ALOOPER_POLL_ERROR = -4 };
+enum { ALOOPER_EVENT_INPUT = 1, ALOOPER_EVENT_OUTPUT = 2, ALOOPER_EVENT_ERROR = 4, ALOOPER_EVENT_HANGUP = 8 };
 
 static tl_looper *looper_make(void)
 {
@@ -40,6 +42,7 @@ static tl_looper *looper_make(void)
         fcntl(l->wake[1], F_SETFL, O_NONBLOCK);
     }
     atomic_init(&l->refs, 1);
+    pthread_mutex_init(&l->mu, NULL);
     l->thread = pthread_self();
     return l;
 }
@@ -53,6 +56,31 @@ static void b_ALooper_wake(tl_looper *l)
     char c = 1;
     (void)!write(l->wake[1], &c, 1);
 }
+
+/* A file descriptor the looper watches: with a callback it is called from the polling thread; without one, its ident is returned. */
+static int b_ALooper_addFd(tl_looper *l, int fd, int ident, int events, void *callback, void *data)
+{
+    if (!l || fd < 0) return -1;
+    pthread_mutex_lock(&l->mu);
+    looper_fd *f = l->fds;
+    while (f && f->fd != fd) f = f->next;
+    if (!f) { f = calloc(1, sizeof(*f)); f->next = l->fds; l->fds = f; }
+    f->fd = fd; f->ident = ident; f->events = events; f->callback = callback; f->data = data;
+    pthread_mutex_unlock(&l->mu);
+    b_ALooper_wake(l);
+    return 1;
+}
+static int b_ALooper_removeFd(tl_looper *l, int fd)
+{
+    if (!l) return -1;
+    int found = 0;
+    pthread_mutex_lock(&l->mu);
+    for (looper_fd **pp = &l->fds; *pp; pp = &(*pp)->next)
+        if ((*pp)->fd == fd) { looper_fd *dead = *pp; *pp = dead->next; free(dead); found = 1; break; }
+    pthread_mutex_unlock(&l->mu);
+    return found;
+}
+
 static int b_ALooper_pollOnce(int timeout_ms, int *out_fd, int *out_events, void **out_data)
 {
     tl_looper *l = t_looper;
@@ -60,14 +88,72 @@ static int b_ALooper_pollOnce(int timeout_ms, int *out_fd, int *out_events, void
     if (out_events) *out_events = 0;
     if (out_data) *out_data = NULL;
     if (!l) return ALOOPER_POLL_ERROR;
-    struct pollfd p = { l->wake[0], POLLIN, 0 };
-    int r = poll(&p, 1, timeout_ms);
+    struct pollfd pfds[32];
+    looper_fd snap[31];
+    int n = 0;
+    pfds[n++] = (struct pollfd){ l->wake[0], POLLIN, 0 };
+    pthread_mutex_lock(&l->mu);
+    for (looper_fd *f = l->fds; f && n < 32; f = f->next) {
+        short ev = (short)(((f->events & ALOOPER_EVENT_INPUT) ? POLLIN : 0) | ((f->events & ALOOPER_EVENT_OUTPUT) ? POLLOUT : 0));
+        snap[n - 1] = *f;
+        pfds[n++] = (struct pollfd){ f->fd, ev, 0 };
+    }
+    pthread_mutex_unlock(&l->mu);
+    int r = poll(pfds, (nfds_t)n, timeout_ms);
     if (r < 0) return ALOOPER_POLL_ERROR;
     if (r == 0) return ALOOPER_POLL_TIMEOUT;
-    char buf[64];
-    while (read(l->wake[0], buf, sizeof(buf)) > 0) {}
+    if (pfds[0].revents & POLLIN) { char buf[64]; while (read(l->wake[0], buf, sizeof(buf)) > 0) {} }
+    for (int i = 1; i < n; i++) {
+        if (!pfds[i].revents) continue;
+        looper_fd *f = &snap[i - 1];
+        int ev = ((pfds[i].revents & POLLIN) ? ALOOPER_EVENT_INPUT : 0) | ((pfds[i].revents & POLLOUT) ? ALOOPER_EVENT_OUTPUT : 0)
+               | ((pfds[i].revents & POLLERR) ? ALOOPER_EVENT_ERROR : 0) | ((pfds[i].revents & POLLHUP) ? ALOOPER_EVENT_HANGUP : 0);
+        if (f->callback) {
+            int keep = ((int (*)(int, int, void *))f->callback)(f->fd, ev, f->data);
+            if (!keep) b_ALooper_removeFd(l, f->fd);
+            return ALOOPER_POLL_CALLBACK;
+        }
+        if (out_fd) *out_fd = f->fd;
+        if (out_events) *out_events = ev;
+        if (out_data) *out_data = f->data;
+        return f->ident;
+    }
     return ALOOPER_POLL_WAKE;
 }
+static int b_ALooper_pollAll(int timeout_ms, int *out_fd, int *out_events, void **out_data)
+{
+    for (;;) {
+        int r = b_ALooper_pollOnce(timeout_ms, out_fd, out_events, out_data);
+        if (r != ALOOPER_POLL_CALLBACK) return r;
+        timeout_ms = 0;
+    }
+}
+
+/* ----------------------------------------------------------- configuration */
+
+/* AConfiguration: an English, landscape, phone-sized device. */
+typedef struct { char language[2], country[2]; int orientation, density, screen_long, screen_size, ui_mode_type, ui_mode_night; } tl_aconfig;
+static tl_aconfig *b_AConfiguration_new(void)
+{
+    tl_aconfig *c = calloc(1, sizeof(*c));
+    memcpy(c->language, "en", 2); memcpy(c->country, "US", 2);
+    c->orientation = 2; c->density = 480; c->screen_long = 2; c->screen_size = 2;
+    return c;
+}
+static void b_AConfiguration_delete(tl_aconfig *c) { free(c); }
+static void b_AConfiguration_fromAssetManager(tl_aconfig *c, void *mgr) { (void)c; (void)mgr; }
+static void b_AConfiguration_getLanguage(tl_aconfig *c, char *out) { out[0] = c->language[0]; out[1] = c->language[1]; }
+static void b_AConfiguration_getCountry(tl_aconfig *c, char *out) { out[0] = c->country[0]; out[1] = c->country[1]; }
+static int b_AConfiguration_getOrientation(tl_aconfig *c) { return c->orientation; }
+static int b_AConfiguration_getDensity(tl_aconfig *c) { return c->density; }
+static int b_AConfiguration_getScreenLong(tl_aconfig *c) { return c->screen_long; }
+static int b_AConfiguration_getScreenSize(tl_aconfig *c) { return c->screen_size; }
+static int b_AConfiguration_getUiModeType(tl_aconfig *c) { return c->ui_mode_type; }
+static int b_AConfiguration_getUiModeNight(tl_aconfig *c) { return c->ui_mode_night; }
+static int b_AConfiguration_getKeyboard(tl_aconfig *c) { (void)c; return 1; }
+static int b_AConfiguration_getNavigation(tl_aconfig *c) { (void)c; return 1; }
+static int b_AConfiguration_getTouchscreen(tl_aconfig *c) { (void)c; return 3; }
+static int b_AConfiguration_getSdkVersion(tl_aconfig *c) { (void)c; return 34; }
 
 /* ---------------------------------------------------------------- assets */
 
@@ -97,6 +183,35 @@ static void *b_AAssetManager_open(void *mgr, const char *name, int mode)
     }
     return NULL;
 }
+/* AAudio: reported unavailable (AAUDIO_ERROR_UNAVAILABLE), so an engine that tries it first falls back to its Java output. */
+static int b_AAudio_createStreamBuilder(void **builder) { if (builder) *builder = NULL; return -899; }
+static const char *b_AAudio_convertResultToText(int r) { (void)r; return "AAudio is not available"; }
+
+/* AAssetDir: the files directly under an asset directory, across the APKs */
+typedef struct { char **names; size_t n, pos; } tl_assetdir;
+static void *b_AAssetManager_openDir(void *mgr, const char *dir)
+{
+    (void)mgr;
+    char prefix[1024];
+    size_t pl = (size_t)snprintf(prefix, sizeof(prefix), "assets/%s%s", dir, dir[0] && dir[strlen(dir) - 1] != '/' ? "/" : "");
+    tl_assetdir *d = calloc(1, sizeof(*d));
+    size_t cap = 0;
+    for (int i = 0;; i++) {
+        const tl_zip *z = tl_ld_apk_at(i);
+        if (!z) break;
+        for (size_t k = 0; k < z->count; k++) {
+            const char *name = z->entries[k].name;
+            if (strncmp(name, prefix, pl) != 0 || !name[pl] || strchr(name + pl, '/')) continue;
+            if (d->n == cap) { cap = cap ? cap * 2 : 64; d->names = realloc(d->names, cap * sizeof(char *)); }
+            d->names[d->n++] = strdup(name + pl);
+        }
+    }
+    return d;
+}
+static const char *b_AAssetDir_getNextFileName(tl_assetdir *d) { return d && d->pos < d->n ? d->names[d->pos++] : NULL; }
+static void b_AAssetDir_close(tl_assetdir *d) { if (!d) return; for (size_t i = 0; i < d->n; i++) free(d->names[i]); free(d->names); free(d); }
+static unsigned long b_deflateBound(void *strm, unsigned long n) { (void)strm; return n + (n >> 12) + (n >> 14) + (n >> 25) + 13; }
+
 static void b_AAsset_close(tl_asset *a) { if (a) { free(a->owned); free(a); } }
 static int b_AAsset_read(tl_asset *a, void *buf, size_t n)
 {
@@ -193,8 +308,21 @@ const tl_bionic_entry tl_tab_ndk[] = {
     /* looper */
     TL_WRAP("ALooper_prepare", b_ALooper_prepare), TL_WRAP("ALooper_forThread", b_ALooper_forThread),
     TL_WRAP("ALooper_acquire", b_ALooper_acquire), TL_WRAP("ALooper_release", b_ALooper_release),
-    TL_WRAP("ALooper_wake", b_ALooper_wake), TL_WRAP("ALooper_pollOnce", b_ALooper_pollOnce),
+    TL_WRAP("ALooper_wake", b_ALooper_wake), TL_WRAP("ALooper_pollOnce", b_ALooper_pollOnce), TL_WRAP("ALooper_pollAll", b_ALooper_pollAll),
+    TL_WRAP("ALooper_addFd", b_ALooper_addFd), TL_WRAP("ALooper_removeFd", b_ALooper_removeFd),
+    /* configuration */
+    TL_WRAP("AConfiguration_new", b_AConfiguration_new), TL_WRAP("AConfiguration_delete", b_AConfiguration_delete),
+    TL_WRAP("AConfiguration_fromAssetManager", b_AConfiguration_fromAssetManager), TL_WRAP("AConfiguration_getLanguage", b_AConfiguration_getLanguage),
+    TL_WRAP("AConfiguration_getCountry", b_AConfiguration_getCountry), TL_WRAP("AConfiguration_getOrientation", b_AConfiguration_getOrientation),
+    TL_WRAP("AConfiguration_getDensity", b_AConfiguration_getDensity), TL_WRAP("AConfiguration_getScreenLong", b_AConfiguration_getScreenLong),
+    TL_WRAP("AConfiguration_getScreenSize", b_AConfiguration_getScreenSize), TL_WRAP("AConfiguration_getUiModeType", b_AConfiguration_getUiModeType),
+    TL_WRAP("AConfiguration_getUiModeNight", b_AConfiguration_getUiModeNight), TL_WRAP("AConfiguration_getKeyboard", b_AConfiguration_getKeyboard),
+    TL_WRAP("AConfiguration_getNavigation", b_AConfiguration_getNavigation), TL_WRAP("AConfiguration_getTouchscreen", b_AConfiguration_getTouchscreen),
+    TL_WRAP("AConfiguration_getSdkVersion", b_AConfiguration_getSdkVersion),
     /* assets */
+    TL_WRAP("AAudio_createStreamBuilder", b_AAudio_createStreamBuilder), TL_WRAP("AAudio_convertResultToText", b_AAudio_convertResultToText),
+    TL_WRAP("AAssetManager_openDir", b_AAssetManager_openDir), TL_WRAP("AAssetDir_getNextFileName", b_AAssetDir_getNextFileName),
+    TL_WRAP("AAssetDir_close", b_AAssetDir_close), TL_WRAP("deflateBound", b_deflateBound),
     TL_WRAP("AAssetManager_fromJava", b_AAssetManager_fromJava), TL_WRAP("AAssetManager_open", b_AAssetManager_open),
     TL_WRAP("AAsset_close", b_AAsset_close), TL_WRAP("AAsset_read", b_AAsset_read), TL_WRAP("AAsset_getLength", b_AAsset_getLength),
     TL_WRAP("AAsset_getLength64", b_AAsset_getLength), TL_WRAP("AAsset_getRemainingLength", b_AAsset_getRemainingLength),
