@@ -35,7 +35,7 @@ static bool es31_ident(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c 
 /* The 300 es text of a 310 es shader (malloc'd), with the bindings it dropped in rec[0..*nrec). Anything else is returned as it came. */
 static char *es31_downgrade(const char *src, size_t n, es31_bind *rec, int *nrec)
 {
-    char *out = malloc(n + 8); size_t o = 0;
+    char *out = malloc(n + 4096); size_t o = 0;
     *nrec = 0;
     const char *ver = strstr(src, "#version 310 es");
     if (!ver) { memcpy(out, src, n); out[n] = 0; return out; }
@@ -50,8 +50,29 @@ static char *es31_downgrade(const char *src, size_t n, es31_bind *rec, int *nrec
             size_t d = j; while (d < n && src[d] != ';' && src[d] != '{') d++;
             char decl[200]; size_t dl = d - j; if (dl >= sizeof(decl)) dl = sizeof(decl) - 1;
             memcpy(decl, src + j, dl); decl[dl] = 0;
-            bool opaque = strstr(decl, "image") || strstr(decl, "buffer") || strstr(decl, "atomic_uint");
-            if (b && !opaque) {
+            bool opaque = strstr(decl, "image") || strstr(decl, "atomic_uint");
+            bool ssbo = !opaque && strstr(decl, "buffer") && d < n && src[d] == '{' && !strstr(decl, "writeonly") && !strstr(decl, "coherent");
+            if (ssbo && b) {
+                /* A read-only storage block of structs becomes a uniform block of 1024 of them (std140 and std430 lay these structs out alike
+                 * when their members are 4-byte scalars); the game's glBindBufferBase on the storage target is redirected to the uniform one. */
+                size_t close = d; int depth2 = 0;
+                while (close < n) { if (src[close] == '{') depth2++; else if (src[close] == '}' && --depth2 == 0) break; close++; }
+                char *eq = strchr(b, '='); int val = eq ? atoi(eq + 1) : -1;
+                size_t e = dl;
+                while (e && (decl[e - 1] == ' ' || decl[e - 1] == '\n' || decl[e - 1] == '\t' || decl[e - 1] == '\r')) e--;
+                size_t st = e; while (st && es31_ident(decl[st - 1])) st--;
+                if (close < n && val >= 0 && e > st && e - st < sizeof(rec[0].name) && *nrec < ES31_BINDS) {
+                    memcpy(rec[*nrec].name, decl + st, e - st); rec[*nrec].name[e - st] = 0; rec[*nrec].binding = val; rec[*nrec].block = true; (*nrec)++;
+                    o += (size_t)sprintf(out + o, "layout(std140) uniform %.*s\n{", (int)(e - st), decl + st);
+                    for (size_t k = d + 1; k < close; k++) {
+                        if (src[k] == '[' && k + 1 < close && src[k + 1] == ']') { o += (size_t)sprintf(out + o, "[1024]"); k++; }
+                        else out[o++] = src[k];
+                    }
+                    out[o++] = '}';
+                    i = close + 1; continue;
+                }
+            }
+            if (b && !opaque && !ssbo) {
                 char *eq = strchr(b, '='); int val = eq ? atoi(eq + 1) : -1;
                 bool block = d < n && src[d] == '{';
                 if (*nrec < ES31_BINDS && val >= 0) {
@@ -153,4 +174,64 @@ static void w_glGetIntegerv(unsigned pname, int *data)
 {
     r_glGetIntegerv(pname, data);
     if (g_es31_shim && pname == 0x821C /* GL_MINOR_VERSION */ && data && *data == 0) *data = 1;
+}
+
+/* The storage-buffer target (a block of the game's data) is a uniform buffer here; a buffer the game made for it is grown to what the
+ * 1024-element block above needs, so the binding is never smaller than the block. */
+static void es31_note_storage(const char *call, unsigned target)
+{
+    static atomic_int said;
+    if (g_es31_shim && target == 0x90D2 && atomic_fetch_add(&said, 1) < 12) tl_log_line("es31: %s on the storage-buffer target", call);
+}
+#define ES31_UBO_MIN (1024 * 32)
+static void (*r_glBindBufferBase)(unsigned, unsigned, unsigned);
+static void w_glBindBufferBase(unsigned target, unsigned index, unsigned buffer)
+{
+    es31_note_storage("glBindBufferBase", target);
+    if (g_es31_shim && target == 0x90D2 /* GL_SHADER_STORAGE_BUFFER */) {
+        static void (*getparam)(unsigned, unsigned, int *), (*bindbuf)(unsigned, unsigned), (*bufdata)(unsigned, long, const void *, unsigned),
+                    (*copysub)(unsigned, unsigned, long, long, long), (*getsub)(unsigned, long, long, void *), (*subdata)(unsigned, long, long, const void *);
+        if (!getparam && a_eglGetProcAddress) {
+            getparam = a_eglGetProcAddress("glGetBufferParameteriv"); bindbuf = a_eglGetProcAddress("glBindBuffer");
+            bufdata = a_eglGetProcAddress("glBufferData"); getsub = a_eglGetProcAddress("glGetBufferSubData"); subdata = a_eglGetProcAddress("glBufferSubData");
+            copysub = a_eglGetProcAddress("glCopyBufferSubData");
+        }
+        if (getparam && bindbuf && bufdata && subdata && copysub && buffer) {
+            int size = 0, usage = 0x88E4; /* GL_STATIC_DRAW */
+            bindbuf(0x8F36 /* GL_COPY_WRITE_BUFFER */, buffer);
+            getparam(0x8F36, 0x8764 /* GL_BUFFER_SIZE */, &size);
+            getparam(0x8F36, 0x8765 /* GL_BUFFER_USAGE */, &usage);
+            if (size > 0 && size < ES31_UBO_MIN) {
+                unsigned tmp = 0; void (*gen)(int, unsigned *) = a_eglGetProcAddress("glGenBuffers"); void (*del)(int, const unsigned *) = a_eglGetProcAddress("glDeleteBuffers");
+                if (gen && del) {
+                    gen(1, &tmp);
+                    bindbuf(0x8F37 /* GL_COPY_READ_BUFFER */, tmp);
+                    bufdata(0x8F37, size, NULL, 0x88E4);
+                    copysub(0x8F36, 0x8F37, 0, 0, size);
+                    bufdata(0x8F36, ES31_UBO_MIN, NULL, (unsigned)usage);
+                    copysub(0x8F37, 0x8F36, 0, 0, size);
+                    del(1, &tmp);
+                }
+            }
+            bindbuf(0x8F36, 0);
+        }
+        target = 0x8A11; /* GL_UNIFORM_BUFFER */
+    }
+    r_glBindBufferBase(target, index, buffer);
+}
+
+/* The other calls that name the storage target: it is the uniform one here. */
+#define ES31_STORAGE(t) ((t) == 0x90D2 ? 0x8A11u : (t))
+static void (*r_glBindBuffer)(unsigned, unsigned);
+static void w_glBindBuffer(unsigned t, unsigned b) { es31_note_storage("glBindBuffer", t); r_glBindBuffer(g_es31_shim ? ES31_STORAGE(t) : t, b); }
+static void (*r_glBufferData)(unsigned, long, const void *, unsigned);
+static void w_glBufferData(unsigned t, long n, const void *d, unsigned u) { es31_note_storage("glBufferData", t); r_glBufferData(g_es31_shim ? ES31_STORAGE(t) : t, n, d, u); }
+static void (*r_glBufferSubData)(unsigned, long, long, const void *);
+static void w_glBufferSubData(unsigned t, long o, long n, const void *d) { es31_note_storage("glBufferSubData", t); r_glBufferSubData(g_es31_shim ? ES31_STORAGE(t) : t, o, n, d); }
+static void (*r_glBindBufferRange)(unsigned, unsigned, unsigned, long, long);
+static void w_glBindBufferRange(unsigned t, unsigned i, unsigned b, long o, long n)
+{
+    es31_note_storage("glBindBufferRange", t);
+    if (g_es31_shim && t == 0x90D2) { w_glBindBufferBase(t, i, b); return; }   /* grows the buffer if need be; the whole buffer is bound */
+    r_glBindBufferRange(t, i, b, o, n);
 }

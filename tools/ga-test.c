@@ -151,6 +151,19 @@ static void soft_assert_probe(uint64_t *r)
     tl_log_line("SOFT ASSERT: %.120s | %.100s | line %d | %.90s | %.90s", (const char *)r[0], (const char *)r[1], (int)r[2], (const char *)r[3], (const char *)r[4]);
 }
 
+/* TL_CXA_THROW=1: say what C++ exception each throw is (type name, thrower and the exception's first words), for finding what a terminate was about. */
+static void throw_probe(uint64_t *r)
+{
+    const void *ti = (const void *)r[1];
+    const char *tn = ti ? *(const char *const *)((const char *)ti + 8) : "?";
+    const char *ex = (const char *)r[0], *msg = "";
+    char shown[100]; shown[0] = 0;
+    /* libc++'s logic_error/runtime_error keep a pointer to the message just after the vtable */
+    if (ex) { const char *const *q = (const char *const *)ex; for (int i = 1; i <= 2; i++) { const char *c = q[i]; if ((uintptr_t)c > 0x100000 && ((uintptr_t)c >> 40) < 0x1000) { size_t k = 0; while (k < 90 && c[k] >= 32 && c[k] < 127) { shown[k] = c[k]; k++; } shown[k] = 0; if (k > 3) { msg = shown; break; } } } }
+    uint64_t lr; __asm__ volatile("mov %0, x30" : "=r"(lr));
+    tl_log_line("C++ THROW: %s %s", tn ? tn : "?", msg);
+}
+
 /* RenderDragon's bgfx callback: fatal(code in x1, message in x2) */
 static void fatal_probe(uint64_t *r)
 {
@@ -370,6 +383,11 @@ int main(int argc, char **argv)
     if (getenv("TL_MC_SOFT_ASSERT")) {
         tl_lib *L = tl_ld_find_lib("libminecraftpe.so");
         if (L && !tl_ld_probe(L, 0x150df538, soft_assert_probe)) fprintf(stderr, "soft assert probe failed\n");
+    }
+    if (getenv("TL_CXA_THROW")) {
+        tl_lib *L = tl_ld_find_lib("libc++_shared.so");
+        uintptr_t fn = L ? (uintptr_t)tl_ld_sym(L, "__cxa_throw") : 0;
+        if (fn && !tl_ld_probe(L, (uint64_t)(fn - lib_bias("libc++_shared.so")), throw_probe)) fprintf(stderr, "throw probe failed\n");
     }
     if (!tl_ga_run()) { fprintf(stderr, "minecraft: run failed\n"); return 1; }
     if (getenv("TL_CTL")) { static pthread_t ct; pthread_create(&ct, NULL, control_thread, getenv("TL_CTL")); }

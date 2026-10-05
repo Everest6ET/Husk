@@ -112,6 +112,7 @@ static const tl_jhle k_input_hle[] = {
     K("android/view/MotionEvent", "getX", "(I)F", ME_getXi), K("android/view/MotionEvent", "getY", "(I)F", ME_getYi),
     K("android/view/MotionEvent", "getX", "()F", ME_getX), K("android/view/MotionEvent", "getY", "()F", ME_getY),
     K("android/view/MotionEvent", "getRawX", "()F", ME_getX), K("android/view/MotionEvent", "getRawY", "()F", ME_getY),
+    K("android/view/MotionEvent", "getRawX", "(I)F", ME_getXi), K("android/view/MotionEvent", "getRawY", "(I)F", ME_getYi),
     K("android/view/MotionEvent", "getPressure", "(I)F", ME_getPressure), K("android/view/MotionEvent", "getPressure", "()F", ME_getPressure),
     K("android/view/MotionEvent", "getSize", "(I)F", ME_getSize), K("android/view/MotionEvent", "getSize", "()F", ME_getSize),
     K("android/view/MotionEvent", "getTouchMajor", "(I)F", ME_zeroF), K("android/view/MotionEvent", "getTouchMinor", "(I)F", ME_zeroF),
