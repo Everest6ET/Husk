@@ -344,6 +344,18 @@ static int b_AAsset_isAllocated(tl_asset *a) { return a->owned != NULL; }
 
 /* ---------------------------------------------------------------- windows */
 
+/* The input queue a NativeActivity's glue attaches to its looper. Nothing arrives through it here: touches and controllers are delivered by other means. */
+static void b_AInputQueue_attachLooper(void *q, void *looper, int ident, void *cb, void *data) { (void)q; (void)looper; (void)ident; (void)cb; (void)data; }
+static void b_AInputQueue_detachLooper(void *q) { (void)q; }
+static int32_t b_AInputQueue_hasEvents(void *q) { (void)q; return 0; }
+static int32_t b_AInputQueue_getEvent(void *q, void **ev) { (void)q; if (ev) *ev = NULL; return -1; }
+static int32_t b_AInputQueue_preDispatchEvent(void *q, void *ev) { (void)q; (void)ev; return 0; }
+static void b_AInputQueue_finishEvent(void *q, void *ev, int handled) { (void)q; (void)ev; (void)handled; }
+static void b_ANativeActivity_noop(void *a) { (void)a; }
+static void b_ANativeActivity_flags(void *a, uint32_t add, uint32_t remove) { (void)a; (void)add; (void)remove; }
+static void b_ANativeActivity_input(void *a, uint32_t flags) { (void)a; (void)flags; }
+
+
 typedef struct tl_nwindow { atomic_int refs; int width, height, format; void *layer; } tl_nwindow;
 static tl_nwindow g_window = { 1, 1080, 2400, 1, NULL };
 
@@ -413,6 +425,8 @@ const tl_bionic_entry tl_tab_ndk[] = {
     /* zlib */
     TL_DIRECT(deflate), TL_DIRECT(deflateEnd), TL_DIRECT(deflateInit2_), TL_DIRECT(deflateInit_),
     TL_DIRECT(inflate), TL_DIRECT(inflateEnd), TL_DIRECT(inflateInit2_), TL_DIRECT(inflateInit_), TL_DIRECT(zError),
+    TL_DIRECT(compressBound), TL_DIRECT(zlibVersion), TL_DIRECT(compress), TL_DIRECT(compress2), TL_DIRECT(uncompress), TL_DIRECT(crc32), TL_DIRECT(adler32),
+    TL_DIRECT(inflateReset), TL_DIRECT(inflateReset2), TL_DIRECT(deflateReset), TL_DIRECT(inflateSync), TL_DIRECT(deflateParams), TL_DIRECT(deflateSetDictionary), TL_DIRECT(inflateSetDictionary),
     /* looper */
     TL_WRAP("ALooper_prepare", b_ALooper_prepare), TL_WRAP("ALooper_forThread", b_ALooper_forThread),
     TL_WRAP("ALooper_acquire", b_ALooper_acquire), TL_WRAP("ALooper_release", b_ALooper_release),
@@ -456,6 +470,11 @@ const tl_bionic_entry tl_tab_ndk[] = {
     TL_WRAP("ANativeWindow_getHeight", b_ANativeWindow_getHeight), TL_WRAP("ANativeWindow_getFormat", b_ANativeWindow_getFormat),
     TL_WRAP("ANativeWindow_setBuffersGeometry", b_ANativeWindow_setBuffersGeometry),
     TL_WRAP("ANativeWindow_toSurface", b_ANativeWindow_toSurface),
+    TL_WRAP("AInputQueue_attachLooper", b_AInputQueue_attachLooper), TL_WRAP("AInputQueue_detachLooper", b_AInputQueue_detachLooper),
+    TL_WRAP("AInputQueue_hasEvents", b_AInputQueue_hasEvents), TL_WRAP("AInputQueue_getEvent", b_AInputQueue_getEvent),
+    TL_WRAP("AInputQueue_preDispatchEvent", b_AInputQueue_preDispatchEvent), TL_WRAP("AInputQueue_finishEvent", b_AInputQueue_finishEvent),
+    TL_WRAP("ANativeActivity_finish", b_ANativeActivity_noop), TL_WRAP("ANativeActivity_setWindowFormat", b_ANativeActivity_input), TL_WRAP("ANativeActivity_setWindowFlags", b_ANativeActivity_flags),
+    TL_WRAP("ANativeActivity_showSoftInput", b_ANativeActivity_input), TL_WRAP("ANativeActivity_hideSoftInput", b_ANativeActivity_input),
     /* sensors */
     TL_WRAP("ASensorManager_getInstance", b_ASensorManager_getInstance), TL_WRAP("ASensorManager_getDefaultSensor", b_ASensorManager_getDefaultSensor),
     TL_WRAP("ASensorManager_getSensorList", b_ASensorManager_getSensorList), TL_WRAP("ASensorManager_createEventQueue", b_ASensorManager_createEventQueue),

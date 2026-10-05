@@ -131,6 +131,30 @@ const char *tl_sysprop(const char *name)
 }
 
 /* __system_property_find returns an opaque pointer that read() takes back. */
+/* sysinfo(2): what the engines ask for to size their caches -- how much RAM there is, and how much is free. */
+typedef struct { long uptime; unsigned long loads[3], totalram, freeram, sharedram, bufferram, totalswap, freeswap; unsigned short procs, pad; unsigned long totalhigh, freehigh; unsigned int mem_unit; char pad2[4]; } guest_sysinfo;
+static int bionic_sysinfo(guest_sysinfo *si)
+{
+    memset(si, 0, sizeof(*si));
+    uint64_t mem = 0; size_t len = sizeof(mem);
+    sysctlbyname("hw.memsize", &mem, &len, NULL, 0);
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    si->uptime = ts.tv_sec;
+    si->totalram = (unsigned long)mem;
+    si->freeram = (unsigned long)(mem / 4);
+    si->mem_unit = 1;
+    si->procs = 1;
+    return 0;
+}
+
+/* CPU_COUNT(): the number of CPUs in a set. */
+static int bionic_sched_cpucount(size_t setsize, const unsigned char *set)
+{
+    int n = 0;
+    for (size_t i = 0; i < setsize; i++) n += __builtin_popcount(set[i]);
+    return n;
+}
+
 static const void *bionic___system_property_find(const char *name)
 {
     for (size_t i = 0; i < sizeof(k_props) / sizeof(k_props[0]); i++) if (!strcmp(k_props[i].k, name)) return &k_props[i];
@@ -476,7 +500,7 @@ static void *bionic_dlopen(const char *path, int flags)
     if (!path) return &g_sys_handle[0];          /* the global namespace */
     const char *base = strrchr(path, '/');
     base = base ? base + 1 : path;
-    if (!strcmp(base, "libvulkan.so")) { dl_fail("dlopen failed: library \"%s\" not found", path); return NULL; }
+    if (!strcmp(base, "libvulkan.so") && !tl_vk_available()) { dl_fail("dlopen failed: library \"%s\" not found", path); return NULL; }
     if (tl_bionic_is_system_lib(base)) {
         for (int i = 0; i < g_nsys; i++) if (!strcmp(g_sys_names[i], base)) return &g_sys_handle[i + 1];
         if (g_nsys < 15) { snprintf(g_sys_names[g_nsys], 48, "%s", base); g_nsys++; return &g_sys_handle[g_nsys]; }
@@ -577,14 +601,14 @@ const tl_bionic_entry tl_tab_core[] = {
     TL_WRAP("__cxa_finalize", bionic___cxa_finalize),
     TL_WRAP("getauxval", bionic_getauxval),
     TL_WRAP("getpagesize", bionic_getpagesize),
-    TL_WRAP("sysconf", bionic_sysconf),
+    TL_WRAP("sysconf", bionic_sysconf), TL_WRAP("sysinfo", bionic_sysinfo),
     TL_WRAP("uname", bionic_uname),
     TL_WRAP("gethostname", bionic_gethostname),
     TL_WRAP("gettid", bionic_gettid),
     TL_DIRECT(getpid), TL_DIRECT(getppid), TL_DIRECT(getuid), TL_DIRECT(geteuid), TL_DIRECT(getegid),
     TL_WRAP("getpriority", bionic_getpriority),
     TL_WRAP("setpriority", bionic_setpriority),
-    TL_WRAP("sched_getaffinity", bionic_sched_getaffinity),
+    TL_WRAP("sched_getaffinity", bionic_sched_getaffinity), TL_WRAP("__sched_cpucount", bionic_sched_cpucount),
     TL_WRAP("sched_setaffinity", bionic_sched_setaffinity),
     TL_WRAP("sched_getparam", bionic_sched_getparam),
     TL_WRAP("sched_getscheduler", bionic_sched_getscheduler),
@@ -609,7 +633,7 @@ const tl_bionic_entry tl_tab_core[] = {
 
 /* ----------------------------------------------------------------- lookup */
 
-static const tl_bionic_entry *const k_tables[] = { tl_tab_core, tl_tab_str, tl_tab_io, tl_tab_io2, tl_tab_str2, tl_tab_net, tl_tab_pthread, tl_tab_ndk, tl_tab_egl, tl_tab_cxx };
+static const tl_bionic_entry *const k_tables[] = { tl_tab_core, tl_tab_str, tl_tab_io, tl_tab_io2, tl_tab_str2, tl_tab_net, tl_tab_pthread, tl_tab_ndk, tl_tab_egl, tl_tab_cxx, tl_tab_opensles };
 
 typedef struct { const char *name; void *addr; } slot;
 static slot *g_slots;
@@ -650,6 +674,8 @@ void *tl_bionic_find(const char *name)
     /* OpenGL ES entry points are not in a table: they come from ANGLE, by name. */
     if (name[0] == 'g' && name[1] == 'l' && name[2] >= 'A' && name[2] <= 'Z') return tl_egl_resolve(name);
     if (!strncmp(name, "egl", 3)) return tl_egl_resolve(name);
+    /* Vulkan is MoltenVK's, the same way. */
+    if (name[0] == 'v' && name[1] == 'k' && name[2] >= 'A' && name[2] <= 'Z') return tl_vk_resolve(name);
     return NULL;
 }
 

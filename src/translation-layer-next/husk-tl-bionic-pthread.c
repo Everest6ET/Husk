@@ -29,6 +29,11 @@
 #include <string.h>
 #include <time.h>
 
+/* General-dynamic thread-local access: the code passes {module, offset}. */
+void *tl_ld_tls_get_addr(uint64_t module, uint64_t offset);
+static void *b___tls_get_addr(const uint64_t *ti) { return tl_ld_tls_get_addr(ti[0], ti[1]); }
+
+
 #define MAGIC_READY 0x7468726du   /* "thrm" */
 #define MAGIC_INIT  1u
 
@@ -356,6 +361,7 @@ static int b_attr_setstacksize(guest_attr *a, size_t n)
     a->stack_size = n;
     return 0;
 }
+static int b_attr_getstacksize(const guest_attr *a, size_t *n) { *n = a->stack_size; return 0; }
 static int b_attr_getguardsize(const guest_attr *a, size_t *n) { *n = a->guard_size; return 0; }
 static int b_attr_getstack(const guest_attr *a, void **base, size_t *size) { *base = a->stack_base; *size = a->stack_size; return 0; }
 
@@ -468,11 +474,12 @@ const tl_bionic_entry tl_tab_pthread[] = {
     TL_WRAP("sem_wait", b_sem_wait), TL_WRAP("sem_trywait", b_sem_trywait), TL_WRAP("sem_timedwait", b_sem_timedwait),
     TL_WRAP("sem_getvalue", b_sem_getvalue),
     TL_WRAP("pthread_once", b_once),
+    TL_WRAP("__tls_get_addr", b___tls_get_addr),
     TL_WRAP("pthread_key_create", b_key_create), TL_WRAP("pthread_key_delete", b_key_delete),
     TL_WRAP("pthread_getspecific", b_getspecific), TL_WRAP("pthread_setspecific", b_setspecific),
     TL_WRAP("pthread_attr_init", b_attr_init), TL_WRAP("pthread_attr_destroy", b_attr_destroy),
     TL_WRAP("pthread_attr_setdetachstate", b_attr_setdetachstate), TL_WRAP("pthread_attr_setstacksize", b_attr_setstacksize),
-    TL_WRAP("pthread_attr_getguardsize", b_attr_getguardsize), TL_WRAP("pthread_attr_getstack", b_attr_getstack),
+    TL_WRAP("pthread_attr_getstacksize", b_attr_getstacksize), TL_WRAP("pthread_attr_getguardsize", b_attr_getguardsize), TL_WRAP("pthread_attr_getstack", b_attr_getstack),
     TL_WRAP("pthread_getattr_np", b_getattr_np),
     TL_WRAP("pthread_create", b_create), TL_WRAP("pthread_join", b_join), TL_WRAP("pthread_detach", b_detach),
     TL_DIRECT(pthread_exit), TL_DIRECT(pthread_self), TL_DIRECT(pthread_equal),

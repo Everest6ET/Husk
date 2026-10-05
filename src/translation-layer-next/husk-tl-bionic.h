@@ -48,7 +48,10 @@ extern const tl_bionic_entry tl_tab_pthread[];
 extern const tl_bionic_entry tl_tab_ndk[];
 extern const tl_bionic_entry tl_tab_egl[];
 extern const tl_bionic_entry tl_tab_cxx[];
+extern const tl_bionic_entry tl_tab_opensles[];
 void *tl_egl_resolve(const char *name);   /* husk-tl-egl.c: GLES by name, through ANGLE */
+void *tl_vk_resolve(const char *name);    /* husk-tl-vulkan.m: Vulkan by name, through MoltenVK */
+bool tl_vk_available(void);                /* a MoltenVK was configured, so libvulkan.so can be opened */
 
 extern void (*tl_guest_exit_hook)(int status);   /* set by an app host: exit() from guest code calls it instead of exiting */
 

@@ -36,7 +36,7 @@ enum {
     DT_GNU_HASH_ = 0x6ffffef5, DT_ANDROID_RELA_ = 0x60000011, DT_ANDROID_RELASZ_ = 0x60000012,
     DT_ANDROID_RELR_ = 0x6fffe000, DT_ANDROID_RELRSZ_ = 0x6fffe001,
     R_NONE = 0, R_ABS64 = 257, R_GLOB_DAT = 1025, R_JUMP_SLOT = 1026, R_RELATIVE = 1027,
-    R_TLS_DTPMOD = 1028, R_TLS_TPREL = 1030, R_TLSDESC = 1031, R_IRELATIVE = 1032,
+    R_TLS_DTPMOD = 1028, R_TLS_DTPREL = 1029, R_TLS_TPREL = 1030, R_TLSDESC = 1031, R_IRELATIVE = 1032,
     STB_WEAK_ = 2, STT_TLS_ = 6, STT_GNU_IFUNC_ = 10, SHN_UNDEF_ = 0,
     PF_X_ = 1, PF_W_ = 2, PF_R_ = 4, EM_AARCH64_ = 183,
 };
@@ -62,8 +62,9 @@ struct tl_lib {
     uint64_t strtab, strsz, symtab, gnu_hash, sysv_hash;
     uint64_t rela, relasz, jmprel, pltrelsz, arela, arelasz, relr, relrsz;
     uint64_t init, init_array, init_arraysz;
-    uint32_t nsyms;
-    uint64_t *symcache;            /* resolved import per symbol index; 0 = not yet */
+    uint32_t nsyms;                /* the symbols the hash table covers */
+    uint32_t ncache;               /* an upper bound on the table: relocations name imports that the hash table does not cover */
+    uint64_t *symcache;            /* resolved import per symbol index (ncache of them); 0 = not yet */
 
     uint64_t needed[MAX_DEPS];
     int nneeded;
@@ -78,6 +79,7 @@ struct tl_lib {
 
     struct { uint64_t start, end; } code[16];   /* executable sections, as vaddrs: the only places instructions are patched */
     int ncode;
+    int tls_id;                    /* 1-based number of this library's thread-local storage template, 0 if it has none */
     uint64_t *fde_start, *fde_end; size_t nfde;   /* the address ranges of the functions the unwind tables describe, sorted; none if the library has no tables */
     size_t n_x18_data;             /* words naming x18 that lie outside every function: constant tables inside .text, left alone */
     size_t n_ctr;                  /* reads of CTR_EL0 replaced by a constant */
@@ -243,6 +245,21 @@ static uint32_t count_dynsyms(const tl_lib *L)
     if (last < symoff) return symoff;
     while (!(chains[last - symoff] & 1)) last++;
     return last + 1;
+}
+
+/*
+ * How long the dynamic symbol table can be. The hash tables cover the symbols that are defined here, and a linker may put the imports after them
+ * (libEOSSDK does: its relocations name symbols 813 and up of a table the hash counts as 813 long), so the count is the larger of that and the
+ * distance to whichever table follows the symbols in the file.
+ */
+static uint32_t dynsym_bound(const tl_lib *L, uint32_t hashed)
+{
+    uint64_t next = ~0ull;
+    const uint64_t after[] = { L->strtab, L->gnu_hash, L->sysv_hash, L->rela, L->jmprel, L->arela, L->relr };
+    for (size_t i = 0; i < sizeof(after) / sizeof(after[0]); i++) if (after[i] > L->symtab && after[i] < next) next = after[i];
+    uint32_t n = hashed;
+    if (L->symtab && next != ~0ull) { uint64_t m = (next - L->symtab) / sizeof(elf_sym); if (m > n && m < (1u << 24)) n = (uint32_t)m; }
+    return n;
 }
 
 /* ----------------------------------------------------- lookup by scope */
@@ -938,6 +955,87 @@ static void patch_image(tl_lib *L, size_t *n_tpidr, size_t *n_adrp, size_t *n_ad
 static void patch_image(tl_lib *L, size_t *a, size_t *b, size_t *c, size_t *d) { (void)L; *a = *b = *c = *d = 0; }
 #endif
 
+
+/* ------------------------------------------------------- thread-local storage */
+
+/*
+ * A library's PT_TLS segment is a template for a block every thread has its own copy of. Android code reaches its thread-local variables in
+ * one of two ways that matter here: through a "TLS descriptor" (the newer, and what libUE4 uses) or through __tls_get_addr(module, offset). Both end
+ * in the same place -- a per-thread block for the library, allocated and filled from the template the first time a thread asks.
+ *
+ * A descriptor is a pair in the library's GOT: a function to call and an argument. The code calls the function with the descriptor's address and
+ * expects the variable's offset from the thread pointer, which it adds to the thread pointer (`mrs x1, tpidr_el0`) itself. Here that register is read as a
+ * fixed address (see the tpidr patch), so the function answers with the distance from that fixed address to this thread's copy of the variable. It is called
+ * where the compiler expects an ordinary instruction, so it must leave every register but x0 and x1 as it found them -- hence the assembly.
+ */
+#define MAX_TLS_MODULES 16
+static struct { tl_lib *lib; uint64_t init_vaddr, filesz, memsz, align; } g_tlsmod[MAX_TLS_MODULES + 1];
+static int g_ntls;
+static pthread_key_t g_tls_key;
+static pthread_once_t g_tls_once = PTHREAD_ONCE_INIT;
+
+typedef struct { void *blk[MAX_TLS_MODULES + 1]; } tls_thread;
+static void tls_thread_free(void *p) { tls_thread *t = p; for (int i = 0; i <= MAX_TLS_MODULES; i++) free(t->blk[i]); free(t); }
+static void tls_key_init(void) { pthread_key_create(&g_tls_key, tls_thread_free); }
+
+static void *tls_block(unsigned module)
+{
+    pthread_once(&g_tls_once, tls_key_init);
+    if (module == 0 || module > (unsigned)g_ntls) return NULL;
+    tls_thread *t = pthread_getspecific(g_tls_key);
+    if (!t) { t = calloc(1, sizeof(*t)); pthread_setspecific(g_tls_key, t); }
+    if (!t->blk[module]) {
+        uint64_t al = g_tlsmod[module].align < 16 ? 16 : g_tlsmod[module].align;
+        void *b = NULL;
+        if (posix_memalign(&b, (size_t)al, (size_t)(g_tlsmod[module].memsz + 16)) != 0) return NULL;
+        memset(b, 0, (size_t)g_tlsmod[module].memsz);
+        const tl_lib *L = g_tlsmod[module].lib;
+        if (g_tlsmod[module].filesz) memcpy(b, L->rx + (g_tlsmod[module].init_vaddr - L->base_vaddr), (size_t)g_tlsmod[module].filesz);
+        t->blk[module] = b;
+    }
+    return t->blk[module];
+}
+
+void *tl_ld_tls_get_addr(uint64_t module, uint64_t offset)
+{
+    uint8_t *b = tls_block((unsigned)module);
+    return b ? b + offset : NULL;
+}
+
+/* arg is the descriptor's second word: the module in the high half, the variable's offset in its template in the low. */
+__attribute__((used)) uint64_t tl_tls_offset(uint64_t arg)
+{
+    uint8_t *b = tls_block((unsigned)(arg >> 32));
+    uintptr_t tp = (uintptr_t)G.tcb_rw & ~(uintptr_t)0xFFF;                 /* what `mrs xN, tpidr_el0` was turned into */
+    return (uint64_t)((uintptr_t)(b ? b : (uint8_t *)tp) + (uint32_t)arg - tp);
+}
+
+#if defined(__aarch64__)
+__attribute__((naked, used)) static void tl_tlsdesc_entry(void)
+{
+    __asm__ volatile(
+        "stp x29, x30, [sp, #-16]!\n"
+        "sub sp, sp, #512\n"
+        "stp x2, x3,   [sp, #0]\n"   "stp x4, x5,   [sp, #16]\n"  "stp x6, x7,   [sp, #32]\n"  "stp x8, x9,   [sp, #48]\n"
+        "stp x10, x11, [sp, #64]\n"  "stp x12, x13, [sp, #80]\n"  "stp x14, x15, [sp, #96]\n"  "stp x16, x17, [sp, #112]\n"
+        "stp q0, q1,   [sp, #128]\n" "stp q2, q3,   [sp, #160]\n" "stp q4, q5,   [sp, #192]\n" "stp q6, q7,   [sp, #224]\n"
+        "stp q16, q17, [sp, #256]\n" "stp q18, q19, [sp, #288]\n" "stp q20, q21, [sp, #320]\n" "stp q22, q23, [sp, #352]\n"
+        "stp q24, q25, [sp, #384]\n" "stp q26, q27, [sp, #416]\n" "stp q28, q29, [sp, #448]\n" "stp q30, q31, [sp, #480]\n"
+        "ldr x0, [x0, #8]\n"
+        "bl _tl_tls_offset\n"
+        "ldp x2, x3,   [sp, #0]\n"   "ldp x4, x5,   [sp, #16]\n"  "ldp x6, x7,   [sp, #32]\n"  "ldp x8, x9,   [sp, #48]\n"
+        "ldp x10, x11, [sp, #64]\n"  "ldp x12, x13, [sp, #80]\n"  "ldp x14, x15, [sp, #96]\n"  "ldp x16, x17, [sp, #112]\n"
+        "ldp q0, q1,   [sp, #128]\n" "ldp q2, q3,   [sp, #160]\n" "ldp q4, q5,   [sp, #192]\n" "ldp q6, q7,   [sp, #224]\n"
+        "ldp q16, q17, [sp, #256]\n" "ldp q18, q19, [sp, #288]\n" "ldp q20, q21, [sp, #320]\n" "ldp q22, q23, [sp, #352]\n"
+        "ldp q24, q25, [sp, #384]\n" "ldp q26, q27, [sp, #416]\n" "ldp q28, q29, [sp, #448]\n" "ldp q30, q31, [sp, #480]\n"
+        "add sp, sp, #512\n"
+        "ldp x29, x30, [sp], #16\n"
+        "ret\n");
+}
+#else
+static void tl_tlsdesc_entry(void) {}
+#endif
+
 /* -------------------------------------------------------------- relocation */
 
 static inline uint64_t rd64(const uint8_t *p) { uint64_t v; memcpy(&v, p, 8); return v; }
@@ -953,7 +1051,8 @@ static uint64_t image_addr(const tl_lib *L, uint64_t vaddr)
 
 static uint64_t bind_symbol(tl_lib *L, uint32_t symidx, bool *failed)
 {
-    if (L->symcache && L->symcache[symidx]) return L->symcache[symidx];
+    bool cached = L->symcache && symidx < L->ncache;
+    if (cached && L->symcache[symidx]) return L->symcache[symidx];
     const elf_sym *s = sym_at(L, symidx);
     const char *name = sym_name(L, s);
     uint64_t val = 0;
@@ -978,7 +1077,7 @@ static uint64_t bind_symbol(tl_lib *L, uint32_t symidx, bool *failed)
             if (G.verbosity >= 2) tl_log_line("ld: %s: unresolved import %s", L->name, name);
         }
     }
-    if (L->symcache) L->symcache[symidx] = val ? val : 1;   /* 1 marks a resolved NULL */
+    if (cached) L->symcache[symidx] = val ? val : 1;   /* 1 marks a resolved NULL */
     return val;
 }
 
@@ -1008,8 +1107,27 @@ static bool reloc_one(tl_lib *L, uint64_t r_offset, uint32_t type, uint32_t symi
         *place = resolver();
         return true;
     }
-    case R_TLS_DTPMOD: case R_TLS_TPREL: case R_TLSDESC:
-        tl_log_line("ld: %s: TLS relocation (type %u) -- thread-local storage is not implemented", L->name, type);
+    case R_TLSDESC: case R_TLS_DTPMOD: case R_TLS_DTPREL: {
+        uint64_t symoff = 0;
+        if (symidx) {
+            const elf_sym *ts = sym_at(L, symidx);
+            if (ts->st_shndx == SHN_UNDEF_) { tl_log_line("ld: %s: a thread-local variable of another library (%s) is not supported", L->name, sym_name(L, ts)); return false; }
+            symoff = ts->st_value;
+        }
+        if (!L->tls_id) { tl_log_line("ld: %s: a TLS relocation but no TLS segment", L->name); return false; }
+        if (type == R_TLSDESC) {
+            if (off + 16 > L->npages * PAGE) return false;
+            place[0] = (uint64_t)(uintptr_t)&tl_tlsdesc_entry;
+            place[1] = ((uint64_t)L->tls_id << 32) | (uint32_t)(symoff + (uint64_t)addend);
+        } else if (type == R_TLS_DTPMOD) {
+            *place = (uint64_t)L->tls_id;
+        } else {
+            *place = symoff + (uint64_t)addend;
+        }
+        return true;
+    }
+    case R_TLS_TPREL:
+        tl_log_line("ld: %s: an initial-exec TLS relocation (type %u) is not supported", L->name, type);
         return false;
     default:
         tl_log_line("ld: %s: unsupported relocation type %u", L->name, type);
@@ -1356,6 +1474,7 @@ static tl_lib *map_library(const char *name, uint8_t *file, size_t flen)
         return NULL;
     }
     tl_segment loads[16]; int nloads = 0; tl_segment relro = {0}; bool has_relro = false;
+    elf_phdr tls_seg = {0}; bool has_tls = false;
     uint64_t dyn_v = 0, dyn_n = 0;
     elf_phdr *phs = malloc((size_t)eh->e_phnum * sizeof(elf_phdr));
     if (!phs) return NULL;
@@ -1370,9 +1489,7 @@ static tl_lib *map_library(const char *name, uint8_t *file, size_t flen)
         } else if (p->p_type == PT_DYNAMIC_) {
             dyn_v = p->p_vaddr; dyn_n = p->p_filesz;
         } else if (p->p_type == PT_TLS_) {
-            tl_log_line("ld: %s has a PT_TLS segment -- thread-local storage is not implemented", name);
-            free(phs);
-            return NULL;
+            tls_seg = *p; has_tls = true;
         }
     }
     if (!nloads || !dyn_n) { tl_log_line("ld: %s has no loadable or dynamic segments", name); free(phs); return NULL; }
@@ -1455,6 +1572,12 @@ static tl_lib *map_library(const char *name, uint8_t *file, size_t flen)
     L->rx = rx; L->rw = rw; L->base_vaddr = base_vaddr; L->npages = npages; L->pflags = flags;
     L->phdr = phs; L->phnum = eh->e_phnum;
     load_unwind_ranges(L, file, flen, phs, eh->e_phnum);
+    if (has_tls) {
+        if (g_ntls >= MAX_TLS_MODULES) { tl_log_line("ld: %s: too many libraries with thread-local storage", name); return NULL; }
+        L->tls_id = ++g_ntls;
+        g_tlsmod[L->tls_id].lib = L; g_tlsmod[L->tls_id].init_vaddr = tls_seg.p_vaddr; g_tlsmod[L->tls_id].filesz = tls_seg.p_filesz;
+        g_tlsmod[L->tls_id].memsz = tls_seg.p_memsz; g_tlsmod[L->tls_id].align = tls_seg.p_align;
+    }
     for (int r = 0; r < ncode; r++) { L->code[r].start = code[r].vaddr; L->code[r].end = code[r].vaddr + code[r].size; }
     L->ncode = ncode;
     L->stub_rx = rx + npages * PAGE; L->stub_rw = rw + npages * PAGE; L->stub_used = 16; L->stub_cap = nstub * PAGE; L->nstub = nstub;
@@ -1468,7 +1591,8 @@ static tl_lib *map_library(const char *name, uint8_t *file, size_t flen)
     }
     if (!L->soname[0]) snprintf(L->soname, sizeof(L->soname), "%s", name);
     L->nsyms = count_dynsyms(L);
-    if (L->nsyms) L->symcache = calloc(L->nsyms, sizeof(uint64_t));
+    L->ncache = dynsym_bound(L, L->nsyms);
+    if (L->ncache) L->symcache = calloc(L->ncache, sizeof(uint64_t));
     G.libs[G.nlibs++] = L;
     return L;
 }
