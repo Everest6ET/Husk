@@ -9,6 +9,7 @@ import AVFoundation
 enum TLNativeEngine {
     case unity     // Subway Surfers and other Unity games: portrait, driven by UnityPlayer's own thread
     case cocos     // Geometry Dash and other cocos2d-x games: landscape, driven by a GL thread of our own
+    case minecraft // Minecraft and other GameActivity games: landscape, multi-touch, the game runs its own threads
 }
 
 /// A Unity game's screen: one CAMetalLayer that the game's own GL (ANGLE over Metal) presents into.
@@ -98,7 +99,7 @@ final class TLUnityUIView: UIView, UIKeyInput {
         (layer as? CAMetalLayer)?.drawableSize = CGSize(width: w, height: h)
         // A landscape game is told its size once, when it starts, so it must not start while the screen is still
         // turning: wait for a surface that is wider than it is tall.
-        let ready = engine == .cocos ? w > h : true
+        let ready = engine != .unity ? w > h : true
         if !launched, window != nil, ready { launch(width: w, height: h) }
     }
 
@@ -127,16 +128,19 @@ final class TLUnityUIView: UIView, UIKeyInput {
             HuskLog.log("tl", "unity: already started; resuming")
             return
         }
-        if engine == .cocos {
+        if engine != .unity {
             // The game plays through the silent switch, like the guest's own audio, and mixes with other audio.
             let session = AVAudioSession.sharedInstance()
             try? session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
             try? session.setActive(true)
         }
-        HuskLog.log("tl", "native: launching \(apk) at \(width)x\(height) (\(engine == .cocos ? "cocos2d-x" : "unity"))")
-        let started = engine == .cocos
-            ? husk_cocos_launch(apk, dataDir, layerPtr, Int32(width), Int32(height), angle, ca)
-            : husk_unity_launch(apk, dataDir, layerPtr, Int32(width), Int32(height), angle, ca)
+        HuskLog.log("tl", "native: launching \(apk) at \(width)x\(height) (\(engine == .cocos ? "cocos2d-x" : engine == .minecraft ? "gameactivity" : "unity"))")
+        let started: Bool
+        switch engine {
+        case .cocos: started = husk_cocos_launch(apk, dataDir, layerPtr, Int32(width), Int32(height), angle, ca)
+        case .minecraft: started = husk_gameactivity_launch(apk, dataDir, layerPtr, Int32(width), Int32(height), angle, ca)
+        case .unity: started = husk_unity_launch(apk, dataDir, layerPtr, Int32(width), Int32(height), angle, ca)
+        }
         if !started { HuskLog.log("tl", "native: launch refused") }
     }
 
@@ -455,9 +459,12 @@ struct TLCocosAttemptView: View {
     @State private var stats = "starting"
     private var showLog: Bool { get { showLogSetting && devInfo } nonmutating set { showLogSetting = newValue } }
 
+    /// Geometry Dash and the like are cocos2d-x; Minecraft is built on GameActivity. Both are landscape.
+    private var engine: TLNativeEngine { app.report?.nativeEngine == .minecraft ? .minecraft : .cocos }
+
     private var dataDir: String {
         TranslationLayer.root.appendingPathComponent(app.id, isDirectory: true)
-            .appendingPathComponent("cocos-data", isDirectory: true).path
+            .appendingPathComponent(engine == .minecraft ? "minecraft-data" : "cocos-data", isDirectory: true).path
     }
 
     /// Another game is already loaded in this session, and an engine cannot be loaded twice.
@@ -482,7 +489,7 @@ struct TLCocosAttemptView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if let apk = app.apks.first {
                     HStack(spacing: 0) {
-                        TLUnityScreen(apk: apk, dataDir: dataDir, engine: .cocos, onStats: { stats = $0 })
+                        TLUnityScreen(apk: apk, dataDir: dataDir, engine: engine, onStats: { stats = $0 })
                             .background(Color.black)
                         if showLog { logPanel.frame(width: 320) }
                     }

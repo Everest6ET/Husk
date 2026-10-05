@@ -57,6 +57,7 @@ extension TLReport {
         guard ok, !abis.isEmpty, abis.contains("arm64-v8a") else { return nil }
         if engine?.hasPrefix("Unity") == true { return .unity }
         if engine == "Cocos" { return .cocos }
+        if engine == "Minecraft" { return .minecraft }
         return nil
     }
 
@@ -66,14 +67,14 @@ extension TLReport {
     var runsOnNativeRuntime: Bool { nativeEngine != nil }
 
     /// "Unity" or "Cocos2d-x", for words on screen.
-    var nativeEngineName: String { nativeEngine == .cocos ? "Cocos2d-x" : "Unity" }
+    var nativeEngineName: String { nativeEngine == .cocos ? "Cocos2d-x" : nativeEngine == .minecraft ? "Minecraft" : "Unity" }
 
     var displaySummary: String {
         guard runsOnNativeRuntime else { return summary }
         let flagged = libraries.filter { $0.abi == "arm64-v8a" && $0.status != "ok" }.count
         let total = libraries.filter { $0.abi == "arm64-v8a" }.count
         var text = "A \(nativeEngineName) game. It runs through Husk's native runtime, which loads its \(total) arm64 libraries itself."
-        if nativeEngine == .cocos { text += " It is a landscape game: Husk turns the screen for it." }
+        if nativeEngine == .cocos || nativeEngine == .minecraft { text += " It is a landscape game: Husk turns the screen for it." }
         if flagged > 0 {
             text += " \(flagged) of them use tricks the older loader could not handle; the native runtime handles those too, "
                   + "except for optional anti-tamper code, which it leaves out."
@@ -837,7 +838,7 @@ struct TLAttemptView: View {
     let app: TLApp
 
     var body: some View {
-        if app.report?.nativeEngine == .cocos {
+        if app.report?.nativeEngine == .cocos || app.report?.nativeEngine == .minecraft {
             TLCocosAttemptView(app: app)
         } else if app.report?.runsOnNativeRuntime == true {
             TLUnityAttemptView(app: app)

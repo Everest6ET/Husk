@@ -15,6 +15,7 @@
 #include "husk-tl-egl.h"
 #include "husk-tl-jni.h"
 #include "husk-tl-ld.h"
+#include "husk-tl-xmem.h"
 
 void tl_jni_hle_install(void);
 void tl_hle_configure(const char *pkg, const char *apk, const char *data, int w, int h);
@@ -91,7 +92,7 @@ bool tl_ga_start(const tl_ga_config *cfg)
         if (set_flags) { set_flags("--jitless"); tl_log_line("minecraft: V8 set to run without a JIT"); }
         else tl_log_line("minecraft: V8's flag setter is not exported; the game's JavaScript may need executable memory");
     }
-    tl_log_line("minecraft: libraries loaded");
+    tl_log_line("minecraft: libraries loaded (%zu of %zu MiB of executable memory used)", tl_xmem_used() >> 20, tl_xmem_size() >> 20);
     return true;
 }
 
@@ -285,5 +286,34 @@ void tl_ga_touch(int phase, int id, float x, float y)
     pthread_mutex_unlock(&T.lock);
     tl_ga_post(touch_run, t);
 }
-void tl_ga_set_paused(bool paused) { atomic_store(&G.paused, paused); }
+/* Leaving the screen is Activity.onPause/onStop with the focus gone; coming back is onStart/onResume with it returned. The game stops
+ * updating and drawing on the pause, which is what keeps it off the GPU while the app is in the background. */
+static void pause_run(void *arg)
+{
+    bool pause = arg != NULL;
+    typedef void (*life_fn)(void *env, void *self, int64_t h);
+    typedef void (*focus_fn)(void *env, void *self, int64_t h, uint8_t focused);
+    life_fn on_pause = (life_fn)GA_NATIVE("onPauseNative", "(J)V"), on_stop = (life_fn)GA_NATIVE("onStopNative", "(J)V");
+    life_fn on_start = (life_fn)GA_NATIVE("onStartNative", "(J)V"), on_resume = (life_fn)GA_NATIVE("onResumeNative", "(J)V");
+    focus_fn focus = (focus_fn)GA_NATIVE("onWindowFocusChangedNative", "(JZ)V");
+    void *env = tl_jni_env();
+    if (!G.handle) return;
+    if (pause) {
+        if (focus) focus(env, G.activity, G.handle, 0);
+        if (on_pause) on_pause(env, G.activity, G.handle);
+        if (on_stop) on_stop(env, G.activity, G.handle);
+        tl_log_line("minecraft: paused");
+    } else {
+        if (on_start) on_start(env, G.activity, G.handle);
+        if (on_resume) on_resume(env, G.activity, G.handle);
+        if (focus) focus(env, G.activity, G.handle, 1);
+        tl_log_line("minecraft: resumed");
+    }
+}
+
+void tl_ga_set_paused(bool paused)
+{
+    if (atomic_exchange(&G.paused, paused) == paused || !G.handle) return;
+    tl_ga_post(pause_run, paused ? (void *)1 : NULL);
+}
 unsigned long tl_ga_frames(void) { return tl_egl_frames_presented(); }

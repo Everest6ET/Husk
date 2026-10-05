@@ -48,7 +48,11 @@ enum JITBootstrap {
     // cleanly at 6144 MiB, which leaves this. The region itself allocates and
     // passes its selftest at 512; whatever objects is further in, where TCG
     // carves the buffer into per-vCPU regions.
-    static let jitBytes = 256 * 1024 * 1024
+    //
+    // 512 MiB since the native runtime runs Minecraft: its main library alone is a 354 MiB image that has to sit in this
+    // region, with the stubs the loader places beside it. A larger prewarm is safe for QEMU, which is handed the
+    // prewarmed region whenever it is at least what tb-size asks for.
+    static let jitBytes = 512 * 1024 * 1024
 
     /// True once the region is held. The memory budget needs this: after a
     /// prewarm the JIT is already counted in the footprint, so subtracting it

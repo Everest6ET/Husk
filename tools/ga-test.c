@@ -22,6 +22,7 @@
 #include <unistd.h>
 
 #include "husk-tl-gameactivity.h"
+#include "husk-tl-audio.h"
 #include "husk-tl-jni.h"
 #include "husk-tl-ld.h"
 
@@ -327,6 +328,7 @@ int main(int argc, char **argv)
                          .angle_egl = getenv("TL_ANGLE_EGL") ? getenv("TL_ANGLE_EGL") : egl, .angle_gles = getenv("TL_ANGLE_GLES") ? getenv("TL_ANGLE_GLES") : gles,
                          .frame_dir = frames, .frame_every = getenv("TL_FRAMES") ? atoi(getenv("TL_FRAMES")) : -6 };
     g_frame_dir = frames;
+    if (getenv("TL_AUDIO")) tl_audio_install();
     if (!tl_ga_start(&cfg)) { fprintf(stderr, "minecraft: start failed\n"); return 1; }
     if (getenv("TL_MC_RAND_TEST")) {
         tl_lib *L = tl_ld_find_lib("libminecraftpe.so");

@@ -14,6 +14,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdbool.h>
+#include <time.h>
 #include <unistd.h>
 #include <zlib.h>
 
@@ -203,8 +205,93 @@ static void *b_AAssetManager_open(void *mgr, const char *name, int mode)
     }
     return NULL;
 }
-/* AAudio: reported unavailable (AAUDIO_ERROR_UNAVAILABLE), so an engine that tries it first falls back to its Java output. */
-static int b_AAudio_createStreamBuilder(void **builder) { if (builder) *builder = NULL; return -899; }
+/*
+ * AAudio, the way FMOD (Minecraft's audio) prefers to play: a stream whose data callback the system calls for the next burst of
+ * samples. The output is always 48 kHz stereo 16-bit; a thread of ours calls the game's callback for a burst and hands the result
+ * to the host audio (tl_cocos_audio_hook, which blocks until the speakers have room -- that is what paces the game's mixer).
+ * Recording is not offered.
+ */
+extern void (*tl_cocos_audio_hook)(const int16_t *samples, int frames, int channels, int rate);
+
+enum { AA_OK = 0, AA_UNAVAILABLE = -899, AA_FORMAT_I16 = 1, AA_STATE_OPEN = 2, AA_STATE_STARTED = 4, AA_STATE_STOPPED = 10, AA_STATE_CLOSED = 12 };
+#define AA_RATE 48000
+#define AA_CHANNELS 2
+#define AA_BURST 1024
+
+typedef int (*aa_data_cb)(void *stream, void *user, void *data, int frames);
+typedef struct aa_builder { aa_data_cb cb; void *user; int direction; } aa_builder;
+typedef struct aa_stream {
+    aa_data_cb cb; void *user;
+    atomic_int state, buffer_size;
+    atomic_bool run;
+    pthread_t thread;
+    bool thread_started;
+} aa_stream;
+
+static int b_AAudio_createStreamBuilder(void **builder) { aa_builder *b = calloc(1, sizeof(*b)); *builder = b; return b ? AA_OK : AA_UNAVAILABLE; }
+static int b_AAudioStreamBuilder_delete(aa_builder *b) { free(b); return AA_OK; }
+static void b_AAudioStreamBuilder_setDataCallback(aa_builder *b, aa_data_cb cb, void *user) { b->cb = cb; b->user = user; }
+static void b_AAudioStreamBuilder_setDirection(aa_builder *b, int d) { b->direction = d; }
+static void b_AAudioStreamBuilder_ignore(aa_builder *b, int v) { (void)b; (void)v; }
+static void b_AAudioStreamBuilder_setErrorCallback(aa_builder *b, void *cb, void *user) { (void)b; (void)cb; (void)user; }
+
+static int b_AAudioStreamBuilder_openStream(aa_builder *b, aa_stream **out)
+{
+    if (b->direction != 0 || !b->cb) return AA_UNAVAILABLE;           /* output with a data callback only */
+    aa_stream *s = calloc(1, sizeof(*s));
+    s->cb = b->cb; s->user = b->user;
+    atomic_store(&s->state, AA_STATE_OPEN); atomic_store(&s->buffer_size, AA_BURST * 2);
+    *out = s;
+    tl_log_line("aaudio: stream opened (%d Hz, %d channels, burst %d)", AA_RATE, AA_CHANNELS, AA_BURST);
+    return AA_OK;
+}
+
+static void *aa_pump(void *arg)
+{
+    aa_stream *s = arg;
+    pthread_setname_np("aaudio-pump");
+    int16_t *buf = malloc((size_t)AA_BURST * AA_CHANNELS * sizeof(int16_t));
+    while (atomic_load(&s->run)) {
+        memset(buf, 0, (size_t)AA_BURST * AA_CHANNELS * sizeof(int16_t));
+        int r = s->cb(s, s->user, buf, AA_BURST);
+        if (!atomic_load(&s->run)) break;
+        { static bool said; if (!said) { for (int i = 0; i < AA_BURST * AA_CHANNELS; i++) if (buf[i]) { said = true; tl_log_line("aaudio: the game's first non-silent burst (sample %d = %d)", i, buf[i]); break; } } }
+        if (tl_cocos_audio_hook) tl_cocos_audio_hook(buf, AA_BURST, AA_CHANNELS, AA_RATE);
+        else { struct timespec ts = { 0, (long)((double)AA_BURST * 1e9 / AA_RATE) }; nanosleep(&ts, NULL); }
+        if (r != 0) break;
+    }
+    free(buf);
+    return NULL;
+}
+
+static int b_AAudioStream_requestStart(aa_stream *s)
+{
+    if (atomic_exchange(&s->run, true)) return AA_OK;
+    atomic_store(&s->state, AA_STATE_STARTED);
+    pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 1u << 20);
+    s->thread_started = pthread_create(&s->thread, &a, aa_pump, s) == 0;
+    pthread_attr_destroy(&a);
+    return AA_OK;
+}
+static int aa_stop(aa_stream *s, int state)
+{
+    if (atomic_exchange(&s->run, false) && s->thread_started) { pthread_join(s->thread, NULL); s->thread_started = false; }
+    atomic_store(&s->state, state);
+    return AA_OK;
+}
+static int b_AAudioStream_requestStop(aa_stream *s) { return aa_stop(s, AA_STATE_STOPPED); }
+static int b_AAudioStream_close(aa_stream *s) { aa_stop(s, AA_STATE_CLOSED); free(s); return AA_OK; }
+static int b_AAudioStream_getSampleRate(aa_stream *s) { (void)s; return AA_RATE; }
+static int b_AAudioStream_getChannelCount(aa_stream *s) { (void)s; return AA_CHANNELS; }
+static int b_AAudioStream_getFormat(aa_stream *s) { (void)s; return AA_FORMAT_I16; }
+static int b_AAudioStream_getDeviceId(aa_stream *s) { (void)s; return 0; }
+static int b_AAudioStream_getFramesPerBurst(aa_stream *s) { (void)s; return AA_BURST; }
+static int b_AAudioStream_getBufferCapacityInFrames(aa_stream *s) { (void)s; return AA_BURST * 8; }
+static int b_AAudioStream_getBufferSizeInFrames(aa_stream *s) { return atomic_load(&s->buffer_size); }
+static int b_AAudioStream_setBufferSizeInFrames(aa_stream *s, int n) { atomic_store(&s->buffer_size, n); return n; }
+static int b_AAudioStream_getXRunCount(aa_stream *s) { (void)s; return 0; }
+static int b_AAudioStream_getState(aa_stream *s) { return atomic_load(&s->state); }
+static int b_AAudioStream_read(aa_stream *s, void *buf, int frames, long timeout) { (void)s; (void)buf; (void)frames; (void)timeout; return AA_UNAVAILABLE; }
 static const char *b_AAudio_convertResultToText(int r) { (void)r; return "AAudio is not available"; }
 
 /* AAssetDir: the files directly under an asset directory, across the APKs */
@@ -342,6 +429,20 @@ const tl_bionic_entry tl_tab_ndk[] = {
     TL_WRAP("AConfiguration_getSdkVersion", b_AConfiguration_getSdkVersion),
     /* assets */
     TL_WRAP("AAudio_createStreamBuilder", b_AAudio_createStreamBuilder), TL_WRAP("AAudio_convertResultToText", b_AAudio_convertResultToText),
+    TL_WRAP("AAudioStreamBuilder_delete", b_AAudioStreamBuilder_delete), TL_WRAP("AAudioStreamBuilder_setDataCallback", b_AAudioStreamBuilder_setDataCallback),
+    TL_WRAP("AAudioStreamBuilder_setDirection", b_AAudioStreamBuilder_setDirection), TL_WRAP("AAudioStreamBuilder_setErrorCallback", b_AAudioStreamBuilder_setErrorCallback),
+    TL_WRAP("AAudioStreamBuilder_openStream", b_AAudioStreamBuilder_openStream), TL_WRAP("AAudioStreamBuilder_setDeviceId", b_AAudioStreamBuilder_ignore),
+    TL_WRAP("AAudioStreamBuilder_setBufferCapacityInFrames", b_AAudioStreamBuilder_ignore), TL_WRAP("AAudioStreamBuilder_setInputPreset", b_AAudioStreamBuilder_ignore),
+    TL_WRAP("AAudioStreamBuilder_setPerformanceMode", b_AAudioStreamBuilder_ignore), TL_WRAP("AAudioStreamBuilder_setUsage", b_AAudioStreamBuilder_ignore),
+    TL_WRAP("AAudioStreamBuilder_setSampleRate", b_AAudioStreamBuilder_ignore), TL_WRAP("AAudioStreamBuilder_setChannelCount", b_AAudioStreamBuilder_ignore),
+    TL_WRAP("AAudioStreamBuilder_setFormat", b_AAudioStreamBuilder_ignore), TL_WRAP("AAudioStreamBuilder_setSharingMode", b_AAudioStreamBuilder_ignore),
+    TL_WRAP("AAudioStream_requestStart", b_AAudioStream_requestStart), TL_WRAP("AAudioStream_requestStop", b_AAudioStream_requestStop),
+    TL_WRAP("AAudioStream_close", b_AAudioStream_close), TL_WRAP("AAudioStream_getSampleRate", b_AAudioStream_getSampleRate),
+    TL_WRAP("AAudioStream_getChannelCount", b_AAudioStream_getChannelCount), TL_WRAP("AAudioStream_getFormat", b_AAudioStream_getFormat),
+    TL_WRAP("AAudioStream_getDeviceId", b_AAudioStream_getDeviceId), TL_WRAP("AAudioStream_getFramesPerBurst", b_AAudioStream_getFramesPerBurst),
+    TL_WRAP("AAudioStream_getBufferCapacityInFrames", b_AAudioStream_getBufferCapacityInFrames), TL_WRAP("AAudioStream_getBufferSizeInFrames", b_AAudioStream_getBufferSizeInFrames),
+    TL_WRAP("AAudioStream_setBufferSizeInFrames", b_AAudioStream_setBufferSizeInFrames), TL_WRAP("AAudioStream_getXRunCount", b_AAudioStream_getXRunCount),
+    TL_WRAP("AAudioStream_getState", b_AAudioStream_getState), TL_WRAP("AAudioStream_read", b_AAudioStream_read),
     TL_WRAP("AAssetManager_openDir", b_AAssetManager_openDir), TL_WRAP("AAssetDir_getNextFileName", b_AAssetDir_getNextFileName),
     TL_WRAP("AAssetDir_close", b_AAssetDir_close), TL_WRAP("deflateBound", b_deflateBound),
     TL_WRAP("AAssetManager_fromJava", b_AAssetManager_fromJava), TL_WRAP("AAssetManager_open", b_AAssetManager_open),

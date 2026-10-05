@@ -30,6 +30,10 @@ bool husk_unity_launch(const char *apk, const char *data_dir, void *metal_layer,
 bool husk_cocos_launch(const char *apk, const char *data_dir, void *metal_layer, int width, int height,
                        const char *angle_dylib, const char *ca_bundle);
 
+/* The same for a game built on Google's GameActivity (Minecraft): a landscape surface, with sound and multi-touch. */
+bool husk_gameactivity_launch(const char *apk, const char *data_dir, void *metal_layer, int width, int height,
+                              const char *angle_dylib, const char *ca_bundle);
+
 /* Soft keyboard for a cocos2d-x game. The handler is told (on the game's GL thread) 0 = toggle, 1 = show, 2 = hide. */
 void husk_cocos_set_keyboard_handler(void (*handler)(int action));
 void husk_cocos_insert_text(const char *utf8);

@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <sys/ucontext.h>
 #include <unistd.h>
 #include <TargetConditionals.h>
@@ -24,11 +25,14 @@
 #include "husk-tl-unity.h"
 #include "husk-tl-audio.h"
 #include "husk-tl-cocos.h"
+#include "husk-tl-gameactivity.h"
 
 void tl_hle_set_ca_bundle(const char *path);
 extern int tl_log_sink_fd;
 
-enum { ENGINE_UNITY = 0, ENGINE_COCOS = 1 };
+enum { ENGINE_UNITY = 0, ENGINE_COCOS = 1, ENGINE_GAMEACTIVITY = 2 };
+
+static unsigned long engine_frames(void);
 
 static struct {
     atomic_int state;
@@ -132,7 +136,7 @@ static void *heartbeat_thread(void *arg)
     unsigned long last = 0;
     for (int tick = 0;; tick++) {
         if (tick < 40) usleep(500000); else sleep(3);          /* twice a second for the first twenty seconds */
-        unsigned long f = A.engine == ENGINE_COCOS ? tl_cocos_frames() : tl_unity_frames();
+        unsigned long f = engine_frames();
 #if TARGET_OS_IPHONE
         tl_log_line("unity: alive: %lu frames (+%lu), %zu MiB left before jetsam", f, f - last, os_proc_available_memory() >> 20);
 #else
@@ -160,14 +164,22 @@ static void *launch_thread(void *arg)
     tl_guest_exit_hook = guest_exit;
     {
         char path[1100];
-        snprintf(path, sizeof(path), "%s/%s", A.data, A.engine == ENGINE_COCOS ? "native-run.log" : "unity-run.log");
+        snprintf(path, sizeof(path), "%s/%s", A.data, A.engine == ENGINE_UNITY ? "unity-run.log" : "native-run.log");
         tl_log_sink_fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_APPEND, 0644);
     }
     install_crash_reporter();
     tl_hle_set_ca_bundle(A.ca);
 
     bool ok;
-    if (A.engine == ENGINE_COCOS) {
+    if (A.engine == ENGINE_GAMEACTIVITY) {
+        tl_ga_config cfg = {
+            .apk_path = A.apk, .data_dir = A.data, .package_name = A.package, .width = A.width, .height = A.height,
+            .metal_layer = A.layer, .angle_egl = A.angle, .angle_gles = NULL, .frame_dir = NULL, .frame_every = 0,
+        };
+        tl_log_line("gameactivity: starting %s as %s, %dx%d", A.apk, A.package, A.width, A.height);
+        tl_audio_install();
+        ok = tl_ga_start(&cfg) && tl_ga_run();
+    } else if (A.engine == ENGINE_COCOS) {
         tl_cocos_config cfg = {
             .apk_path = A.apk, .data_dir = A.data, .package_name = A.package, .width = A.width, .height = A.height,
             .metal_layer = A.layer, .angle_egl = A.angle, .angle_gles = NULL, .frame_dir = NULL, .frame_every = 0,
@@ -207,7 +219,7 @@ static bool launch(int engine, const char *apk, const char *data_dir, void *meta
     snprintf(A.angle, sizeof(A.angle), "%s", angle_dylib);
     snprintf(A.ca, sizeof(A.ca), "%s", ca_bundle ? ca_bundle : "");
     A.layer = metal_layer; A.width = width; A.height = height;
-    if (!husk_unity_package_name(apk, A.package, sizeof(A.package))) snprintf(A.package, sizeof(A.package), "%s", engine == ENGINE_COCOS ? "com.cocos.game" : "com.unity.game");
+    if (!husk_unity_package_name(apk, A.package, sizeof(A.package))) snprintf(A.package, sizeof(A.package), "%s", engine == ENGINE_GAMEACTIVITY ? "com.mojang.minecraftpe" : engine == ENGINE_COCOS ? "com.cocos.game" : "com.unity.game");
     pthread_attr_t at;
     pthread_attr_init(&at);
     pthread_attr_setstacksize(&at, 4u << 20);
@@ -231,6 +243,12 @@ bool husk_cocos_launch(const char *apk, const char *data_dir, void *metal_layer,
     return launch(ENGINE_COCOS, apk, data_dir, metal_layer, width, height, angle_dylib, ca_bundle);
 }
 
+bool husk_gameactivity_launch(const char *apk, const char *data_dir, void *metal_layer, int width, int height,
+                              const char *angle_dylib, const char *ca_bundle)
+{
+    return launch(ENGINE_GAMEACTIVITY, apk, data_dir, metal_layer, width, height, angle_dylib, ca_bundle);
+}
+
 void husk_cocos_set_keyboard_handler(void (*handler)(int action)) { tl_cocos_keyboard_hook = handler; }
 void husk_cocos_set_open_url_handler(void (*handler)(const char *url)) { tl_cocos_open_url_hook = handler; }
 void husk_cocos_insert_text(const char *utf8) { if (atomic_load(&A.state) == HUSK_UNITY_RUNNING && A.engine == ENGINE_COCOS) tl_cocos_insert_text(utf8); }
@@ -245,21 +263,38 @@ int husk_unity_state(void)
     if (A.engine == ENGINE_COCOS && atomic_load(&A.state) == HUSK_UNITY_RUNNING && tl_cocos_ended()) atomic_store(&A.state, HUSK_UNITY_ENDED);
     return atomic_load(&A.state);
 }
-unsigned long husk_unity_frames(void) { return A.engine == ENGINE_COCOS ? tl_cocos_frames() : tl_unity_frames(); }
+static unsigned long engine_frames(void)
+{
+    return A.engine == ENGINE_GAMEACTIVITY ? tl_ga_frames() : A.engine == ENGINE_COCOS ? tl_cocos_frames() : tl_unity_frames();
+}
+unsigned long husk_unity_frames(void) { return engine_frames(); }
 void husk_unity_perf_snapshot(husk_unity_perf *out)
 {
+    if (A.engine == ENGINE_GAMEACTIVITY) {
+        /* The game paces its own frames; the rate is how many it presented since the last look. */
+        static unsigned long last; static struct timespec since;
+        struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
+        unsigned long f = tl_ga_frames();
+        double dt = since.tv_sec ? (now.tv_sec - since.tv_sec) + (now.tv_nsec - since.tv_nsec) / 1e9 : 0;
+        out->fps = dt > 0.05 ? (double)(f - last) / dt : 0;
+        out->mean_ms = out->fps > 0 ? 1000.0 / out->fps : 0; out->max_ms = 0;
+        last = f; since = now;
+        return;
+    }
     if (A.engine == ENGINE_COCOS) { tl_cocos_perf p; tl_cocos_perf_snapshot(&p); out->fps = p.fps; out->mean_ms = p.mean_ms; out->max_ms = p.max_ms; return; }
     tl_unity_perf p; tl_unity_perf_snapshot(&p); out->fps = p.fps; out->mean_ms = p.mean_ms; out->max_ms = p.max_ms;
 }
 void husk_unity_touch(int phase, int id, float x, float y)
 {
     if (atomic_load(&A.state) != HUSK_UNITY_RUNNING) return;
-    if (A.engine == ENGINE_COCOS) tl_cocos_touch(phase, id, x, y); else tl_unity_touch(phase, id, x, y);
+    if (A.engine == ENGINE_GAMEACTIVITY) tl_ga_touch(phase, id, x, y);
+    else if (A.engine == ENGINE_COCOS) tl_cocos_touch(phase, id, x, y); else tl_unity_touch(phase, id, x, y);
 }
 void husk_unity_set_paused(bool paused)
 {
     if (atomic_load(&A.state) != HUSK_UNITY_RUNNING) return;
-    if (A.engine == ENGINE_COCOS) { tl_cocos_set_paused(paused); tl_audio_set_paused(paused); } else tl_unity_set_paused(paused);
+    if (A.engine == ENGINE_GAMEACTIVITY) { tl_ga_set_paused(paused); tl_audio_set_paused(paused); }
+    else if (A.engine == ENGINE_COCOS) { tl_cocos_set_paused(paused); tl_audio_set_paused(paused); } else tl_unity_set_paused(paused);
 }
 
 /* ------------------------------------------------------------- package name */

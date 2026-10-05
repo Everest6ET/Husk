@@ -18,6 +18,7 @@
 
 /* No native library is anywhere near this; a bigger entry is not one. */
 #define LIB_LIMIT       ((size_t)1 << 31)
+#define HUGE_LIB        ((size_t)192 << 20)
 
 static const char *const kAbis[] = {
     "arm64-v8a", "armeabi-v7a", "armeabi", "x86_64", "x86", "riscv64", "mips64", "mips",
@@ -64,7 +65,7 @@ static bool is_dex(const char *name)
 
 /* Recognised by the libraries an engine always ships. */
 typedef struct engine_scan {
-    bool il2cpp, unity, mono_unity, flutter, react, dotnet, godot, unreal, cocos, gdx;
+    bool il2cpp, unity, mono_unity, flutter, react, dotnet, godot, unreal, cocos, gdx, minecraft;
 } engine_scan;
 
 static void note_engine(engine_scan *s, const char *f)
@@ -79,6 +80,7 @@ static void note_engine(engine_scan *s, const char *f)
     else if (!strcmp(f, "libUE4.so") || !strcmp(f, "libUnreal.so")) s->unreal = true;
     else if (!strncmp(f, "libcocos", 8)) s->cocos = true;
     else if (!strcmp(f, "libgdx.so")) s->gdx = true;
+    else if (!strcmp(f, "libminecraftpe.so")) s->minecraft = true;
 }
 
 static const char *engine_name(const engine_scan *s)
@@ -91,6 +93,7 @@ static const char *engine_name(const engine_scan *s)
     if (s->godot) return "Godot";
     if (s->unreal) return "Unreal Engine";
     if (s->cocos) return "Cocos";
+    if (s->minecraft) return "Minecraft";
     if (s->gdx) return "libGDX";
     return NULL;
 }
@@ -274,7 +277,13 @@ char *husk_tl_scan(const char *const *paths, int count)
             size_t len;
             bool owned;
             char derr[160] = "";
-            if (tl_zip_data(&z, e, LIB_LIMIT, &data, &len, &owned, derr, sizeof(derr))) {
+            if (e->usize > HUGE_LIB) {
+                /* Minecraft's library is 350 MB: unpacking it only to count its instructions would cost more memory than the
+                 * game itself needs while the app is on screen. The runtime meets it when it loads it. */
+                memset(rep, 0, sizeof(*rep));
+                rep->ok = true;
+                rep->packing = "none";
+            } else if (tl_zip_data(&z, e, LIB_LIMIT, &data, &len, &owned, derr, sizeof(derr))) {
                 tl_elf_analyze(data, len, rep);
                 if (owned) free((void *)data);
             } else {

@@ -82,6 +82,9 @@ targets:
           - "CoreText"
           - "-framework"
           - "CoreGraphics"
+          # Security verifies the licence signature Minecraft's UI engine checks through Java's Signature class.
+          - "-framework"
+          - "Security"
     dependencies:
       # Built by scripts/build_ios.sh. Embedded and signed into the bundle.
       - framework: ../../build/ios-arm64/lib/libqemu-aarch64-softmmu.dylib
