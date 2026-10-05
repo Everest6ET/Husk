@@ -12,6 +12,7 @@ struct LibraryTab: View {
     @ObservedObject private var host = AndroidHost.shared
     @ObservedObject private var runner = QemuRunner.shared
     @ObservedObject private var router = Router.shared
+    @ObservedObject private var jit = JITCoordinator.shared
 
     let onOpenGuest: () -> Void
     let onStartAndroid: () -> Void
@@ -68,6 +69,7 @@ struct LibraryTab: View {
                 if !host.packages.isEmpty { searchField }
                 if !host.isReady { machineStrip }
                 if let busy = host.busy { busyStrip(busy) }
+                if jit.busy, !jit.showSetup { busyStrip(jit.status ?? "Turning on JIT…") }
                 if !categories.isEmpty { chips }
 
                 if !shown.isEmpty {

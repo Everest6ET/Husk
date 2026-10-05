@@ -37,8 +37,10 @@ struct OnboardingView: View {
     @State private var autoSave =
         UserDefaults.standard.object(forKey: "husk.autoSave") as? Bool ?? true
     @Environment(\.colorScheme) private var scheme
+    @ObservedObject private var jit = JITCoordinator.shared
+    @State private var settingUpJIT = false
 
-    private let pages = 3
+    private let pages = 4
 
     var body: some View {
         ZStack {
@@ -48,9 +50,11 @@ struct OnboardingView: View {
                 TabView(selection: $page) {
                     welcome.tag(0)
                     choices.tag(1)
-                    ready.tag(2)
+                    jitPage.tag(2)
+                    ready.tag(3)
                 }
                 .tabViewStyle(.page(indexDisplayMode: .never))
+                .sheet(isPresented: $settingUpJIT) { JITSetupFlow() }
 
                 // One control, always in the same place. A flow that moves its
                 // own button around is harder to get through than one that does
@@ -169,6 +173,43 @@ struct OnboardingView: View {
         .huskCard()
     }
 
+    /// What the JIT page says is already in place, if anything.
+    private var jitState: String? {
+        if JITBootstrap.debuggedFlag { return "JIT is on." }
+        if jit.method == .stikDebug { return "Husk will use StikDebug." }
+        if jit.method == .trollStore { return "Husk will use TrollStore." }
+        switch jit.pairingSource {
+        case .onDevice: return "Paired on this device."
+        case .imported: return "Pairing file imported."
+        case nil: return nil
+        }
+    }
+
+    private var jitPage: some View {
+        VStack(spacing: 18) {
+            Spacer()
+            Image(systemName: "bolt.fill")
+                .font(.system(size: 54))
+                .foregroundStyle(Theme.accent)
+            Text("Turn on JIT").font(.largeTitle.weight(.semibold))
+            Text("Android needs JIT, which on iOS only an attached debugger can grant. "
+               + "Husk can be that debugger itself: on iOS 27 it pairs with this iPhone "
+               + "from Settings, no computer needed. StikDebug works too.")
+                .font(.callout).foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 34)
+            if let state = jitState {
+                Label(state, systemImage: "checkmark.circle.fill")
+                    .font(.callout.weight(.medium)).foregroundStyle(.green)
+            }
+            Button(jitState == nil ? "Set up JIT now" : "Change JIT setup") { settingUpJIT = true }
+                .font(.body.weight(.semibold))
+                .foregroundStyle(Theme.accent)
+                .padding(.top, 4)
+            Spacer()
+        }
+    }
+
     private var ready: some View {
         VStack(spacing: 18) {
             Spacer()
@@ -176,9 +217,9 @@ struct OnboardingView: View {
                 .font(.system(size: 62))
                 .foregroundStyle(Theme.accent)
             Text("Ready").font(.largeTitle.weight(.semibold))
-            Text("Husk needs JIT to run Android, which on iOS only a debugger can "
-               + "grant. If it is not enabled, the Library will say so and offer "
-               + "to open StikDebug.")
+            Text("If JIT is not on when Android starts, Husk turns it on with the "
+               + "method you chose, or walks you through setting one up. You can "
+               + "change it any time in Settings › JIT & sideload.")
                 .font(.callout).foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 34)

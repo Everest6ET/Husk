@@ -21,6 +21,7 @@ struct ContentView: View {
     /// demand from the library.
     @State private var showGuestScreen = false
     @ObservedObject private var router = Router.shared
+    @ObservedObject private var jit = JITCoordinator.shared
     @State private var showOnboarding = Onboarding.needed
     /// True while the launch boot screen is up, rather than the library.
     @State private var booting = false
@@ -124,6 +125,10 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $showLogs) { LogView() }
+        .sheet(isPresented: $jit.showSetup) { JITSetupFlow() }
+        // The built-in helper attaches while Husk stays in the foreground, so
+        // there is no relaunch to trigger the region claim below; this is it.
+        .onChange(of: jit.attachGeneration) { _ in evaluate() }
         // Asking rather than downloading. Two gigabytes over someone's cellular
         // connection is not a decision to make on their behalf.
         .alert(guest.update.title, isPresented: Binding(
@@ -202,10 +207,8 @@ struct ContentView: View {
     /// JIT prompt is raised here instead.
     private func startFromLibrary() {
         guard JITBootstrap.isDebuggerAttached else {
-            HuskLog.log("ui", "start asked for without JIT; opening debugger")
-            if !JITBootstrap.requestAttach() {
-                _ = JITBootstrap.requestTrollStoreAttach()
-            }
+            HuskLog.log("ui", "start asked for without JIT; enabling with \(jit.resolvedMethod.title)")
+            jit.enable()
             return
         }
         start()

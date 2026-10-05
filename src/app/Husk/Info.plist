@@ -42,8 +42,34 @@
 	<key>LSApplicationQueriesSchemes</key>
 	<array>
 		<string>stikjit</string>
+		<string>stikdebug</string>
 		<string>stosdebug</string>
 		<string>apple-magnifier</string>
+		<string>localdevvpn</string>
+	</array>
+	<!-- LocalDevVPN returns to husk:// once connected (JITSetup.swift). -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>husk</string>
+			</array>
+		</dict>
+	</array>
+	<!-- On-device pairing (JITPairing.swift): Husk advertises itself as a
+	     pairable computer, and keeps running while the user pairs from Settings. -->
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_remotepairing-pairable-host._tcp</string>
+	</array>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Husk uses the local network to pair with this iPhone for JIT, without a computer.</string>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>$(PRODUCT_BUNDLE_IDENTIFIER).pairing.*</string>
 	</array>
 	<!-- Android games may talk plain http as well as https; iOS refuses plain http unless told otherwise. -->
 	<key>NSAppTransportSecurity</key>

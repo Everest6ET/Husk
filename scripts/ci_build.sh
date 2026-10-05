@@ -43,6 +43,9 @@ step "integrate Husk sources into QEMU, then rebuild it"
 step "guest kernel + firmware"
 ./scripts/fetch_phase0_guest.sh
 
+step "on-device pairing (Rust)"
+./scripts/build_rppairing_ios.sh
+
 step "app + IPA"
 mkdir -p "$(dirname "$OUT")"
 ./scripts/package_ipa.sh "$OUT"
