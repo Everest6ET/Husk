@@ -12,6 +12,14 @@ options:
 
 settings:
   base:
+    # The app and its JIT helper extension follow this together; the helper's
+    # Info.plist names the extension point the app declares under it. Change
+    # this, not PRODUCT_BUNDLE_IDENTIFIER, or the helper becomes unfindable.
+    HUSK_BUNDLE_IDENTIFIER: com.husk.app
+    # The app's entitlements only. A signed development build has to drop
+    # dynamic-codesigning, which Apple will not provision; overriding this
+    # rather than CODE_SIGN_ENTITLEMENTS keeps the override off the helper.
+    HUSK_ENTITLEMENTS: Husk/Husk.entitlements
     ARCHS: arm64
     ONLY_ACTIVE_ARCH: YES
     ENABLE_BITCODE: NO
@@ -42,9 +50,14 @@ targets:
       - path: ../translation-layer-next
         excludes:
           - "husk-tl-unity-app.h"
+      # The XPC messages the app and its JIT helper exchange.
+      - path: HuskJITHelper/HuskJITMessages.swift
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.husk.app
+        PRODUCT_BUNDLE_IDENTIFIER: $(HUSK_BUNDLE_IDENTIFIER)
+        # Writes the HuskJITHelper extension point the app declares
+        # (JITBuiltIn.swift) into the bundle.
+        EX_ENABLE_EXTENSION_POINT_GENERATION: YES
         # Set your team here rather than in Xcode's UI: this file is the source of
         # truth, and `xcodegen generate` overwrites Husk.xcodeproj.
         # DEVELOPMENT_TEAM: XXXXXXXXXX
@@ -58,7 +71,7 @@ targets:
         ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS: YES
         CODE_SIGN_STYLE: Automatic
         INFOPLIST_FILE: Husk/Info.plist
-        CODE_SIGN_ENTITLEMENTS: Husk/Husk.entitlements
+        CODE_SIGN_ENTITLEMENTS: "$(HUSK_ENTITLEMENTS)"
         SWIFT_OBJC_BRIDGING_HEADER: Husk/HuskBridge.h
         # libqemu-aarch64-softmmu.dylib has install_name @rpath/...
         LD_RUNPATH_SEARCH_PATHS:
@@ -85,7 +98,16 @@ targets:
           # Security verifies the licence signature Minecraft's UI engine checks through Java's Signature class.
           - "-framework"
           - "Security"
+          # On-device pairing for Built-in StikJIT, built by scripts/build_rppairing_ios.sh.
+          - "-lhusk_rppairing"
+          # Built-in StikJIT talks to its helper through ExtensionFoundation,
+          # which only exists from iOS 26; weak, or the app will not launch on
+          # the older systems the deployment target still admits.
+          - "-weak_framework"
+          - "ExtensionFoundation"
     dependencies:
+      # Built-in StikJIT's debugger process. Embedded into Extensions/.
+      - target: HuskJITHelper
       # Built by scripts/build_ios.sh. Embedded and signed into the bundle.
       - framework: ../../build/ios-arm64/lib/libqemu-aarch64-softmmu.dylib
         embed: true
@@ -154,3 +176,62 @@ targets:
           - "$(BUILT_PRODUCTS_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/edk2-aarch64-code.fd"
           - "$(BUILT_PRODUCTS_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/lineage-efi-vars-seed.fd"
           - "$(BUILT_PRODUCTS_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/lineage-vdb-seed.qcow2"
+
+  # Built-in StikJIT's debugger (docs/06-built-in-jit.md). A process cannot
+  # synchronously debug itself, so StikJIT runs here and attaches to the app.
+  # iOS 26 only: the app falls back to StikDebug below that.
+  HuskJITHelper:
+    type: extensionkit-extension
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: HuskJITHelper
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(HUSK_BUNDLE_IDENTIFIER).JITHelper
+        INFOPLIST_FILE: HuskJITHelper/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        APPLICATION_EXTENSION_API_ONLY: YES
+        EX_ENABLE_EXTENSION_POINT_GENERATION: YES
+        CODE_SIGN_STYLE: Automatic
+        TARGETED_DEVICE_FAMILY: "1"
+        LD_RUNPATH_SEARCH_PATHS:
+          - "$(inherited)"
+          - "@executable_path/Frameworks"
+    dependencies:
+      # StikJIT 1.9.0 (MPL-2.0, with idevice under MIT), from
+      # github.com/StikDebug/StikJIT/releases/tag/1.9.0, unmodified. Linked
+      # here and embedded by the script below.
+      - framework: Frameworks/StikJIT.xcframework
+        embed: false
+    postBuildScripts:
+      - name: Embed StikJIT
+        # Upstream's framework has no Info.plist, and installd refuses an
+        # embedded framework without one. Copy it in with a minimal plist rather
+        # than editing the vendored bundle, then sign it as the copy phase would.
+        script: |
+          set -e
+          SRC="$SRCROOT/Frameworks/StikJIT.xcframework/ios-arm64/StikJIT.framework"
+          DST="$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH/StikJIT.framework"
+          rm -rf "$DST"
+          mkdir -p "$(dirname "$DST")"
+          ditto "$SRC" "$DST"
+          rm -rf "$DST/Headers" "$DST/Modules"
+          PLIST="$DST/Info.plist"
+          if [ ! -f "$PLIST" ]; then
+            plutil -create xml1 "$PLIST"
+            plutil -insert CFBundleIdentifier -string com.stikdebug.StikJIT "$PLIST"
+            plutil -insert CFBundleExecutable -string StikJIT "$PLIST"
+            plutil -insert CFBundleName -string StikJIT "$PLIST"
+            plutil -insert CFBundlePackageType -string FMWK "$PLIST"
+            plutil -insert CFBundleInfoDictionaryVersion -string 6.0 "$PLIST"
+            plutil -insert CFBundleShortVersionString -string 1.9.0 "$PLIST"
+            plutil -insert CFBundleVersion -string 1.9.0 "$PLIST"
+            plutil -insert MinimumOSVersion -string 17.4 "$PLIST"
+            plutil -insert CFBundleSupportedPlatforms -array "$PLIST"
+            plutil -insert CFBundleSupportedPlatforms.0 -string iPhoneOS "$PLIST"
+          fi
+          if [ -n "$EXPANDED_CODE_SIGN_IDENTITY" ] && [ "$CODE_SIGNING_ALLOWED" != "NO" ]; then
+            codesign --force --sign "$EXPANDED_CODE_SIGN_IDENTITY" --timestamp=none "$DST"
+          fi
+        basedOnDependencyAnalysis: false

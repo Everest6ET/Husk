@@ -125,6 +125,19 @@ for f in vmlinuz-virt initramfs-virt husk-jit.js \
     fi
 done
 
+# Built-in StikJIT's helper. Without it the app still installs and runs with
+# StikDebug, but its JIT setup would offer a method that can only fail.
+HELPER="$APP/Extensions/HuskJITHelper.appex"
+for f in "$HELPER/HuskJITHelper" "$HELPER/Frameworks/StikJIT.framework/StikJIT" \
+         "$HELPER/Frameworks/StikJIT.framework/Info.plist"; do
+    if [ ! -f "$f" ]; then
+        echo "  MISSING  ${f#$APP/}" >&2
+        rc=1
+    else
+        printf "  ok       %-28s %s\n" "$(basename "$f")" "${f#$APP/}"
+    fi
+done
+
 [ $rc -eq 0 ] || { echo "==> bundle is not installable; refusing to package" >&2; exit 1; }
 
 echo "==> packaging"

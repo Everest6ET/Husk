@@ -434,11 +434,44 @@ struct NetworkSettings: View {
 
 struct JITSettings: View {
     @ObservedObject private var runner = QemuRunner.shared
+    @ObservedObject private var jit = JITCoordinator.shared
     @State private var autoStart = Onboarding.autoStart
     @State private var keepAttached = JITBootstrap.keepDebuggerAttached
 
+    private var pairingLabel: String {
+        switch jit.pairingSource {
+        case .onDevice: return "paired on this device"
+        case .imported: return "file imported"
+        case nil: return "not set up"
+        }
+    }
+
     var body: some View {
         Form {
+            Section {
+                Picker("Method", selection: $jit.method) {
+                    ForEach(JITMethod.allCases) { Text($0.title).tag($0) }
+                }
+                DetailRow(label: "StikDebug",
+                          value: JITBootstrap.isStikDebugInstalled ? "installed" : "not found", mono: false)
+                DetailRow(label: "TrollStore",
+                          value: JITBootstrap.isTrollStoreInstalled ? "installed" : "not found", mono: false)
+                DetailRow(label: "Built-in pairing", value: pairingLabel, mono: false)
+                Button {
+                    jit.showSetup = true
+                } label: {
+                    Label("Set up JIT", systemImage: "wand.and.stars")
+                }
+            } header: {
+                Text("Method")
+            } footer: {
+                Text(jit.method == .automatic
+                     ? jit.automaticDescription + " Built-in StikJIT needs iOS 26, LocalDevVPN, and a "
+                       + "pairing file, which Husk can make itself on iOS 27."
+                     : HuskBuiltInJIT.unavailableReason ?? "Built-in StikJIT needs LocalDevVPN and a pairing "
+                       + "file, which Husk can make itself on iOS 27.")
+            }
+
             Section {
                 DetailRow(label: "Debugger",
                           value: JITBootstrap.isDebuggerAttached ? "attached" : "not attached",
@@ -466,10 +499,11 @@ struct JITSettings: View {
                 }
                 if !JITBootstrap.isDebuggerAttached {
                     Button {
-                        _ = JITBootstrap.requestAttach()
+                        jit.enable()
                     } label: {
-                        Label("Enable JIT with StikDebug", systemImage: "bolt.fill")
+                        Label("Enable JIT with \(jit.resolvedMethod.title)", systemImage: "bolt.fill")
                     }
+                    .disabled(jit.busy)
                     Button {
                         _ = JITBootstrap.requestTrollStoreAttach()
                     } label: {

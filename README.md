@@ -6,6 +6,13 @@ Android app launcher for iOS.
 
 Drop in an APK, tap it, and the Android app opens full-screen.
 
+## JIT
+
+Husk needs JIT, which on iOS takes an attached debugger. Use StikDebug, or
+Husk's built-in StikJIT helper (iOS 26+), which on iOS 27 can pair with your
+iPhone from Settings with no computer. The app walks you through it; see
+[docs/06-built-in-jit.md](docs/06-built-in-jit.md).
+
 ## Builds
 
 Every push builds an unsigned `Husk.ipa` in GitHub Actions

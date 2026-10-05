@@ -15,9 +15,10 @@ private let CS_DEBUGGED = UInt32(0x10000000)
 /// Gets Husk from "launched normally, no executable memory" to "JIT is live".
 ///
 /// On iOS 27 every supported device enforces TXM, so the app cannot grant itself
-/// executable memory — only an attached debugger can. StikDebug is that debugger.
-/// Husk hands it the JIT script inline over its URL scheme, so the user never has
-/// to configure anything inside StikDebug for Husk specifically.
+/// executable memory — only an attached debugger can. That debugger is either
+/// StikDebug, which Husk hands the JIT script inline over its URL scheme, or
+/// Husk's own built-in StikJIT helper (JITSetup.swift), which runs the same
+/// script from an app extension.
 enum JITBootstrap {
     private static let log = Logger(subsystem: "com.husk.app", category: "jit")
 
@@ -180,11 +181,7 @@ enum JITBootstrap {
     /// not listening. The brk probe still runs once, inside the allocator, where
     /// its answer is immediately acted on.
     static var isDebuggerAttached: Bool {
-        var flags: UInt32 = 0
-        let rc = withUnsafeMutableBytes(of: &flags) { buf in
-            csops(getpid(), CS_OPS_STATUS, buf.baseAddress, buf.count)
-        }
-        if rc != 0 {
+        guard let flags = csStatus() else {
             HuskLog.log("jit", "csops failed (errno \(errno)); assuming no debugger")
             return false
         }
@@ -192,6 +189,34 @@ enum JITBootstrap {
         HuskLog.log("jit", String(format: "csops status = 0x%08x, CS_DEBUGGED = %@",
                                   flags, attached ? "set" : "clear"))
         return attached
+    }
+
+    /// `isDebuggerAttached` without the log line, for polling while the
+    /// built-in helper attaches.
+    static var debuggedFlag: Bool {
+        (csStatus() ?? 0) & CS_DEBUGGED != 0
+    }
+
+    private static func csStatus() -> UInt32? {
+        var flags: UInt32 = 0
+        let rc = withUnsafeMutableBytes(of: &flags) { buf in
+            csops(getpid(), CS_OPS_STATUS, buf.baseAddress, buf.count)
+        }
+        return rc == 0 ? flags : nil
+    }
+
+    static var isStikDebugInstalled: Bool {
+        URL(string: "stikjit://").map(UIApplication.shared.canOpenURL) ?? false
+    }
+
+    /// TrollStore answers enable-jit on the `apple-magnifier` scheme.
+    static var isTrollStoreInstalled: Bool {
+        URL(string: "apple-magnifier://").map(UIApplication.shared.canOpenURL) ?? false
+    }
+
+    /// husk-jit.js as standard base64, which Built-in StikJIT's custom script takes.
+    static var scriptBase64: String? {
+        loadScript()?.data(using: .utf8)?.base64EncodedString()
     }
 
     /// Ask StikDebug to attach to us and run the JIT script.
