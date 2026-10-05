@@ -2,18 +2,32 @@
 import SwiftUI
 import UIKit
 import QuartzCore
+import AVFoundation
+
+/// The engines the native runtime drives. Both draw into a CAMetalLayer through ANGLE, and both are one game per
+/// process: an engine cannot be unloaded once it has started.
+enum TLNativeEngine {
+    case unity     // Subway Surfers and other Unity games: portrait, driven by UnityPlayer's own thread
+    case cocos     // Geometry Dash and other cocos2d-x games: landscape, driven by a GL thread of our own
+}
 
 /// A Unity game's screen: one CAMetalLayer that the game's own GL (ANGLE over Metal) presents into.
 ///
 /// Nothing is copied or composed here. The runtime hands the layer to EGL as the game's window; the
 /// game draws and presents on its own thread. This view's jobs are the layer's size, the pause that
 /// goes with leaving the screen, and turning touches into the pixel coordinates Android reports.
-final class TLUnityUIView: UIView {
+final class TLUnityUIView: UIView, UIKeyInput {
     override class var layerClass: AnyClass { CAMetalLayer.self }
+
+    /// The cocos2d-x game on screen, which the game's keyboard requests (they arrive on its GL thread) are routed to.
+    nonisolated(unsafe) static weak var cocosView: TLUnityUIView?
 
     private let apk: String
     private let dataDir: String
+    private let engine: TLNativeEngine
     private var launched = false
+    /// Where the corner statistics go when this view does not draw them itself (a landscape game has its own bar).
+    var onStats: ((String) -> Void)?
     /// Active touches by UITouch identity, each given a small stable id like Android's pointer ids.
     private var pointers: [ObjectIdentifier: Int32] = [:]
 
@@ -22,9 +36,10 @@ final class TLUnityUIView: UIView {
     private let stats = UILabel()
     private var statsTimer: Timer?
 
-    init(apk: String, dataDir: String) {
+    init(apk: String, dataDir: String, engine: TLNativeEngine) {
         self.apk = apk
         self.dataDir = dataDir
+        self.engine = engine
         super.init(frame: .zero)
         backgroundColor = .black
         isMultipleTouchEnabled = true
@@ -46,17 +61,30 @@ final class TLUnityUIView: UIView {
         stats.textAlignment = .center
         stats.isUserInteractionEnabled = false
         stats.text = " "
-        addSubview(stats)
+        if engine == .unity { addSubview(stats) }
+        if engine == .cocos {
+            TLUnityUIView.cocosView = self
+            TLUnityUIView.installKeyboardHandler()
+        }
+        // The GPU is not the app's while it is in the background: stop drawing, and carry on when it returns.
+        NotificationCenter.default.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: .main) { _ in
+            husk_unity_set_paused(true)
+        }
+        NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            if self?.window != nil { husk_unity_set_paused(false) }
+        }
     }
 
-    deinit { statsTimer?.invalidate() }
+    deinit { statsTimer?.invalidate(); NotificationCenter.default.removeObserver(self) }
 
     private func updateStats() {
         var p = husk_unity_perf()
         husk_unity_perf_snapshot(&p)
-        stats.text = p.fps > 0
+        let text = p.fps > 0
             ? String(format: "%.0f fps · %.1f ms · max %.0f", p.fps, p.mean_ms, p.max_ms)
             : "starting"
+        stats.text = text
+        onStats?(text)
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -68,7 +96,10 @@ final class TLUnityUIView: UIView {
         let w = Int((bounds.width * contentScaleFactor).rounded())
         let h = Int((bounds.height * contentScaleFactor).rounded())
         (layer as? CAMetalLayer)?.drawableSize = CGSize(width: w, height: h)
-        if !launched, window != nil { launch(width: w, height: h) }
+        // A landscape game is told its size once, when it starts, so it must not start while the screen is still
+        // turning: wait for a surface that is wider than it is tall.
+        let ready = engine == .cocos ? w > h : true
+        if !launched, window != nil, ready { launch(width: w, height: h) }
     }
 
     override func didMoveToWindow() {
@@ -80,6 +111,7 @@ final class TLUnityUIView: UIView {
             statsTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in self?.updateStats() }
         } else {
             husk_unity_set_paused(true)
+            if isFirstResponder { resignFirstResponder() }
         }
         setNeedsLayout()
     }
@@ -95,9 +127,104 @@ final class TLUnityUIView: UIView {
             HuskLog.log("tl", "unity: already started; resuming")
             return
         }
-        HuskLog.log("tl", "unity: launching \(apk) at \(width)x\(height)")
-        if !husk_unity_launch(apk, dataDir, layerPtr, Int32(width), Int32(height), angle, ca) {
-            HuskLog.log("tl", "unity: launch refused")
+        if engine == .cocos {
+            // The game plays through the silent switch, like the guest's own audio, and mixes with other audio.
+            let session = AVAudioSession.sharedInstance()
+            try? session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+            try? session.setActive(true)
+        }
+        HuskLog.log("tl", "native: launching \(apk) at \(width)x\(height) (\(engine == .cocos ? "cocos2d-x" : "unity"))")
+        let started = engine == .cocos
+            ? husk_cocos_launch(apk, dataDir, layerPtr, Int32(width), Int32(height), angle, ca)
+            : husk_unity_launch(apk, dataDir, layerPtr, Int32(width), Int32(height), angle, ca)
+        if !started { HuskLog.log("tl", "native: launch refused") }
+    }
+
+    // MARK: keyboard (cocos2d-x games)
+
+    /// A game asks for the keyboard when its text field is tapped. The keyboard belongs to this view; what it types goes
+    /// to the game, and a strip above the keyboard shows the text, because in landscape the keyboard covers the game's field.
+    override var canBecomeFirstResponder: Bool { engine == .cocos }
+    var hasText: Bool { true }
+    var autocorrectionType: UITextAutocorrectionType = .no
+    var autocapitalizationType: UITextAutocapitalizationType = .none
+    var spellCheckingType: UITextSpellCheckingType = .no
+    var smartQuotesType: UITextSmartQuotesType = .no
+    var smartDashesType: UITextSmartDashesType = .no
+    var smartInsertDeleteType: UITextSmartInsertDeleteType = .no
+    var keyboardType: UIKeyboardType = .default
+    var keyboardAppearance: UIKeyboardAppearance = .dark
+    var returnKeyType: UIReturnKeyType = .done
+
+    private var typed = ""
+    private lazy var typedLabel: UILabel = {
+        let l = UILabel()
+        l.font = .systemFont(ofSize: 17, weight: .medium)
+        l.textColor = .white
+        l.lineBreakMode = .byTruncatingHead
+        return l
+    }()
+    private lazy var keyboardBar: UIView = {
+        let bar = UIView(frame: CGRect(x: 0, y: 0, width: 100, height: 44))
+        bar.backgroundColor = UIColor(white: 0.12, alpha: 1)
+        bar.autoresizingMask = [.flexibleWidth]
+        typedLabel.frame = CGRect(x: 16, y: 0, width: 100, height: 44)
+        typedLabel.autoresizingMask = [.flexibleWidth]
+        bar.addSubview(typedLabel)
+        let done = UIButton(type: .system)
+        done.setTitle("Done", for: .normal)
+        done.titleLabel?.font = .systemFont(ofSize: 17, weight: .semibold)
+        done.frame = CGRect(x: 100, y: 0, width: 80, height: 44)
+        done.autoresizingMask = [.flexibleLeftMargin]
+        done.addAction(UIAction { [weak self] _ in self?.finishTyping() }, for: .touchUpInside)
+        bar.addSubview(done)
+        return bar
+    }()
+    override var inputAccessoryView: UIView? { engine == .cocos ? keyboardBar : nil }
+
+    func insertText(_ text: String) {
+        if text == "\n" { finishTyping(); return }
+        typed += text
+        typedLabel.text = typed
+        husk_cocos_insert_text(text)
+    }
+
+    func deleteBackward() {
+        if !typed.isEmpty { typed.removeLast() }
+        typedLabel.text = typed
+        husk_cocos_delete_backward()
+    }
+
+    private func setTyped(_ text: String) { typed = text; typedLabel.text = text }
+
+    /// Return, or the Done button: what Android's "done" action does -- the game gets a newline, and the keyboard goes.
+    private func finishTyping() {
+        husk_cocos_insert_text("\n")
+        resignFirstResponder()
+    }
+
+    /// The game's own requests, from its GL thread: 0 toggles, 1 shows, 2 hides.
+    static func installKeyboardHandler() {
+        // A link in the game (terms of use, the social buttons) opens in the browser.
+        husk_cocos_set_open_url_handler { url in
+            guard let url, let link = URL(string: String(cString: url)) else { return }
+            DispatchQueue.main.async { UIApplication.shared.open(link) }
+        }
+        husk_cocos_set_keyboard_handler { action in
+            DispatchQueue.main.async {
+                guard let view = TLUnityUIView.cocosView else { return }
+                let show = action == 1 || (action == 0 && !view.isFirstResponder)
+                if show {
+                    // Start the strip from what the game's field already holds, so editing a name shows the whole name.
+                    husk_cocos_request_text { text in
+                        let seed = text.map { String(cString: $0) } ?? ""
+                        DispatchQueue.main.async { TLUnityUIView.cocosView?.setTyped(seed) }
+                    }
+                    view.becomeFirstResponder()
+                } else {
+                    view.resignFirstResponder()
+                }
+            }
         }
     }
 
@@ -133,17 +260,20 @@ final class TLUnityUIView: UIView {
 struct TLUnityScreen: UIViewRepresentable {
     let apk: String
     let dataDir: String
-    /// One view for the life of the process. The engine's GPU surface belongs to this view's layer and an engine
-    /// cannot be started twice, so coming back to the game must show the same layer, not a new one.
-    private static var shared: TLUnityUIView?
+    var engine: TLNativeEngine = .unity
+    var onStats: ((String) -> Void)? = nil
+    /// One view per game for the life of the process. The engine's GPU surface belongs to this view's layer and an
+    /// engine cannot be started twice, so coming back to the game must show the same layer, not a new one.
+    private static var shared: [String: TLUnityUIView] = [:]
 
     func makeUIView(context: Context) -> TLUnityUIView {
-        if let view = Self.shared { return view }
-        let view = TLUnityUIView(apk: apk, dataDir: dataDir)
-        Self.shared = view
+        if let view = Self.shared[apk] { view.onStats = onStats; return view }
+        let view = TLUnityUIView(apk: apk, dataDir: dataDir, engine: engine)
+        view.onStats = onStats
+        Self.shared[apk] = view
         return view
     }
-    func updateUIView(_ view: TLUnityUIView, context: Context) {}
+    func updateUIView(_ view: TLUnityUIView, context: Context) { view.onStats = onStats }
 }
 
 /// Polls the runtime for the status line and its log, ten times a second at most.
@@ -188,7 +318,7 @@ final class TLUnityModel: ObservableObject {
     var subStatusText: String {
         switch state {
         case Int32(HUSK_UNITY_RUNNING): return "\(frames) frame(s) drawn · native runtime"
-        case Int32(HUSK_UNITY_STARTING): return "Loading libraries and starting Unity"
+        case Int32(HUSK_UNITY_STARTING): return "Loading libraries and starting the engine"
         default: return "Native runtime"
         }
     }
@@ -309,5 +439,113 @@ struct TLUnityAttemptView: View {
         .defersSystemGestures(on: .all)
         .onAppear { model.start() }
         .onDisappear { model.stop() }
+    }
+}
+
+
+/// A cocos2d-x game's screen (Geometry Dash). These are landscape games: the app turns to landscape while this is up and
+/// back afterwards, the game takes the whole screen, and a thin bar above it carries what the other runners show -- the
+/// status, the frames per second and the time a frame takes -- and, with developer info on, the log beside the game.
+struct TLCocosAttemptView: View {
+    let app: TLApp
+    @Environment(\.dismiss) private var dismiss
+    @StateObject private var model = TLUnityModel()
+    @AppStorage("husk.tl.unity.showLog") private var showLogSetting = false
+    @AppStorage(TranslationLayer.devInfoKey) private var devInfo = false
+    @State private var stats = "starting"
+    private var showLog: Bool { get { showLogSetting && devInfo } nonmutating set { showLogSetting = newValue } }
+
+    private var dataDir: String {
+        TranslationLayer.root.appendingPathComponent(app.id, isDirectory: true)
+            .appendingPathComponent("cocos-data", isDirectory: true).path
+    }
+
+    /// Another game is already loaded in this session, and an engine cannot be loaded twice.
+    private var blockedBy: String? {
+        guard let loaded = husk_native_loaded_apk().map({ String(cString: $0) }), loaded != app.apks.first else { return nil }
+        return (loaded as NSString).lastPathComponent
+    }
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            VStack(spacing: 0) {
+                bar
+                if let other = blockedBy {
+                    VStack(spacing: 8) {
+                        Text("Another game is already loaded")
+                            .font(.system(size: 16, weight: .semibold)).foregroundStyle(.white)
+                        Text("\(other) was started in this session, and a game cannot be unloaded once it has started. Close Husk completely and open it again to run \(app.label).")
+                            .font(.system(size: 13)).foregroundStyle(.white.opacity(0.7))
+                            .multilineTextAlignment(.center).frame(maxWidth: 460)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if let apk = app.apks.first {
+                    HStack(spacing: 0) {
+                        TLUnityScreen(apk: apk, dataDir: dataDir, engine: .cocos, onStats: { stats = $0 })
+                            .background(Color.black)
+                        if showLog { logPanel.frame(width: 320) }
+                    }
+                    .ignoresSafeArea(.container, edges: [.horizontal, .bottom])
+                }
+            }
+        }
+        .statusBarHidden(true)
+        .persistentSystemOverlays(.hidden)
+        // Swipes near the edges are the game's.
+        .defersSystemGestures(on: .all)
+        .onAppear { HuskOrientation.set(.landscape); model.start() }
+        .onDisappear { model.stop(); HuskOrientation.set(HuskOrientation.standard) }
+    }
+
+    private var bar: some View {
+        HStack(spacing: 12) {
+            Button { dismiss() } label: {
+                Label("Close", systemImage: "xmark").font(.system(size: 13, weight: .semibold))
+            }
+            .tint(.white)
+            Circle().fill(model.statusColor).frame(width: 7, height: 7)
+            Text(model.state == Int32(HUSK_UNITY_RUNNING) ? app.label : model.statusText)
+                .font(.system(size: 12, weight: .medium)).foregroundStyle(.white.opacity(0.85)).lineLimit(1)
+            Spacer()
+            if model.state == Int32(HUSK_UNITY_RUNNING) {
+                Text(stats).font(.technical(11)).foregroundStyle(.white.opacity(0.7)).lineLimit(1)
+            }
+            if devInfo {
+                Button { withAnimation(.snappy(duration: 0.25)) { showLog.toggle() } } label: {
+                    Text(showLog ? "Hide log" : "Log").font(.system(size: 12, weight: .semibold))
+                }
+                .tint(.white)
+            }
+        }
+        .padding(.horizontal, 14)
+        .frame(height: 30)
+        .background(Color(white: 0.08))
+    }
+
+    private var logPanel: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("ATTEMPT LOG").font(.technical(10, weight: .bold)).foregroundStyle(Theme.textDim)
+                Spacer()
+                Button { UIPasteboard.general.string = model.logText } label: {
+                    Label("Copy", systemImage: "doc.on.doc").font(.system(size: 11))
+                }
+            }
+            .padding(.horizontal, 10).padding(.vertical, 6)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    Text(model.logText.isEmpty ? "Starting…" : model.logText)
+                        .font(.technical(10))
+                        .foregroundStyle(Theme.text)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(8)
+                        .textSelection(.enabled)
+                        .id("bottom")
+                }
+                .onChange(of: model.logText) { _ in proxy.scrollTo("bottom", anchor: .bottom) }
+            }
+        }
+        .background(Theme.bg)
     }
 }

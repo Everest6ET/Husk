@@ -52,16 +52,28 @@ struct TLReport: Decodable {
 }
 
 extension TLReport {
-    /// Unity (IL2CPP) games run through the native runtime, which handles what the scan flags per library
+    /// The engine the native runtime drives this app with, if it can: Unity (IL2CPP) games and cocos2d-x games.
+    var nativeEngine: TLNativeEngine? {
+        guard ok, !abis.isEmpty, abis.contains("arm64-v8a") else { return nil }
+        if engine?.hasPrefix("Unity") == true { return .unity }
+        if engine == "Cocos" { return .cocos }
+        return nil
+    }
+
+    /// Games from those engines run through the native runtime, which handles what the scan flags per library
     /// (raw system calls, thread-register use, pages shared between segments). A report made before that
     /// runtime existed still says "needs work", so the app judges by the engine, not by the stored words.
-    var runsOnNativeRuntime: Bool { ok && (engine?.hasPrefix("Unity") ?? false) && !abis.isEmpty && abis.contains("arm64-v8a") }
+    var runsOnNativeRuntime: Bool { nativeEngine != nil }
+
+    /// "Unity" or "Cocos2d-x", for words on screen.
+    var nativeEngineName: String { nativeEngine == .cocos ? "Cocos2d-x" : "Unity" }
 
     var displaySummary: String {
         guard runsOnNativeRuntime else { return summary }
         let flagged = libraries.filter { $0.abi == "arm64-v8a" && $0.status != "ok" }.count
         let total = libraries.filter { $0.abi == "arm64-v8a" }.count
-        var text = "A Unity game. It runs through Husk's native runtime, which loads its \(total) arm64 libraries itself."
+        var text = "A \(nativeEngineName) game. It runs through Husk's native runtime, which loads its \(total) arm64 libraries itself."
+        if nativeEngine == .cocos { text += " It is a landscape game: Husk turns the screen for it." }
         if flagged > 0 {
             text += " \(flagged) of them use tricks the older loader could not handle; the native runtime handles those too, "
                   + "except for optional anti-tamper code, which it leaves out."
@@ -327,13 +339,13 @@ struct TranslationLayerSettings: View {
                 Text("Experimental")
             } footer: {
                 if !devInfo {
-                    Text("Runs some Android apps, such as Unity games, straight on your iPhone without starting "
+                    Text("Runs some Android apps, such as Unity and cocos2d-x games, straight on your iPhone without starting "
                        + "Android. Experimental, and it needs JIT turned on.")
                 } else {
                 Text("Runs an app's own code directly, against a rewrite of Android's "
                    + "framework, instead of booting a whole Android system -- the "
                    + "approach of Android Translation Layer on Linux, rebuilt for iOS. "
-                   + "It can run Unity games (experimental) and reports what other apps "
+                   + "It can run Unity and cocos2d-x games (experimental) and reports what other apps "
                    + "would need, and checks this iPhone for what the design depends on. "
                    + "Android itself is unaffected either way.")
                 }
@@ -434,8 +446,8 @@ struct TranslationLayerSettings: View {
             DetailRow(label: "App reports", value: "working", mono: false)
             DetailRow(label: "Device checks", value: "working", mono: false)
             DetailRow(label: "Library loader", value: "working", mono: false)
-            DetailRow(label: "Android runtime", value: "Unity games", mono: false)
-            DetailRow(label: "Opening apps", value: "Unity games (experimental)", mono: false)
+            DetailRow(label: "Android runtime", value: "Unity, cocos2d-x games", mono: false)
+            DetailRow(label: "Opening apps", value: "Unity, cocos2d-x games (experimental)", mono: false)
         } header: {
             Text("Where it stands")
         } footer: {
@@ -451,7 +463,7 @@ struct TLVerdict {
 
     init(_ report: TLReport?) {
         if report?.runsOnNativeRuntime == true {
-            title = "Unity: native runtime"; tint = Theme.good
+            title = "\(report!.nativeEngineName): native runtime"; tint = Theme.good
             return
         }
         switch report?.verdict {
@@ -625,7 +637,7 @@ struct TLAppReportView: View {
             }
             Button("Cancel", role: .cancel) { }
         }
-        // A Unity game is swiped, and a sheet takes a swipe down for itself: it goes full screen.
+        // A native-runtime game is swiped, and a sheet takes a swipe down for itself: it goes full screen.
         .sheet(isPresented: Binding(get: { showAttempt && app.report?.runsOnNativeRuntime != true },
                                     set: { showAttempt = $0 })) {
             TLAttemptView(app: app)
@@ -819,13 +831,15 @@ final class TLAttemptRunner: ObservableObject {
     }
 }
 
-/// Unity games run through the native runtime (src/translation-layer-next); everything else through the
-/// older prototype loader.
+/// Unity and cocos2d-x games run through the native runtime (src/translation-layer-next); everything else through
+/// the older prototype loader.
 struct TLAttemptView: View {
     let app: TLApp
 
     var body: some View {
-        if app.report?.runsOnNativeRuntime == true {
+        if app.report?.nativeEngine == .cocos {
+            TLCocosAttemptView(app: app)
+        } else if app.report?.runsOnNativeRuntime == true {
             TLUnityAttemptView(app: app)
         } else {
             TLClassicAttemptView(app: app)

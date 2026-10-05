@@ -26,6 +26,23 @@ enum { HUSK_UNITY_IDLE = 0, HUSK_UNITY_STARTING = 1, HUSK_UNITY_RUNNING = 2, HUS
 bool husk_unity_launch(const char *apk, const char *data_dir, void *metal_layer, int width, int height,
                        const char *angle_dylib, const char *ca_bundle);
 
+/* The same for a cocos2d-x game (Geometry Dash): a landscape surface, with sound. Status, touch and pause go through the calls below. */
+bool husk_cocos_launch(const char *apk, const char *data_dir, void *metal_layer, int width, int height,
+                       const char *angle_dylib, const char *ca_bundle);
+
+/* Soft keyboard for a cocos2d-x game. The handler is told (on the game's GL thread) 0 = toggle, 1 = show, 2 = hide. */
+void husk_cocos_set_keyboard_handler(void (*handler)(int action));
+void husk_cocos_insert_text(const char *utf8);
+void husk_cocos_delete_backward(void);
+void husk_cocos_key_down(int keycode);
+void husk_cocos_request_text(void (*cb)(const char *utf8));    /* what the game's text field holds now; cb runs on the GL thread */
+
+/* A link the game wants opened (terms of use, social buttons). The handler runs on the game's GL thread. */
+void husk_cocos_set_open_url_handler(void (*handler)(const char *url));
+
+/* The APK of the game started this session, or NULL. An engine cannot be loaded twice, nor two games at once. */
+const char *husk_native_loaded_apk(void);
+
 int  husk_unity_state(void);
 unsigned long husk_unity_frames(void);
 typedef struct husk_unity_perf { double fps, mean_ms, max_ms; } husk_unity_perf;

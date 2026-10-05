@@ -234,6 +234,14 @@ static int b_fputs(const char *str, void *f)
     TL_ERRNO_BEGIN(); int r = fputs(str, s); TL_ERRNO_END(); return r;
 }
 static int b_puts(const char *str) { console_write(stdout, str, strlen(str)); console_write(stdout, "\n", 1); return 1; }
+static size_t b_wcsftime(wchar_t *buf, size_t n, const wchar_t *fmt, const struct tm *tm) { return wcsftime(buf, n, fmt, tm); }
+static int b_putc(int c, void *f) { return b_fputc(c, f); }
+static int b_getc(void *f) { TL_ERRNO_BEGIN(); int r = fgetc(map_stream(f)); TL_ERRNO_END(); return r; }
+static int b_ungetc(int c, void *f) { return ungetc(c, map_stream(f)); }
+static wint_t b_getwc(void *f) { return fgetwc(map_stream(f)); }
+static wint_t b_putwc(wchar_t c, void *f) { return fputwc(c, map_stream(f)); }
+static wint_t b_ungetwc(wint_t c, void *f) { return ungetwc(c, map_stream(f)); }
+static int b_vsprintf(char *s, const char *fmt, tl_va_list *ap) { return tl_format(s, (size_t)0x7fffffff, fmt, ap); }
 static int b_feof(void *f) { return feof(map_stream(f)); }
 static int b_ferror(void *f) { return ferror(map_stream(f)); }
 static void b_clearerr(void *f) { clearerr(map_stream(f)); }
@@ -449,6 +457,10 @@ static char *b_basename(const char *path)
     return buf;
 }
 
+static void b_sincos(double x, double *s, double *c) { *s = sin(x); *c = cos(x); }
+static int b___isnanf(float x) { return isnan(x); }
+/* bionic's FP_* are 0 nan, 1 infinite, 2 zero, 3 subnormal, 4 normal */
+static int b___fpclassifyd(double x) { switch (fpclassify(x)) { case FP_NAN: return 0; case FP_INFINITE: return 1; case FP_ZERO: return 2; case FP_SUBNORMAL: return 3; default: return 4; } }
 static void b_sincosf(float x, float *s, float *c) { *s = sinf(x); *c = cosf(x); }
 
 static const char *b_strerror(int e) { return strerror(tl_errno_from_guest(e)); }
@@ -515,6 +527,8 @@ const tl_bionic_entry tl_tab_str[] = {
     TL_DIRECT(isalnum), TL_DIRECT(isalpha), TL_DIRECT(islower), TL_DIRECT(isupper), TL_DIRECT(isxdigit),
     TL_DIRECT(tolower), TL_DIRECT(toupper), TL_DIRECT(isdigit_l), TL_DIRECT(islower_l), TL_DIRECT(isupper_l),
     TL_DIRECT(isxdigit_l), TL_DIRECT(tolower_l), TL_DIRECT(toupper_l),
+    TL_DIRECT(isspace), TL_DIRECT(isprint), TL_DIRECT(isgraph), TL_DIRECT(iscntrl), TL_DIRECT(ispunct), TL_DIRECT(isblank),
+    TL_DIRECT(iswctype), TL_DIRECT(wctype), TL_DIRECT(strncasecmp), TL_DIRECT(strtok), TL_DIRECT(atof),
     TL_DIRECT(iswalpha), TL_DIRECT(iswblank), TL_DIRECT(iswcntrl), TL_DIRECT(iswdigit), TL_DIRECT(iswlower),
     TL_DIRECT(iswprint), TL_DIRECT(iswpunct), TL_DIRECT(iswspace), TL_DIRECT(iswupper), TL_DIRECT(iswxdigit),
     TL_DIRECT(iswalpha_l), TL_DIRECT(iswblank_l), TL_DIRECT(iswcntrl_l), TL_DIRECT(iswdigit_l), TL_DIRECT(iswlower_l),
@@ -547,7 +561,9 @@ const tl_bionic_entry tl_tab_str[] = {
     TL_DIRECT(fmod), TL_DIRECT(fmodf), TL_DIRECT(hypot), TL_DIRECT(ldexp), TL_DIRECT(ldexpf), TL_DIRECT(log), TL_DIRECT(log10),
     TL_DIRECT(log10f), TL_DIRECT(log2), TL_DIRECT(log2f), TL_DIRECT(logb), TL_DIRECT(logf), TL_DIRECT(modf), TL_DIRECT(modff),
     TL_DIRECT(pow), TL_DIRECT(powf), TL_DIRECT(scalbn), TL_DIRECT(sin), TL_DIRECT(sinf), TL_DIRECT(sqrtf), TL_DIRECT(tan),
-    TL_DIRECT(tanf), TL_WRAP("sincosf", b_sincosf),
+    TL_DIRECT(tanf), TL_WRAP("sincosf", b_sincosf), TL_WRAP("sincos", b_sincos),
+    TL_DIRECT(sqrt), TL_DIRECT(fmin), TL_DIRECT(fmax), TL_DIRECT(frexp), TL_DIRECT(asinh), TL_DIRECT(tanh),
+    TL_WRAP("__isnanf", b___isnanf), TL_WRAP("__fpclassifyd", b___fpclassifyd),
     /* locale.h */
     TL_WRAP("setlocale", b_setlocale), TL_WRAP("newlocale", b_newlocale), TL_DIRECT(freelocale), TL_DIRECT(uselocale),
     TL_DIRECT(localeconv),
@@ -559,6 +575,8 @@ const tl_bionic_entry tl_tab_str[] = {
     TL_WRAP("fopen", b_fopen), TL_WRAP("fdopen", b_fdopen), TL_WRAP("fclose", b_fclose), TL_WRAP("fgets", b_fgets),
     TL_WRAP("fread", b_fread), TL_WRAP("fwrite", b_fwrite), TL_WRAP("fseek", b_fseek), TL_WRAP("fseeko", b_fseeko),
     TL_WRAP("ftell", b_ftell), TL_WRAP("ftello", b_ftello), TL_WRAP("fflush", b_fflush), TL_WRAP("fputc", b_fputc),
+    TL_WRAP("putc", b_putc), TL_WRAP("getc", b_getc), TL_WRAP("ungetc", b_ungetc), TL_WRAP("getwc", b_getwc),
+    TL_WRAP("putwc", b_putwc), TL_WRAP("ungetwc", b_ungetwc), TL_WRAP("vsprintf", b_vsprintf), TL_WRAP("wcsftime", b_wcsftime),
     TL_WRAP("fputs", b_fputs), TL_WRAP("puts", b_puts), TL_WRAP("feof", b_feof), TL_WRAP("ferror", b_ferror),
     TL_WRAP("clearerr", b_clearerr), TL_WRAP("fileno", b_fileno), TL_WRAP("setbuf", b_setbuf), TL_WRAP("setvbuf", b_setvbuf),
     TL_WRAP("remove", b_remove), TL_WRAP("rename", b_rename),

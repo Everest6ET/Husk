@@ -37,7 +37,8 @@ targets:
       # not into the QEMU library -- see docs/04-translation-layer.md.
       - path: ../translation-layer
       # The native runtime: a real linker for Android's libraries, a bionic shim, JNI with a
-      # Java world written in C, and the Unity driver. Runs Unity games such as Subway Surfers.
+      # Java world written in C, and the Unity and cocos2d-x drivers. Runs Unity games such as Subway Surfers
+      # and cocos2d-x games such as Geometry Dash.
       - path: ../translation-layer-next
         excludes:
           - "husk-tl-unity-app.h"
@@ -70,10 +71,17 @@ targets:
         LIBRARY_SEARCH_PATHS:
           - "$(inherited)"
           - "$(SRCROOT)/../../build/ios-arm64/lib"
-        # zlib, for the translation layer's APK reader. Part of the iOS SDK.
+        # zlib, for the translation layer's APK reader. Part of the iOS SDK. AudioToolbox is the sound a
+        # cocos2d-x game's mixer plays through; CoreText and CoreGraphics draw its text labels.
         OTHER_LDFLAGS:
           - "$(inherited)"
           - "-lz"
+          - "-framework"
+          - "AudioToolbox"
+          - "-framework"
+          - "CoreText"
+          - "-framework"
+          - "CoreGraphics"
     dependencies:
       # Built by scripts/build_ios.sh. Embedded and signed into the bundle.
       - framework: ../../build/ios-arm64/lib/libqemu-aarch64-softmmu.dylib

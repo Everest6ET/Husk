@@ -125,6 +125,7 @@ typedef struct tl_nwindow { atomic_int refs; int width, height, format; void *la
 static tl_nwindow g_window = { 1, 1080, 2400, 1, NULL };
 
 void tl_nwindow_configure(int w, int h, void *layer) { g_window.width = w; g_window.height = h; g_window.layer = layer; }
+void *tl_nwindow_get(void) { atomic_fetch_add(&g_window.refs, 1); return &g_window; }
 void *tl_nwindow_native(void *window) { return window ? ((tl_nwindow *)window)->layer : NULL; }
 int tl_nwindow_width(void *window) { return window ? ((tl_nwindow *)window)->width : 0; }
 int tl_nwindow_height(void *window) { return window ? ((tl_nwindow *)window)->height : 0; }
