@@ -26,6 +26,8 @@ extern "C" {
  * holds both, as on the phone). With `frame_dir` set the guest's window is off-screen and every
  * `frame_every`th presented frame is written there as a BMP.
  */
+/* Describe the driver as OpenGL ES 3.1 and write the game's "#version 310 es" shaders down to 300 es (see husk-tl-egl-es31.inc) */
+void tl_egl_es31_shim(bool on);
 bool tl_egl_init(const char *egl_path, const char *gles_path, const char *frame_dir, int frame_every);
 
 /* The address of a GLES/EGL function by name, adapters first, or NULL. */

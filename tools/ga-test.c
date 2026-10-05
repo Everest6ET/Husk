@@ -142,6 +142,15 @@ static void assert_probe(uint64_t *r)
     tl_log_line("ASSERTION FAILED: %.1500s", msg && (uintptr_t)msg > 0x100000 ? msg : "(no message)");
 }
 
+/* Bedrock's soft assertion (message, expression, line, file, function): logged and carried on from, so a probe shows which ones the game hits.
+ * 0x150df538 is its entry in libminecraftpe 1.26.60.29. */
+static void soft_assert_probe(uint64_t *r)
+{
+    static int n;
+    if (n++ > 60) return;
+    tl_log_line("SOFT ASSERT: %.120s | %.100s | line %d | %.90s | %.90s", (const char *)r[0], (const char *)r[1], (int)r[2], (const char *)r[3], (const char *)r[4]);
+}
+
 /* RenderDragon's bgfx callback: fatal(code in x1, message in x2) */
 static void fatal_probe(uint64_t *r)
 {
@@ -191,6 +200,92 @@ static void *sampler(void *arg)
             }
             thread_resume(th[i]);
         }
+    }
+    return NULL;
+}
+
+
+struct bias_q { const char *name; uintptr_t bias; };
+static int bias_cb(uintptr_t bias, const char *name, const void *ph, unsigned n, void *u)
+{ (void)ph; (void)n; struct bias_q *q = u; if (!strcmp(name, q->name)) { q->bias = bias; return 1; } return 0; }
+static uintptr_t lib_bias(const char *name) { struct bias_q q = { name, 0 }; tl_ld_iterate(bias_cb, &q); return q.bias; }
+
+/* TL_PROF=<thread-name-part>[:delay[:seconds]]: samples that thread every 2 ms and prints which call sites its stacks pass through most,
+ * and the commonest whole stacks (guest return addresses, as library+offset). For finding what a busy-looking thread is doing. */
+typedef struct { char key[1200]; int n; } prof_chain;
+static void *profiler(void *arg)
+{
+    char spec[200]; snprintf(spec, sizeof(spec), "%s", (const char *)arg);
+    int delay = 15, secs = 6;
+    char *c1 = strchr(spec, ':');
+    if (c1) { *c1++ = 0; delay = atoi(c1); char *c2 = strchr(c1, ':'); if (c2) secs = atoi(c2 + 1); }
+    sleep((unsigned)delay);
+    static prof_chain chains[4000]; int nch = 0;
+    static struct { uintptr_t addr; int n; } sites[8000]; int ns = 0;
+    int total = 0;
+    struct timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0);
+    for (;;) {
+        struct timespec t1; clock_gettime(CLOCK_MONOTONIC, &t1);
+        if ((t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000 >= secs * 1000) break;
+        usleep(1000);
+        thread_act_array_t th; mach_msg_type_number_t n;
+        if (task_threads(mach_task_self(), &th, &n) != KERN_SUCCESS) continue;
+        for (mach_msg_type_number_t i = 0; i < n; i++) {
+            pthread_t pt = pthread_from_mach_thread_np(th[i]);
+            char name[40] = "";
+            if (pt) pthread_getname_np(pt, name, sizeof(name));
+            if (th[i] == mach_thread_self() || !strstr(name, spec)) continue;
+            arm_thread_state64_t st; mach_msg_type_number_t cnt = ARM_THREAD_STATE64_COUNT;
+            thread_suspend(th[i]);
+            if (thread_get_state(th[i], ARM_THREAD_STATE64, (thread_state_t)&st, &cnt) == KERN_SUCCESS) {
+                uintptr_t addrs[40]; int na = 0;
+                addrs[na++] = arm_thread_state64_get_pc(st);
+                addrs[na++] = arm_thread_state64_get_lr(st);
+                uintptr_t fp = arm_thread_state64_get_fp(st);
+                for (int d = 0; d < 36 && fp && (fp & 7) == 0; d++) {
+                    uint64_t fr[2];
+                    if (!safe_read(fp, fr, sizeof(fr))) break;
+                    addrs[na++] = fr[1]; fp = fr[0];
+                }
+                char key[1200]; size_t k = 0; key[0] = 0;
+                k += (size_t)snprintf(key, sizeof(key), "[%s] ", name);
+                for (int a = 0; a < na; a++) {
+                    const char *l = NULL; const void *sb = NULL;
+                    const char *sy = tl_ld_symbol_at((void *)addrs[a], &l, &sb);
+                    (void)sy;
+                    if (!l) continue;
+                    uintptr_t base = (uintptr_t)lib_bias(l);
+                    if (k < sizeof(key) - 40) k += (size_t)snprintf(key + k, sizeof(key) - k, "%s+%lx ", l, (unsigned long)(addrs[a] - base));
+                    int f = -1;
+                    for (int q = 0; q < ns; q++) if (sites[q].addr == addrs[a]) { f = q; break; }
+                    if (f < 0 && ns < 8000) { sites[ns].addr = addrs[a]; sites[ns].n = 0; f = ns++; }
+                    if (f >= 0) sites[f].n++;
+                }
+                int f = -1;
+                for (int q = 0; q < nch; q++) if (!strcmp(chains[q].key, key)) { f = q; break; }
+                if (f < 0 && nch < 4000) { snprintf(chains[nch].key, sizeof(chains[nch].key), "%s", key); chains[nch].n = 0; f = nch++; }
+                if (f >= 0) chains[f].n++;
+                total++;
+            }
+            thread_resume(th[i]);
+        }
+    }
+    fprintf(stderr, "---- profile of '%s': %d samples, %d call sites, %d distinct stacks ----\n", spec, total, ns, nch);
+    for (int r = 0; r < 40; r++) {
+        int best = -1;
+        for (int q = 0; q < ns; q++) if (sites[q].n > 0 && (best < 0 || sites[q].n > sites[best].n)) best = q;
+        if (best < 0) break;
+        const char *l = NULL; const void *sb = NULL; const char *sy = tl_ld_symbol_at((void *)sites[best].addr, &l, &sb);
+        (void)sy;
+        fprintf(stderr, "  %5d  %s+%#lx\n", sites[best].n, l ? l : "?", l ? (unsigned long)(sites[best].addr - (uintptr_t)lib_bias(l)) : 0ul);
+        sites[best].n = -sites[best].n;
+    }
+    for (int r = 0; r < 8; r++) {
+        int best = -1;
+        for (int q = 0; q < nch; q++) if (chains[q].n > 0 && (best < 0 || chains[q].n > chains[best].n)) best = q;
+        if (best < 0) break;
+        fprintf(stderr, "  stack x%d: %s\n", chains[best].n, chains[best].key);
+        chains[best].n = -chains[best].n;
     }
     return NULL;
 }
@@ -272,8 +367,13 @@ int main(int argc, char **argv)
         tl_lib *L = tl_ld_find_lib("libminecraftpe.so");
         if (L && !tl_ld_probe(L, strtoull(getenv("TL_MC_ASSERT_PROBE"), NULL, 16), assert_probe)) fprintf(stderr, "probe failed\n");
     }
+    if (getenv("TL_MC_SOFT_ASSERT")) {
+        tl_lib *L = tl_ld_find_lib("libminecraftpe.so");
+        if (L && !tl_ld_probe(L, 0x150df538, soft_assert_probe)) fprintf(stderr, "soft assert probe failed\n");
+    }
     if (!tl_ga_run()) { fprintf(stderr, "minecraft: run failed\n"); return 1; }
     if (getenv("TL_CTL")) { static pthread_t ct; pthread_create(&ct, NULL, control_thread, getenv("TL_CTL")); }
+    if (getenv("TL_PROF")) { pthread_t st; pthread_create(&st, NULL, profiler, getenv("TL_PROF")); }
     if (getenv("TL_SAMPLE")) { pthread_t st; pthread_create(&st, NULL, sampler, (void *)(intptr_t)atoi(getenv("TL_SAMPLE"))); }
     int secs = argc > 2 ? atoi(argv[2]) : 5;
     for (int i = 0; i < secs; i++) sleep(1);

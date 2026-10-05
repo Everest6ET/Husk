@@ -222,7 +222,49 @@ static void Arrays_copyOf(tl_jcall *c)
     c->ret = vl(r);
 }
 
+
+/* ------------------------------------------------------------------ java.util.UUID */
+
+typedef struct { uint64_t msb, lsb; } uuid_state;
+static jobj *uuid_new(uint64_t msb, uint64_t lsb)
+{
+    jobj *o = tl_jni_new_object(tl_jni_class("java/util/UUID"));
+    uuid_state *u = calloc(1, sizeof(*u)); u->msb = msb; u->lsb = lsb; o->native = u;
+    return o;
+}
+static uuid_state *uuid_of(jobj *o) { if (!o->native) o->native = calloc(1, sizeof(uuid_state)); return o->native; }
+static void UUID_randomUUID(tl_jcall *c)
+{
+    uint64_t r[2]; arc4random_buf(r, sizeof(r));
+    r[0] = (r[0] & ~0xF000ull) | 0x4000ull;                      /* version 4 */
+    r[1] = (r[1] & 0x3FFFFFFFFFFFFFFFull) | 0x8000000000000000ull; /* IETF variant */
+    c->ret = vl(uuid_new(r[0], r[1]));
+}
+static void UUID_init(tl_jcall *c) { uuid_state *u = uuid_of(c->self); u->msb = (uint64_t)c->args[0].j; u->lsb = (uint64_t)c->args[1].j; }
+static void UUID_toString(tl_jcall *c)
+{
+    uuid_state *u = uuid_of(c->self); char b[40];
+    snprintf(b, sizeof(b), "%08x-%04x-%04x-%04x-%012llx", (unsigned)(u->msb >> 32), (unsigned)((u->msb >> 16) & 0xFFFF), (unsigned)(u->msb & 0xFFFF),
+             (unsigned)(u->lsb >> 48), (unsigned long long)(u->lsb & 0xFFFFFFFFFFFFull));
+    c->ret = vl(STR(b));
+}
+static void UUID_fromString(tl_jcall *c)
+{
+    const char *s = S(c->args[0].l); uint64_t v[2] = { 0, 0 }; int digits = 0;
+    for (; *s; s++) {
+        if (*s == '-') continue;
+        int d = *s >= '0' && *s <= '9' ? *s - '0' : *s >= 'a' && *s <= 'f' ? *s - 'a' + 10 : *s >= 'A' && *s <= 'F' ? *s - 'A' + 10 : -1;
+        if (d < 0 || digits >= 32) { tl_jni_throw("java/lang/IllegalArgumentException", "Invalid UUID"); c->ret = vl(NULL); return; }
+        v[digits / 16] = (v[digits / 16] << 4) | (uint64_t)d; digits++;
+    }
+    if (digits != 32) { tl_jni_throw("java/lang/IllegalArgumentException", "Invalid UUID"); c->ret = vl(NULL); return; }
+    c->ret = vl(uuid_new(v[0], v[1]));
+}
+static void UUID_msb(tl_jcall *c) { c->ret.j = (int64_t)uuid_of(c->self)->msb; }
+static void UUID_lsb(tl_jcall *c) { c->ret.j = (int64_t)uuid_of(c->self)->lsb; }
+
 static const struct { const char *name, *super; } k_classes[] = {
+    { "java/util/UUID", "java/lang/Object" },
     { "java/util/Arrays", "java/lang/Object" }, { "java/lang/ArrayIndexOutOfBoundsException", "java/lang/RuntimeException" },
     { "android/util/Base64", "java/lang/Object" }, { "java/security/KeyFactory", "java/lang/Object" },
     { "java/security/spec/KeySpec", "java/lang/Object" }, { "java/security/spec/X509EncodedKeySpec", "java/security/spec/KeySpec" },
@@ -234,6 +276,9 @@ static const struct { const char *name, *super; } k_classes[] = {
 static const tl_jhle k_hle[] = {
     M_("java/util/Arrays", "copyOfRange", "([BII)[B", Arrays_copyOfRange), M_("java/util/Arrays", "copyOfRange", "([III)[I", Arrays_copyOfRange),
     M_("java/util/Arrays", "copyOf", "([BI)[B", Arrays_copyOf), M_("java/util/Arrays", "copyOf", "([II)[I", Arrays_copyOf),
+    M_("java/util/UUID", "randomUUID", "()Ljava/util/UUID;", UUID_randomUUID), M_("java/util/UUID", "<init>", "(JJ)V", UUID_init),
+    M_("java/util/UUID", "toString", "()Ljava/lang/String;", UUID_toString), M_("java/util/UUID", "fromString", "(Ljava/lang/String;)Ljava/util/UUID;", UUID_fromString),
+    M_("java/util/UUID", "getMostSignificantBits", "()J", UUID_msb), M_("java/util/UUID", "getLeastSignificantBits", "()J", UUID_lsb),
     M_("android/util/Base64", "decode", "(Ljava/lang/String;I)[B", Base64_decodeString),
     M_("android/util/Base64", "decode", "([BI)[B", Base64_decodeBytes),
     M_("android/util/Base64", "encodeToString", "([BI)Ljava/lang/String;", Base64_encodeToString),

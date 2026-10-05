@@ -61,6 +61,7 @@ bool tl_ga_start(const tl_ga_config *cfg)
     int n = tl_dexidx_open(cfg->apk_path);
     tl_log_line("minecraft: %d classes in the APK's DEX", n);
     if (!tl_ld_add_apk(cfg->apk_path)) return false;
+    tl_egl_es31_shim(true);
     if (cfg->angle_egl && !tl_egl_init(cfg->angle_egl, cfg->angle_gles, cfg->frame_dir, cfg->frame_every)) return false;
     tl_jni_init();
     tl_hle_configure(cfg->package_name, cfg->apk_path, cfg->data_dir, cfg->width, cfg->height);

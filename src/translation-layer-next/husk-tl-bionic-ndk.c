@@ -166,6 +166,26 @@ static void *b_AAssetManager_open(void *mgr, const char *name, int mode)
     (void)mgr; (void)mode;
     char path[1024];
     snprintf(path, sizeof(path), "assets/%s", name);
+    static int trace = -1;
+    if (trace < 0) trace = getenv("TL_FILE_TRACE") != NULL;
+    if (trace) tl_log_line("assets: open %s", name);
+    /* TL_ASSET_DIR: a file of that name under this directory stands in for the one in the APK (to change a game's config while debugging) */
+    if (getenv("TL_ASSET_DIR")) {
+        char alt[1100];
+        snprintf(alt, sizeof(alt), "%s/%s", getenv("TL_ASSET_DIR"), name);
+        FILE *fp = fopen(alt, "rb");
+        if (fp) {
+            fseek(fp, 0, SEEK_END); long n = ftell(fp); fseek(fp, 0, SEEK_SET);
+            uint8_t *buf = malloc((size_t)n + 1);
+            if (buf && fread(buf, 1, (size_t)n, fp) == (size_t)n) {
+                fclose(fp);
+                tl_asset *a = calloc(1, sizeof(*a));
+                a->data = buf; a->len = (size_t)n; a->owned = buf;
+                return a;
+            }
+            free(buf); fclose(fp);
+        }
+    }
     for (int i = 0;; i++) {
         const tl_zip *z = tl_ld_apk_at(i);
         if (!z) break;
@@ -192,6 +212,7 @@ typedef struct { char **names; size_t n, pos; } tl_assetdir;
 static void *b_AAssetManager_openDir(void *mgr, const char *dir)
 {
     (void)mgr;
+    if (getenv("TL_FILE_TRACE")) tl_log_line("assets: openDir %s", dir);
     char prefix[1024];
     size_t pl = (size_t)snprintf(prefix, sizeof(prefix), "assets/%s%s", dir, dir[0] && dir[strlen(dir) - 1] != '/' ? "/" : "");
     tl_assetdir *d = calloc(1, sizeof(*d));

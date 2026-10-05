@@ -232,10 +232,25 @@ static void save_frame(EGLDisplay d, EGLSurface s, unsigned long n)
     free(rgba);
 }
 
+#define GLT_RING 256
+static atomic_ulong g_glt_n, g_glt_draws, g_glt_uploads;
+void tl_egl_gl_histogram(char *out, size_t cap);
+void tl_egl_recent_calls(char *out, size_t n, int count);
 static EGLBoolean w_eglSwapBuffers(EGLDisplay d, EGLSurface s)
 {
     unsigned long n = atomic_fetch_add(&E.presented, 1) + 1;
-    if (n <= 3 || n % 600 == 0) tl_log_line("egl: swap #%lu", n);
+    if (n <= 3 || n % 600 == 0) {
+        if (getenv("TL_GL_TRACE")) tl_log_line("egl: swap #%lu (%lu GL calls, %lu draws, %lu uploads so far)", n, (unsigned long)atomic_load(&g_glt_n), (unsigned long)atomic_load(&g_glt_draws), (unsigned long)atomic_load(&g_glt_uploads));
+        else tl_log_line("egl: swap #%lu", n);
+    }
+    if ((n == 300 || n == 3000) && getenv("TL_GL_TRACE")) {
+        static char gl[GLT_RING * 40];
+        tl_egl_recent_calls(gl, sizeof(gl), GLT_RING);
+        fprintf(stderr, "egl: the calls before swap #%lu: %s\n", n, gl);
+        static char hist[1024 * 48];
+        tl_egl_gl_histogram(hist, sizeof(hist));
+        fprintf(stderr, "egl: calls so far, by function: %s\n", hist);
+    }
     if (E.frame_dir[0] && (n % (unsigned long)E.frame_every == 0 || n <= 3)) save_frame(d, s, n);
     return E.frame_dir[0] ? EGL_TRUE : a_eglSwapBuffers(d, s);
 }
@@ -300,11 +315,19 @@ static bool ext_hidden(const char *name, size_t n)
     return false;
 }
 
+#include "husk-tl-egl-es31.inc"
+
 static const unsigned char *(*r_glGetString)(unsigned);
 static const unsigned char *w_glGetString(unsigned name)
 {
     if (!r_glGetString && a_eglGetProcAddress) r_glGetString = a_eglGetProcAddress("glGetString");
     const unsigned char *s = r_glGetString ? r_glGetString(name) : NULL;
+    if (g_es31_shim && s && (name == 0x1F02 || name == 0x8B8C)) s = (const unsigned char *)es31_fix((const char *)s, name == 0x8B8C);
+    if (s && (name == 0x1F02 || name == 0x8B8C || name == 0x1F01 || name == 0x1F00)) {
+        static atomic_int said[4];
+        int k = name == 0x1F02 ? 0 : name == 0x8B8C ? 1 : name == 0x1F01 ? 2 : 3;
+        if (!atomic_exchange(&said[k], 1)) tl_log_line("gl: %s = %.200s", k == 0 ? "GL_VERSION" : k == 1 ? "GL_SHADING_LANGUAGE_VERSION" : k == 2 ? "GL_RENDERER" : "GL_VENDOR", (const char *)s);
+    }
     if (name != 0x1F03 /* GL_EXTENSIONS */ || !s) return s;
     static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
     static const unsigned char *source; static char *filtered;
@@ -335,11 +358,42 @@ static const unsigned char *w_glGetStringi(unsigned name, unsigned index)
     return s;
 }
 
+/* A shader that does not compile is the commonest reason an engine draws nothing and says nothing: say why, for the first few. */
+static void (*r_glCompileShader)(unsigned);
+static void w_glCompileShader(unsigned sh)
+{
+    static void (*getiv)(unsigned, unsigned, int *), (*getlog)(unsigned, int, int *, char *), (*getsrc)(unsigned, int, int *, char *);
+    static atomic_int reported;
+    r_glCompileShader(sh);
+    if (!getiv && a_eglGetProcAddress) { getiv = a_eglGetProcAddress("glGetShaderiv"); getlog = a_eglGetProcAddress("glGetShaderInfoLog"); getsrc = a_eglGetProcAddress("glGetShaderSource"); }
+    if (!getiv || !getlog || !getsrc) return;
+    int ok = 1;
+    getiv(sh, 0x8B81 /* GL_COMPILE_STATUS */, &ok);
+    if (ok) return;
+    int n = atomic_fetch_add(&reported, 1);
+    if (n >= 8) return;
+    int len = 0; getiv(sh, 0x8B84 /* GL_INFO_LOG_LENGTH */, &len);
+    char *log = calloc(1, (size_t)len + 2); int got = 0;
+    if (len > 0) getlog(sh, len, &got, log);
+    int slen = 0; getiv(sh, 0x8B88 /* GL_SHADER_SOURCE_LENGTH */, &slen);
+    char *src = calloc(1, (size_t)slen + 2);
+    if (slen > 0) getsrc(sh, slen, &got, src);
+    for (char *q = log; *q; q++) if (*q == '\n') *q = '|';
+    tl_log_line("gl: shader %u failed to compile (%d bytes of source): %.380s", sh, slen, log);
+    const char *dir = getenv("TL_GL_SHADER_DUMP");
+    if (dir) {
+        char path[600]; snprintf(path, sizeof(path), "%s/shader-%d.txt", dir, n);
+        FILE *f = fopen(path, "w");
+        if (f) { fprintf(f, "%s\n---- source ----\n%s\n", log, src); fclose(f); }
+    }
+    free(log); free(src);
+}
+
 #define ADAPT(name) { #name, (void *)w_##name, (void **)&r_##name }
 static const struct { const char *name; void *wrap; void **real; } k_adapt[] = {
     ADAPT(glBlitFramebuffer), ADAPT(glTexSubImage3D), ADAPT(glCompressedTexSubImage3D), ADAPT(glCopyImageSubData),
     ADAPT(glColorMask), ADAPT(glDepthMask), ADAPT(glVertexAttribPointer), ADAPT(glUniformMatrix2fv),
-    ADAPT(glUniformMatrix3fv), ADAPT(glUniformMatrix4fv), ADAPT(glSampleCoverage), ADAPT(glGetString), ADAPT(glGetStringi),
+    ADAPT(glUniformMatrix3fv), ADAPT(glUniformMatrix4fv), ADAPT(glSampleCoverage), ADAPT(glGetString), ADAPT(glGetStringi), ADAPT(glCompileShader), ADAPT(glShaderSource), ADAPT(glAttachShader), ADAPT(glLinkProgram), ADAPT(glGetIntegerv),
 };
 
 static const struct { const char *name; void *fn; } k_egl[] = {
@@ -366,11 +420,29 @@ static const struct { const char *name; void *fn; } k_egl[] = {
  * tail-calls the real function with the registers (and stack) as they were, so any signature works. A crash report
  * can then say which calls came last (tl_egl_recent_calls). The trampolines live in the executable region.
  */
-#define GLT_RING 256
 static const char *volatile g_glt_ring[GLT_RING];
-static atomic_ulong g_glt_n;
 
-void tl_glt_note(const char *name) { g_glt_ring[atomic_fetch_add(&g_glt_n, 1) % GLT_RING] = name; }
+/* how often each GL function was called, keyed by the (unique, interned) name pointer */
+static struct { _Atomic(const char *) name; atomic_ulong n; } g_glt_hist[1024];
+void tl_egl_gl_histogram(char *out, size_t cap)
+{
+    size_t k = 0; out[0] = 0;
+    for (int i = 0; i < 1024 && k + 48 < cap; i++) {
+        const char *nm = atomic_load(&g_glt_hist[i].name);
+        if (nm) k += (size_t)snprintf(out + k, cap - k, "%s=%lu ", nm, (unsigned long)atomic_load(&g_glt_hist[i].n));
+    }
+}
+void tl_glt_note(const char *name)
+{
+    g_glt_ring[atomic_fetch_add(&g_glt_n, 1) % GLT_RING] = name;
+    for (unsigned h = (unsigned)(((uintptr_t)name >> 3) * 2654435761u) % 1024, probe = 0; probe < 1024; probe++, h = (h + 1) % 1024) {
+        const char *cur = atomic_load(&g_glt_hist[h].name);
+        if (!cur) { const char *z = NULL; if (atomic_compare_exchange_strong(&g_glt_hist[h].name, &z, name)) cur = name; else cur = z; }
+        if (cur == name) { atomic_fetch_add(&g_glt_hist[h].n, 1); break; }
+    }
+    if (name[2] == 'D' && !strncmp(name, "glDraw", 6)) atomic_fetch_add(&g_glt_draws, 1);
+    else if (!strncmp(name, "glBufferData", 12) || !strncmp(name, "glTexImage", 10) || !strncmp(name, "glTexSubImage", 13) || !strncmp(name, "glCompressedTex", 15)) atomic_fetch_add(&g_glt_uploads, 1);
+}
 
 void tl_egl_recent_calls(char *out, size_t n, int count)
 {
