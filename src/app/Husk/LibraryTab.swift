@@ -35,13 +35,10 @@ struct LibraryTab: View {
             .navigationDestination(for: AndroidHost.Package.self) { app in
                 AppDetailView(app: app, onOpenGuest: onOpenGuest)
             }
-            .fileImporter(isPresented: $importing, allowedContentTypes: [.item],
-                          allowsMultipleSelection: true) { result in
-                if case .success(let urls) = result, !urls.isEmpty {
-                    HuskLog.log("ui", "importing \(urls.count) file(s): "
-                              + urls.map(\.lastPathComponent).joined(separator: ", "))
-                    host.install(urls)
-                }
+            .huskFilePicker(isPresented: $importing) { urls in
+                HuskLog.log("ui", "importing \(urls.count) file(s): "
+                          + urls.map(\.lastPathComponent).joined(separator: ", "))
+                host.install(urls)
             }
         }
     }

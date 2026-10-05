@@ -52,11 +52,8 @@ struct DirectoryView: View {
             ImportSheet(destination: path) { showImportSheet = false; importing = true }
                 .presentationDetents([.height(320)])
         }
-        .fileImporter(isPresented: $importing, allowedContentTypes: [.item],
-                      allowsMultipleSelection: true) { result in
-            if case .success(let urls) = result, !urls.isEmpty {
-                host.sendFiles(urls, to: path)
-            }
+        .huskFilePicker(isPresented: $importing) { urls in
+            host.sendFiles(urls, to: path)
         }
         .confirmationDialog("Install \(installing?.name ?? "")?",
                             isPresented: Binding(get: { installing != nil },

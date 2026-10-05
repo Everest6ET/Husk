@@ -159,18 +159,31 @@ final class TranslationLayerStore: ObservableObject {
 
     /// Keep a copy of one app -- one APK, or a base APK and its splits,
     /// picked together -- and report on it.
-    func add(_ urls: [URL]) {
+    func add(_ urls: [URL], move: Bool = false) {
         guard !urls.isEmpty, busy == nil else { return }
         busy = urls.count == 1 ? "Adding \(urls[0].lastPathComponent)…"
                                : "Adding \(urls.count) APKs…"
         Task.detached(priority: .userInitiated) {
-            let failure = Self.ingest(urls)
+            let failure = Self.ingest(urls, move: move)
             await MainActor.run {
                 self.busy = nil
                 self.lastError = failure
                 self.reload()
+                if failure == nil, move { self.adoptDroppedAPKs() }      // the next one waiting, if several were put there
             }
         }
+    }
+
+    /// APKs put straight into Husk's folder (Files > On My iPhone > Husk, which the app shares) are taken in as apps, one each, and
+    /// moved rather than copied, so a big one costs no second copy's worth of storage. This is the way in that needs no file picker.
+    func adoptDroppedAPKs() {
+        guard busy == nil, let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
+        let dropped = ((try? FileManager.default.contentsOfDirectory(at: docs, includingPropertiesForKeys: nil,
+                                                                      options: [.skipsHiddenFiles])) ?? [])
+            .filter { $0.pathExtension.lowercased() == "apk" }
+        guard let first = dropped.first else { return }
+        HuskLog.log("tl", "adopting \(dropped.count) APK(s) found in the Husk folder")
+        add([first], move: true)
     }
 
     func remove(_ app: TLApp) {
@@ -222,7 +235,7 @@ final class TranslationLayerStore: ObservableObject {
     }
 
     /// Copy, name, scan. Returns what went wrong, if anything did.
-    nonisolated private static func ingest(_ urls: [URL]) -> String? {
+    nonisolated private static func ingest(_ urls: [URL], move: Bool = false) -> String? {
         let fm = FileManager.default
         let dir = TranslationLayer.root.appendingPathComponent(UUID().uuidString,
                                                                isDirectory: true)
@@ -234,7 +247,19 @@ final class TranslationLayerStore: ObservableObject {
                 defer { if scoped { url.stopAccessingSecurityScopedResource() } }
                 var name = url.lastPathComponent
                 if !name.lowercased().hasSuffix(".apk") { name += ".apk" }
-                try fm.copyItem(at: url, to: dir.appendingPathComponent(name))
+                let dest = dir.appendingPathComponent(name)
+                if move {
+                    try fm.moveItem(at: url, to: dest)
+                } else {
+                    // Coordinated, so a file that lives in iCloud and is not on the phone yet is downloaded first
+                    // (a plain copy of it fails, or finds nothing).
+                    var coordinationError: NSError?
+                    var copyError: Error?
+                    NSFileCoordinator().coordinate(readingItemAt: url, options: [], error: &coordinationError) { readable in
+                        do { try fm.copyItem(at: readable, to: dest) } catch { copyError = error }
+                    }
+                    if let failure = coordinationError ?? copyError { throw failure }
+                }
             }
         } catch {
             try? fm.removeItem(at: dir)
@@ -362,14 +387,12 @@ struct TranslationLayerSettings: View {
         }
         .huskForm()
         .navigationTitle("Translation Layer")
-        .fileImporter(isPresented: $importing, allowedContentTypes: [.item],
-                      allowsMultipleSelection: true) { result in
-            if case .success(let urls) = result, !urls.isEmpty {
-                HuskLog.log("ui", "translation layer: adding \(urls.count) file(s): "
-                          + urls.map(\.lastPathComponent).joined(separator: ", "))
-                store.add(urls)
-            }
+        .huskFilePicker(isPresented: $importing) { urls in
+            HuskLog.log("ui", "translation layer: adding \(urls.count) file(s): "
+                      + urls.map(\.lastPathComponent).joined(separator: ", "))
+            store.add(urls)
         }
+        .onAppear { store.adoptDroppedAPKs() }
         .alert("Could not add the app", isPresented: Binding(
                 get: { store.lastError != nil },
                 set: { if !$0 { store.lastError = nil } })) {

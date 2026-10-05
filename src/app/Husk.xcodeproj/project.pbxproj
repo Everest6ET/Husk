@@ -15,6 +15,7 @@
 		090A2A3F43CE69EA3C079EB0 /* HuskLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6541CC4432CA2CE74901320 /* HuskLog.swift */; };
 		0B197878C829D66E77FD7E3F /* libANGLE-shared.dylib in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 3B1406C4A7D0F7E50BCB365B /* libANGLE-shared.dylib */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		0BB57A13C0D48446CB4FBCD5 /* TLUnityView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 211CC4F06EC722E5972D7F3B /* TLUnityView.swift */; };
+		0CFC78E800ABA22AA65D873D /* HuskFilePicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6146DAE69D6D6462FB1FB771 /* HuskFilePicker.swift */; };
 		0FA2BBF68B30B5630789922B /* husk-tl-json.c in Sources */ = {isa = PBXBuildFile; fileRef = 242DD6EEB7DA97455CD76826 /* husk-tl-json.c */; };
 		12F633F698047D7DED62A51D /* husk-tl-gameactivity.c in Sources */ = {isa = PBXBuildFile; fileRef = CFAB9C41A483CA08C1037AAC /* husk-tl-gameactivity.c */; };
 		13E70642DCB1EB118EB6B9CF /* husk-tl-egl.c in Sources */ = {isa = PBXBuildFile; fileRef = 6990DECA802D2C4493C28A4A /* husk-tl-egl.c */; };
@@ -159,6 +160,7 @@
 		56DAE8E0DADC5483D33F6B7B /* LibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryView.swift; sourceTree = "<group>"; };
 		5BE31DC5ACA28C0133F828FA /* husk-tl-load.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "husk-tl-load.c"; sourceTree = "<group>"; };
 		5EB0AF32D5E40E753DDD85DA /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
+		6146DAE69D6D6462FB1FB771 /* HuskFilePicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HuskFilePicker.swift; sourceTree = "<group>"; };
 		619394B1069242D8750E7F33 /* Husk.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Husk.entitlements; sourceTree = "<group>"; };
 		66DDBC0AF7BE5742AA867515 /* TLScreenView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TLScreenView.swift; sourceTree = "<group>"; };
 		690B2DA647B7B75C11DDDA9F /* HuskBridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = HuskBridge.h; sourceTree = "<group>"; };
@@ -251,6 +253,7 @@
 				14E50E2B9CCFF7B1FEF73608 /* HuskAudio.swift */,
 				690B2DA647B7B75C11DDDA9F /* HuskBridge.h */,
 				0168E1B352FFD7A4BC207CA5 /* HuskBridgeFS.swift */,
+				6146DAE69D6D6462FB1FB771 /* HuskFilePicker.swift */,
 				F337AAF2A6860FCB03810AA6 /* HuskGLView.swift */,
 				392BE39CE162757FDA225452 /* HuskKeyboard.swift */,
 				C6541CC4432CA2CE74901320 /* HuskLog.swift */,
@@ -521,6 +524,7 @@
 				161096C4354197AC83569ECB /* HuskAppIcon.swift in Sources */,
 				BBA9636793435EF7679E62F1 /* HuskAudio.swift in Sources */,
 				340ADF13F9F0E48A5A443600 /* HuskBridgeFS.swift in Sources */,
+				0CFC78E800ABA22AA65D873D /* HuskFilePicker.swift in Sources */,
 				8E10E866080B28D4D397970A /* HuskGLView.swift in Sources */,
 				81557CC939994CE6350E1C81 /* HuskKeyboard.swift in Sources */,
 				090A2A3F43CE69EA3C079EB0 /* HuskLog.swift in Sources */,

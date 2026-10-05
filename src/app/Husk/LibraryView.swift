@@ -39,15 +39,8 @@ struct LibraryView: View {
                 }
             }
         }
-        .fileImporter(isPresented: $importing,
-                      allowedContentTypes: [Self.apkType, .item],
-                      allowsMultipleSelection: true) { result in
-            switch result {
-            case .success(let urls):
-                for url in urls { bridge.install(apkAt: url) }
-            case .failure(let error):
-                HuskLog.log("ui", "APK import cancelled/failed: \(error.localizedDescription)")
-            }
+        .huskFilePicker(isPresented: $importing, types: [Self.apkType, .item]) { urls in
+            for url in urls { bridge.install(apkAt: url) }
         }
         .sheet(isPresented: $showLogs) { LogView() }
     }
