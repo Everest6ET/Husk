@@ -20,8 +20,11 @@
 #include "husk-tl-bionic.h"
 #include "husk-tl-internal.h"
 #include "husk-tl-ld.h"
+#include "husk-tl-dexindex.h"
 
 /* ------------------------------------------------------------------ state */
+
+void tl_http_install(void);
 
 static struct {
     char pkg[128], apk[1024], data[512], files[600], cache[600], ext_files[700], ext_cache[700], native_lib[64];
@@ -380,7 +383,7 @@ static void Reflection_newProxyInstance(tl_jcall *c)
 }
 static void Activity_getApplication(tl_jcall *c) { static jobj *app; if (!app) app = make("android/app/Application"); c->ret = vl(app); }
 static void Zero_int(tl_jcall *c) { c->ret = vi(0); }
-static void Unity_getNetworkConnectivity(tl_jcall *c) { c->ret = vi(0); }     /* NotReachable: sockets are not implemented */
+static void Unity_getNetworkConnectivity(tl_jcall *c) { c->ret = vi(2); }     /* ReachableViaLocalAreaNetwork: the phone has its network */
 
 /* ------------------------------------------------- dialogs: say what they say */
 
@@ -399,6 +402,14 @@ static void Dialog_show(tl_jcall *c)
 {
     tl_log_line("DIALOG \"%s\": %s", S(tl_jni_get_field(c->self, "title", "Ljava/lang/String;").l),
                 S(tl_jni_get_field(c->self, "message", "Ljava/lang/String;").l));
+}
+static void Builder_show(tl_jcall *c)
+{
+    jobj *d = make("android/app/AlertDialog");
+    set_str(d, "title", S(tl_jni_get_field(c->self, "title", "Ljava/lang/String;").l));
+    set_str(d, "message", S(tl_jni_get_field(c->self, "message", "Ljava/lang/String;").l));
+    Dialog_show(&(tl_jcall){ .self = d });
+    c->ret = vl(d);
 }
 static void Object_getClass(tl_jcall *c) { c->ret = vl(c->self && c->self->cls ? tl_jni_class_object(tl_jni_class_name(c->self)) : NULL); }
 static void Class_getClassLoader(tl_jcall *c) { c->ret = vl(make("dalvik/system/PathClassLoader")); }
@@ -608,8 +619,26 @@ static const struct { const char *name, *super; } k_classes[] = {
     { "android/content/SharedPreferences$Editor", "java/lang/Object" }, { "java/util/Iterator", "java/lang/Object" },
 };
 
+/*
+ * Class.forName(String): how Unity finds a class when JNI's FindClass has no answer for it, from a thread whose class loader is the
+ * system's. The name is dotted. The class is there if the framework or the APK has it (the same rule FindClass applies); a
+ * ClassNotFoundException is what the engine expects for one that is not.
+ */
+static void Class_forName(tl_jcall *c)
+{
+    char name[300]; snprintf(name, sizeof(name), "%s", tl_jni_string(c->args[0].l) ? tl_jni_string(c->args[0].l) : "");
+    for (char *p = name; *p; p++) if (*p == '.') *p = '/';
+    bool framework = !strncmp(name, "android/", 8) || !strncmp(name, "java/", 5) || !strncmp(name, "javax/", 6) || !strncmp(name, "dalvik/", 7)
+                  || !strncmp(name, "libcore/", 8) || !strncmp(name, "sun/", 4) || !strncmp(name, "org/json/", 9);
+    if (name[0] == '[' || framework || tl_dexidx_has_class(name)) { c->ret.l = tl_jni_class_object(name); return; }
+    tl_jni_throw("java/lang/ClassNotFoundException", name);
+    c->ret.l = NULL;
+}
+
 #define M(c, n, s, f) { c, n, s, f }
 static const tl_jhle k_hle[] = {
+    M("java/lang/Class", "forName", "(Ljava/lang/String;)Ljava/lang/Class;", Class_forName),
+    M("java/lang/Class", "forName", "(Ljava/lang/String;)Ljava/lang/Object;", Class_forName),
     M("java/lang/System", "load", "(Ljava/lang/String;)V", System_load),
     M("java/lang/System", "loadLibrary", "(Ljava/lang/String;)V", System_loadLibrary),
     M("com/sybogames/chili/migration/KilooPlatformAndroidBridge", "<init>", "()V", Noop),
@@ -706,6 +735,7 @@ static const tl_jhle k_hle[] = {
     M("android/app/AlertDialog$Builder", "<init>", "(Landroid/content/Context;)V", Builder_init),
     M("android/app/AlertDialog$Builder", "setTitle", "(Ljava/lang/CharSequence;)Landroid/app/AlertDialog$Builder;", Builder_setTitle),
     M("android/app/AlertDialog$Builder", "setMessage", "(Ljava/lang/CharSequence;)Landroid/app/AlertDialog$Builder;", Builder_setMessage),
+    M("android/app/AlertDialog$Builder", "show", "()Landroid/app/AlertDialog;", Builder_show),
     M("android/app/AlertDialog$Builder", "setCancelable", "(Z)Landroid/app/AlertDialog$Builder;", Builder_chain),
     M("android/app/AlertDialog$Builder", "setPositiveButton", "(Ljava/lang/CharSequence;Landroid/content/DialogInterface$OnClickListener;)Landroid/app/AlertDialog$Builder;", Builder_chain),
     M("android/app/AlertDialog$Builder", "setNegativeButton", "(Ljava/lang/CharSequence;Landroid/content/DialogInterface$OnClickListener;)Landroid/app/AlertDialog$Builder;", Builder_chain),
@@ -746,8 +776,7 @@ static const tl_jhle k_hle[] = {
     M("java/util/Scanner", "<init>", "(Ljava/io/InputStream;Ljava/lang/String;)V", Scanner_init), M("java/util/Scanner", "<init>", "(Ljava/io/InputStream;)V", Scanner_init),
     M("java/util/Scanner", "useDelimiter", "(Ljava/lang/String;)Ljava/util/Scanner;", Scanner_useDelimiter),
     M("java/util/Scanner", "hasNext", "()Z", Scanner_hasNext), M("java/util/Scanner", "next", "()Ljava/lang/String;", Scanner_next), M("java/util/Scanner", "close", "()V", Noop),
-    M("java/util/HashMap", "entrySet", "()Ljava/util/Set;", Map_entrySet), M("java/util/Map", "entrySet", "()Ljava/util/Set;", Map_entrySet),
-    M("java/util/HashMap", "size", "()I", Coll_size), M("java/util/Map", "size", "()I", Coll_size), M("java/util/HashMap", "isEmpty", "()Z", Coll_isEmpty),
+
     M("java/util/HashSet", "iterator", "()Ljava/util/Iterator;", Set_iterator), M("java/util/Set", "iterator", "()Ljava/util/Iterator;", Set_iterator),
     M("java/util/HashSet", "size", "()I", Coll_size), M("java/util/Set", "size", "()I", Coll_size),
     M("android/content/SharedPreferences", "getAll", "()Ljava/util/Map;", SP_getAll),
@@ -811,6 +840,7 @@ void tl_jni_hle_install(void)
     tl_loop_install();
     tl_input_install();
     tl_tls_install();
+    tl_http_install();
 
     H.activity = make("android/app/Activity");
     H.resources = make("android/content/res/Resources");

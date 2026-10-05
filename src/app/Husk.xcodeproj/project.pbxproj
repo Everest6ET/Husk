@@ -43,6 +43,7 @@
 		50F7B80FBADEAF705EC960F8 /* husk-tl-jni-fmod.c in Sources */ = {isa = PBXBuildFile; fileRef = C575FDA8867C3A75AB2392E3 /* husk-tl-jni-fmod.c */; };
 		5231634DF5866145DDE3A298 /* husk-tl-bionic.c in Sources */ = {isa = PBXBuildFile; fileRef = E8B800E5E712B4EFFB9F5D59 /* husk-tl-bionic.c */; };
 		581DC803F723FFB10DDA759F /* HuskApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85AAFB3E92FE2AE4A2FA4DD8 /* HuskApp.swift */; };
+		5926C1BBD1419AFBBFA2D1D6 /* husk-tl-http.m in Sources */ = {isa = PBXBuildFile; fileRef = 4B24977AD9B892864CD39481 /* husk-tl-http.m */; };
 		59514CBA483F71A738A3B444 /* HuskMetalPresenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B259C39CD9CC4D2A8A3D8E8 /* HuskMetalPresenter.swift */; };
 		5C20168883D258DF9715F6D9 /* AppDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1F2A4FC567A4CCC74209DD4 /* AppDetailView.swift */; };
 		5E4B0292717DAE8B0CAA99E4 /* QemuRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E91A601F16886103BC482AB /* QemuRunner.swift */; };
@@ -83,6 +84,7 @@
 		E1F5B2BE674BB476433BFCEF /* husk-tl-cocos-text.c in Sources */ = {isa = PBXBuildFile; fileRef = 9217F354B8587F75369229F8 /* husk-tl-cocos-text.c */; };
 		E2C01F517E73992A29E22EC2 /* husk-jit.js in Resources */ = {isa = PBXBuildFile; fileRef = B74F9AA42414905593B347BA /* husk-jit.js */; };
 		E6975EAFAE86144999E8B267 /* husk-tl-cocos.c in Sources */ = {isa = PBXBuildFile; fileRef = 6B7990E89ED6098029981E38 /* husk-tl-cocos.c */; };
+		EA48FA05D5B2D1C216C8D67E /* husk-tl-jni-http.c in Sources */ = {isa = PBXBuildFile; fileRef = 411E4F9A6C6D4F737E8611B9 /* husk-tl-jni-http.c */; };
 		EBA260CEB1E1AD0D117CE0D5 /* husk-tl-unity.c in Sources */ = {isa = PBXBuildFile; fileRef = 2C2AAB4C0C1CD9F4CC69E4E8 /* husk-tl-unity.c */; };
 		EBDBC46EF4E65E1DA2342F6B /* DiscoverTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48DA17A30AE793049F358717 /* DiscoverTab.swift */; };
 		EC8B11F723C188F32B5D9DCA /* libqemu-aarch64-softmmu.dylib in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 1B29247002CE43A3B9DEC633 /* libqemu-aarch64-softmmu.dylib */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
@@ -140,6 +142,7 @@
 		3B1406C4A7D0F7E50BCB365B /* libANGLE-shared.dylib */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.dylib"; name = "libANGLE-shared.dylib"; path = "../../build/ios-arm64/sysroot/lib/libANGLE-shared.dylib"; sourceTree = "<group>"; };
 		3B9FC5A63D4CAA7FBDA016EB /* fishhook.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = fishhook.h; sourceTree = "<group>"; };
 		40BF573E8CED9B238E762BA6 /* FilesTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FilesTab.swift; sourceTree = "<group>"; };
+		411E4F9A6C6D4F737E8611B9 /* husk-tl-jni-http.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "husk-tl-jni-http.c"; sourceTree = "<group>"; };
 		42C4CB582E3E0D917E2DBB4C /* husk-tl-bionic-str.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "husk-tl-bionic-str.c"; sourceTree = "<group>"; };
 		42CBC0D7ACAB400BDDFD7F9E /* husk-tl-xmem.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "husk-tl-xmem.c"; sourceTree = "<group>"; };
 		4385A14B11CBA1C3502D433D /* husk-tl-scan.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "husk-tl-scan.c"; sourceTree = "<group>"; };
@@ -148,6 +151,7 @@
 		473B239012BE00391A4164ED /* husk-tl-audio.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "husk-tl-audio.h"; sourceTree = "<group>"; };
 		48DA17A30AE793049F358717 /* DiscoverTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiscoverTab.swift; sourceTree = "<group>"; };
 		4A0490485F9BA884A0554EAD /* GuestManifest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GuestManifest.swift; sourceTree = "<group>"; };
+		4B24977AD9B892864CD39481 /* husk-tl-http.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = "husk-tl-http.m"; sourceTree = "<group>"; };
 		4B259C39CD9CC4D2A8A3D8E8 /* HuskMetalPresenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HuskMetalPresenter.swift; sourceTree = "<group>"; };
 		4BD6ABD20471B2CACF60ABD4 /* TranslationLayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranslationLayer.swift; sourceTree = "<group>"; };
 		4D3B9FB2A68373C457706DA9 /* Husk.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Husk.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -182,6 +186,7 @@
 		86A6E743652A606829BC044B /* husk-tl-prefs.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "husk-tl-prefs.c"; sourceTree = "<group>"; };
 		9217F354B8587F75369229F8 /* husk-tl-cocos-text.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "husk-tl-cocos-text.c"; sourceTree = "<group>"; };
 		9545A76356E04E05C3174FA8 /* husk-tl-va.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "husk-tl-va.h"; sourceTree = "<group>"; };
+		97E83F7EE31FE180D0FA3105 /* husk-tl-http.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "husk-tl-http.h"; sourceTree = "<group>"; };
 		9E133BDBB6CB711003066815 /* husk-tl-zip.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "husk-tl-zip.c"; sourceTree = "<group>"; };
 		A22242B8E3E7067D6EB2AB95 /* husk-tl-jni.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "husk-tl-jni.c"; sourceTree = "<group>"; };
 		A33191A0A3B6B70EEAB85D43 /* husk-tl-cocos.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "husk-tl-cocos.h"; sourceTree = "<group>"; };
@@ -329,9 +334,12 @@
 				EAB0083C1A580217DEF944CA /* husk-tl-egl.h */,
 				CFAB9C41A483CA08C1037AAC /* husk-tl-gameactivity.c */,
 				0C8178C469873F2DA90BB728 /* husk-tl-gameactivity.h */,
+				97E83F7EE31FE180D0FA3105 /* husk-tl-http.h */,
+				4B24977AD9B892864CD39481 /* husk-tl-http.m */,
 				B76CE6F39722749AA0027959 /* husk-tl-jni-cocos.c */,
 				C575FDA8867C3A75AB2392E3 /* husk-tl-jni-fmod.c */,
 				54E1C79EFAAEBBC6992A36A6 /* husk-tl-jni-hle.c */,
+				411E4F9A6C6D4F737E8611B9 /* husk-tl-jni-http.c */,
 				28152D0874B73915225FE8EA /* husk-tl-jni-input.c */,
 				FE8922E7AB75C8C61B37986A /* husk-tl-jni-loop.c */,
 				3ACE2921134A2C3A3DC93272 /* husk-tl-jni-minecraft.c */,
@@ -561,9 +569,11 @@
 				9883B80CE2F3C84E5D6E0A8F /* husk-tl-elf.c in Sources */,
 				80F03D2EAABE3BFEA4A2785B /* husk-tl-framework.c in Sources */,
 				12F633F698047D7DED62A51D /* husk-tl-gameactivity.c in Sources */,
+				5926C1BBD1419AFBBFA2D1D6 /* husk-tl-http.m in Sources */,
 				240D4917EC7FC510B753EB4E /* husk-tl-jni-cocos.c in Sources */,
 				50F7B80FBADEAF705EC960F8 /* husk-tl-jni-fmod.c in Sources */,
 				818D7D89195D77AA70E27DCF /* husk-tl-jni-hle.c in Sources */,
+				EA48FA05D5B2D1C216C8D67E /* husk-tl-jni-http.c in Sources */,
 				FC8F2E79EF7CDBC99D95F4F6 /* husk-tl-jni-input.c in Sources */,
 				B4CE75407A317521C77A2207 /* husk-tl-jni-loop.c in Sources */,
 				001416DA738AA665BBDEBF59 /* husk-tl-jni-minecraft.c in Sources */,

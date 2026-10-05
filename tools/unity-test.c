@@ -362,7 +362,7 @@ int main(int argc, char **argv)
     char egl[600], gles[600]; snprintf(egl, sizeof(egl), "%s/libEGL.dylib", cef); snprintf(gles, sizeof(gles), "%s/libGLESv2.dylib", cef);
     char frames[] = "/tmp/husk-frames-XXXXXX"; mkdtemp(frames);
     fprintf(stderr, "frames: %s\n", frames);
-    tl_unity_config cfg = { .apk_path = argv[1], .data_dir = tmp, .package_name = "com.kiloo.subwaysurf", .width = 540, .height = 1200,
+    tl_unity_config cfg = { .apk_path = argv[1], .data_dir = tmp, .package_name = getenv("TL_PACKAGE") ? getenv("TL_PACKAGE") : "com.kiloo.subwaysurf", .width = 540, .height = 1200,
                             .angle_egl = getenv("TL_ANGLE_EGL") ? getenv("TL_ANGLE_EGL") : egl, .angle_gles = getenv("TL_ANGLE_GLES") ? getenv("TL_ANGLE_GLES") : gles,
                             .frame_dir = frames, .frame_every = getenv("TL_CTL") ? -6 : 30 };
     g_frame_dir = frames;

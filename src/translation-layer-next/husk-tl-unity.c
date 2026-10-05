@@ -149,6 +149,9 @@ bool tl_unity_run(void)
     /* The rest of the UnityPlayer constructor: the helpers it builds, whose constructors each call a
      * native that gives the engine its reference to the helper's Java class. Without these the engine
      * holds NULL where it expects a class and fails later, far from the cause. */
+    /* ...and the web request helper's class, which UnityPlayer's constructor hands the engine so it can find the request methods. */
+    NATIVE_VOID("nativeInitWebRequest", "(Ljava/lang/Class;)V", tl_jni_class_object("com/unity3d/player/UnityWebRequest"), 0);
+    tl_log_line("unity: nativeInitWebRequest done");
     jobj *cam = tl_jni_new_object(tl_jni_class("com/unity3d/player/Camera2Wrapper"));
     call_native_on("com/unity3d/player/Camera2Wrapper", cam, "initCamera2Jni", "()V", 0, 0);
     jobj *hfp = tl_jni_new_object(tl_jni_class("com/unity3d/player/HFPStatus"));
