@@ -420,20 +420,89 @@ static void mm_trace(const char *what, void *a, size_t l, long x, long y)
     if (g_mm_trace) tl_log_line("mm: %s addr=%p len=%#zx %#lx %#lx", what, a, l, x, y);
 }
 
+/*
+ * V8's pointer-compression cage is a 4 GiB region aligned to 4 GiB, which V8 gets by reserving twice that and giving back the
+ * parts outside the aligned half. An iPhone app without the extended-virtual-addressing entitlement (a sideloaded one) is refused
+ * an 8 GiB reservation, though it can map 4 GiB. So when the 8 GiB one fails, the caller is given an aligned 4 GiB mapping at the
+ * start of an 8 GiB range it believes it owns; what it then gives back -- the half that was never mapped -- is ignored.
+ */
+#define PHANTOM_HALF ((size_t)4 << 30)
+static struct { uintptr_t base; size_t len, real; } g_phantom[4];
+static int g_nphantom;
+
+static void *phantom_reserve(size_t len)
+{
+    if (len != 2 * PHANTOM_HALF || g_nphantom >= 4) return MAP_FAILED;
+    void *res = MAP_FAILED;
+    /* Reserve 5 GiB, which holds an aligned 4 GiB only when it starts in the first GiB of an alignment period. Mappings come one after
+     * another, so a miss is kept (it moves the next one on by a GiB) and given back once there is a hit. */
+    void *held[8]; int nheld = 0;
+    const size_t S = PHANTOM_HALF + ((size_t)1 << 30);
+    for (int t = 0; t < 8 && res == MAP_FAILED; t++) {
+        void *p = mmap(NULL, S, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (p == MAP_FAILED) break;
+        uintptr_t b = (uintptr_t)p, start = (b + PHANTOM_HALF - 1) & ~(PHANTOM_HALF - 1), end = start + PHANTOM_HALF;
+        if (end <= b + S) {
+            if (start > b) munmap(p, start - b);
+            if (b + S > end) munmap((void *)end, b + S - end);
+            res = (void *)start;
+        } else held[nheld++] = p;
+    }
+    for (int i = 0; i < nheld; i++) munmap(held[i], S);
+    if (res == MAP_FAILED) {                                  /* a 5 GiB mapping is refused too: try 4 GiB where it happens to fall aligned */
+        void *p = mmap(NULL, PHANTOM_HALF, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (p != MAP_FAILED && ((uintptr_t)p & (PHANTOM_HALF - 1))) { munmap(p, PHANTOM_HALF); p = MAP_FAILED; }
+        for (uintptr_t hint = (uintptr_t)3 << 32; p == MAP_FAILED && hint < ((uintptr_t)1 << 36); hint += PHANTOM_HALF) {
+            void *q = mmap((void *)hint, PHANTOM_HALF, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+            if (q == (void *)hint) p = q;
+            else if (q != MAP_FAILED) munmap(q, PHANTOM_HALF);
+        }
+        res = p;
+    }
+    if (res == MAP_FAILED) return MAP_FAILED;
+    g_phantom[g_nphantom].base = (uintptr_t)res; g_phantom[g_nphantom].len = len; g_phantom[g_nphantom].real = PHANTOM_HALF;
+    g_nphantom++;
+    tl_log_line("mm: an 8 GiB reservation was refused; gave an aligned 4 GiB one at %p instead", res);
+    return res;
+}
+
+/* How much of [a, a+l) is really mapped: the part of a phantom range past its real half is not. */
+static size_t phantom_clamp(uintptr_t a, size_t l)
+{
+    for (int i = 0; i < g_nphantom; i++) {
+        uintptr_t b = g_phantom[i].base, real_end = b + g_phantom[i].real, end = b + g_phantom[i].len;
+        if (a >= b && a < end) return a >= real_end ? 0 : (a + l > real_end ? real_end - a : l);
+    }
+    return l;
+}
+
 static void *b_mmap(void *addr, size_t len, int prot, int flags, int fd, long off)
 {
     int df = flags & 0x3;                                   /* MAP_SHARED / MAP_PRIVATE */
     if (flags & 0x10)   df |= MAP_FIXED;
     if (flags & 0x20)   df |= MAP_ANON;
     TL_ERRNO_BEGIN();
-    void *r = mmap(addr, len, prot_filter(prot, "mmap"), df, (flags & 0x20) ? -1 : fd, off);
+    static int force_phantom = -1;
+    if (force_phantom < 0) force_phantom = getenv("TL_MM_PHANTOM") != NULL;          /* a Mac pretending to be a phone */
+    static size_t max_map = (size_t)-2;                                              /* TL_MM_MAX_GIB: refuse bigger single mappings, as a phone does */
+    if (max_map == (size_t)-2) max_map = getenv("TL_MM_MAX_GIB") ? (size_t)atoi(getenv("TL_MM_MAX_GIB")) << 30 : (size_t)-1;
+    bool refuse = len > max_map && (flags & 0x20) && !(flags & 0x10);
+    if (refuse) { tl_log_line("mm: refusing %#zx bytes (TL_MM_MAX_GIB)", len); errno = ENOMEM; }
+    void *r = refuse || (force_phantom && len == 2 * PHANTOM_HALF && prot == 0 && (flags & 0x20) && !(flags & 0x10)) ? MAP_FAILED
+            : mmap(addr, len, prot_filter(prot, "mmap"), df, (flags & 0x20) ? -1 : fd, off);
+    if (r == MAP_FAILED && (errno == ENOMEM || force_phantom) && prot == 0 && (flags & 0x20) && !(flags & 0x10)) { r = phantom_reserve(len); if (r != MAP_FAILED) errno = 0; }
     TL_ERRNO_END();
     if (r != MAP_FAILED && (flags & 0x20)) anon_add(r, len);
     mm_trace("mmap", r, len, prot, flags);
     if (r == MAP_FAILED) tl_log_line("mm: mmap FAILED len=%#zx prot=%d flags=%#x errno=%d", len, prot, flags, errno);
     return r;
 }
-static int b_munmap(void *a, size_t l) { TL_ERRNO_BEGIN(); int r = munmap(a, l); TL_ERRNO_END(); mm_trace("munmap", a, l, r, errno); return r; }
+static int b_munmap(void *a, size_t l)
+{
+    size_t real = phantom_clamp((uintptr_t)a, l);
+    if (real == 0) return 0;                                 /* the half of a phantom range that was never mapped */
+    TL_ERRNO_BEGIN(); int r = munmap(a, real); TL_ERRNO_END(); mm_trace("munmap", a, real, r, errno); return r;
+}
 static int b_mprotect(void *a, size_t l, int prot) { TL_ERRNO_BEGIN(); int r = mprotect(a, l, prot_filter(prot, "mprotect")); int e = errno; TL_ERRNO_END(); mm_trace("mprotect", a, l, prot, r ? e : 0); return r; }
 static int b_madvise(void *a, size_t l, int adv)
 {
