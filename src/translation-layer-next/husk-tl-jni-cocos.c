@@ -191,8 +191,15 @@ static void Act_refreshRate(tl_jcall *c) { c->ret = vf(60.f); }
 static void Act_openURL(tl_jcall *c) { tl_log_line("cocos: openURL %s", S(c->args[0].l)); if (tl_cocos_open_url_hook) tl_cocos_open_url_hook(S(c->args[0].l)); }
 static void Act_loadingFinished(tl_jcall *c) { (void)c; tl_log_line("cocos: the game finished loading"); }
 static void Act_tryRate(tl_jcall *c) { (void)c; }
-static void Act_toggleKeyboard(tl_jcall *c) { (void)c; tl_log_line("cocos: keyboard: toggle"); if (tl_cocos_keyboard_hook) tl_cocos_keyboard_hook(0); }
-static void Act_setKeyboardState(tl_jcall *c) { tl_log_line("cocos: keyboard: state %d", c->args[0].z); }
+/* BaseRobTopActivity keeps the keyboard's wanted state in a flag; onToggleKeyboard() makes the keyboard match it. */
+static volatile int g_keyboard_active;
+static void Act_toggleKeyboard(tl_jcall *c)
+{
+    (void)c;
+    tl_log_line("cocos: keyboard: sync to %s", g_keyboard_active ? "shown" : "hidden");
+    if (tl_cocos_keyboard_hook) tl_cocos_keyboard_hook(g_keyboard_active ? 1 : 2);
+}
+static void Act_setKeyboardState(tl_jcall *c) { g_keyboard_active = c->args[0].z; tl_log_line("cocos: keyboard: state %d", c->args[0].z); }
 static void GL_openIME(tl_jcall *c) { (void)c; tl_log_line("cocos: keyboard: open"); if (tl_cocos_keyboard_hook) tl_cocos_keyboard_hook(1); }
 static void GL_closeIME(tl_jcall *c) { (void)c; tl_log_line("cocos: keyboard: close"); if (tl_cocos_keyboard_hook) tl_cocos_keyboard_hook(2); }
 

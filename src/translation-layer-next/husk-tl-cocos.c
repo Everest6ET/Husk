@@ -125,6 +125,14 @@ void tl_cocos_deliver_bitmap(int width, int height, const uint8_t *rgba)
     tl_jni_unref(arr);
 }
 
+/* JniToCpp.resumeSound(): the activity's way of telling the game its sound may come back (after the screen is unlocked). */
+void tl_cocos_resume_sound(void)
+{
+    typedef void (*fn_t)(void *env, void *cls);
+    fn_t fn = (fn_t)native_of("com/customRobTop/JniToCpp", "resumeSound", "()V", "Java_com_customRobTop_JniToCpp_resumeSound");
+    if (fn) fn(tl_jni_env(), tl_jni_class_object("com/customRobTop/JniToCpp"));
+}
+
 /* -------------------------------------------------------------------- input */
 
 /*
@@ -284,7 +292,12 @@ static void *gl_main(void *arg)
             next = now_ns();
             continue;
         }
-        if (was_paused) { if (on_resume) on_resume(env, cls); was_paused = false; next = now_ns(); tl_log_line("cocos: resumed"); }
+        if (was_paused) {
+            if (on_resume) on_resume(env, cls);
+            /* The game's own resume does not bring its music back here; the activity's resumeSound does. */
+            tl_cocos_resume_sound();
+            was_paused = false; next = now_ns(); tl_log_line("cocos: resumed");
+        }
         drain_events();
         int64_t t0 = now_ns();
         render(env, cls);

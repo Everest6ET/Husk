@@ -54,6 +54,8 @@ void tl_cocos_perf_snapshot(tl_cocos_perf *out);
 /* Pause and resume rendering the way the activity's onPause/onResume do. Safe from any thread. */
 void tl_cocos_set_paused(bool paused);
 
+void tl_cocos_resume_sound(void);               /* JniToCpp.resumeSound; call on the GL thread */
+
 /* The game's own animation interval, in seconds (Cocos2dxRenderer.setAnimationInterval): the pace of the render loop. */
 void tl_cocos_set_interval(double seconds);
 
@@ -80,7 +82,7 @@ void tl_cocos_deliver_bitmap(int width, int height, const uint8_t *rgba);
 
 /* Audio from FMOD's output thread: interleaved 16-bit samples; the hook blocks until it has taken them. */
 extern void (*tl_cocos_audio_hook)(const int16_t *samples, int frames, int channels, int rate);
-/* The game's soft keyboard: action 0 = toggle (BaseRobTopActivity.onToggleKeyboard), 1 = it now wants the keyboard up, 2 = down (setKeyboardState). */
+/* The game's soft keyboard: the handler is told 1 = show it, 2 = hide it (action 0, toggle, is not used). */
 extern void (*tl_cocos_keyboard_hook)(int action);
 /* A URL the game wants opened. */
 extern void (*tl_cocos_open_url_hook)(const char *url);

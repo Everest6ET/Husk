@@ -6,7 +6,7 @@
  *
  * Geometry Dash is a landscape game, so the default surface is landscape (the phone's aspect).
  * Environment: TL_JNI_TRACE=1|2, TL_VERBOSE=0..2, TL_CTL=<fifo> (lines "tap X Y", "hold X Y MS",
- * "swipe X1 Y1 X2 Y2 MS", "wait MS", "shot PNG", "text WORD", "bs", "quit"), TL_FRAMES=<n> (save every nth frame; default latest only).
+ * "swipe X1 Y1 X2 Y2 MS", "wait MS", "shot PNG", "text WORD", "bs", "pause", "resume", "quit"), TL_FRAMES=<n> (save every nth frame; default latest only).
  */
 #include <mach/mach.h>
 #include <pthread.h>
@@ -110,6 +110,9 @@ static void *control_thread(void *arg)
             }
             else if (sscanf(line, "text %399s", p) == 1) tl_cocos_insert_text(p);
             else if (!strncmp(line, "bs", 2)) tl_cocos_delete_backward();
+            else if (!strncmp(line, "pause", 5)) tl_cocos_set_paused(true);
+            else if (!strncmp(line, "resumesound", 11)) tl_cocos_resume_sound();
+            else if (!strncmp(line, "resume", 6)) tl_cocos_set_paused(false);
             else if (!strncmp(line, "quit", 4)) { fprintf(stderr, "ctl: quit\n"); fflush(stderr); _exit(0); }
         }
         fclose(f);
