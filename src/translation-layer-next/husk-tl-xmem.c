@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 
@@ -45,6 +46,8 @@ static bool open_platform(size_t host_bytes, char *err, size_t errlen)
 /* A Mac (or a plain host): two views of ordinary memory. */
 static bool open_platform(size_t host_bytes, char *err, size_t errlen)
 {
+    /* TL_XMEM_MIB: size the region as a phone's would be, to see whether a game fits there */
+    if (getenv("TL_XMEM_MIB")) host_bytes = (size_t)atoi(getenv("TL_XMEM_MIB")) << 20;
     size_t size = (host_bytes + TL_XMEM_PAGE - 1) & ~(size_t)(TL_XMEM_PAGE - 1);
     /* Reserve twice the span and put the two views side by side. adrp reaches +-4 GiB, and
      * the loader retargets code at the writable view with it, so the views must stay close:

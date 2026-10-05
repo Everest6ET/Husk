@@ -23,6 +23,7 @@
 
 #include "husk-tl-gameactivity.h"
 #include "husk-tl-audio.h"
+#include "husk-tl-xmem.h"
 #include "husk-tl-jni.h"
 #include "husk-tl-ld.h"
 
@@ -397,6 +398,7 @@ int main(int argc, char **argv)
     if (getenv("TL_SAMPLE")) { pthread_t st; pthread_create(&st, NULL, sampler, (void *)(intptr_t)atoi(getenv("TL_SAMPLE"))); }
     int secs = argc > 2 ? atoi(argv[2]) : 5;
     for (int i = 0; i < secs; i++) sleep(1);
+    fprintf(stderr, "minecraft: executable memory used %zu of %zu MiB\n", tl_xmem_used() >> 20, tl_xmem_size() >> 20);
     fprintf(stderr, "minecraft: %lu frames in %d s\n", tl_ga_frames(), secs);
     return 0;
 }
