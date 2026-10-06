@@ -731,11 +731,12 @@ static void enum_constant_fallback(void *fid, jvalue *slot)
     slot->l = tl_jni_new_object(f->cls);
     TRACE("jni: static %s.%s was never set: made an object of its own class", f->cls->name, f->name);
 }
+/* A field ID is NULL when its lookup failed (and left an exception pending); native code that goes on to use it must not take the process down. */
 #define GEN_FIELDS(T, CT, F) \
-    static CT jni_Get##T##Field(void *env, jo o, void *fid) { (void)env; return (CT)REF_##T(field_slot(o, fid)->F); } \
-    static void jni_Set##T##Field(void *env, jo o, void *fid, CT v) { (void)env; field_slot(o, fid)->F = v; } \
-    static CT jni_GetStatic##T##Field(void *env, jo c, void *fid) { (void)env; (void)c; jvalue *sl = field_slot(NULL, fid); if (#T[0] == 'O') enum_constant_fallback(fid, sl); return (CT)REF_##T(sl->F); } \
-    static void jni_SetStatic##T##Field(void *env, jo c, void *fid, CT v) { (void)env; (void)c; field_slot(NULL, fid)->F = v; }
+    static CT jni_Get##T##Field(void *env, jo o, void *fid) { (void)env; if (!fid || !o) return (CT)0; return (CT)REF_##T(field_slot(o, fid)->F); } \
+    static void jni_Set##T##Field(void *env, jo o, void *fid, CT v) { (void)env; if (!fid || !o) return; field_slot(o, fid)->F = v; } \
+    static CT jni_GetStatic##T##Field(void *env, jo c, void *fid) { (void)env; (void)c; if (!fid) return (CT)0; jvalue *sl = field_slot(NULL, fid); if (#T[0] == 'O') enum_constant_fallback(fid, sl); return (CT)REF_##T(sl->F); } \
+    static void jni_SetStatic##T##Field(void *env, jo c, void *fid, CT v) { (void)env; (void)c; if (!fid) return; field_slot(NULL, fid)->F = v; }
 JV_TYPES(GEN_FIELDS)
 
 /* --- strings --- */

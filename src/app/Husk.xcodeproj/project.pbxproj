@@ -16,6 +16,7 @@
 		0B197878C829D66E77FD7E3F /* libANGLE-shared.dylib in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 3B1406C4A7D0F7E50BCB365B /* libANGLE-shared.dylib */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		0BB57A13C0D48446CB4FBCD5 /* TLUnityView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 211CC4F06EC722E5972D7F3B /* TLUnityView.swift */; };
 		0CFC78E800ABA22AA65D873D /* HuskFilePicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6146DAE69D6D6462FB1FB771 /* HuskFilePicker.swift */; };
+		0EC1E9FBD9A5014FB1AA9334 /* husk-tl-sdl.c in Sources */ = {isa = PBXBuildFile; fileRef = C48A155D03D70E7DC8411ED5 /* husk-tl-sdl.c */; };
 		0FA2BBF68B30B5630789922B /* husk-tl-json.c in Sources */ = {isa = PBXBuildFile; fileRef = 242DD6EEB7DA97455CD76826 /* husk-tl-json.c */; };
 		12F633F698047D7DED62A51D /* husk-tl-gameactivity.c in Sources */ = {isa = PBXBuildFile; fileRef = CFAB9C41A483CA08C1037AAC /* husk-tl-gameactivity.c */; };
 		13E70642DCB1EB118EB6B9CF /* husk-tl-egl.c in Sources */ = {isa = PBXBuildFile; fileRef = 6990DECA802D2C4493C28A4A /* husk-tl-egl.c */; };
@@ -237,6 +238,7 @@
 		9217F354B8587F75369229F8 /* husk-tl-cocos-text.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "husk-tl-cocos-text.c"; sourceTree = "<group>"; };
 		9545A76356E04E05C3174FA8 /* husk-tl-va.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "husk-tl-va.h"; sourceTree = "<group>"; };
 		97E83F7EE31FE180D0FA3105 /* husk-tl-http.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "husk-tl-http.h"; sourceTree = "<group>"; };
+		9DA435135C98A8EFBDEAF79A /* husk-tl-sdl.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "husk-tl-sdl.h"; sourceTree = "<group>"; };
 		9E133BDBB6CB711003066815 /* husk-tl-zip.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "husk-tl-zip.c"; sourceTree = "<group>"; };
 		A22242B8E3E7067D6EB2AB95 /* husk-tl-jni.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "husk-tl-jni.c"; sourceTree = "<group>"; };
 		A33191A0A3B6B70EEAB85D43 /* husk-tl-cocos.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "husk-tl-cocos.h"; sourceTree = "<group>"; };
@@ -253,6 +255,7 @@
 		BE31FE0E8BF0D132E6298CE9 /* cacert.pem */ = {isa = PBXFileReference; path = cacert.pem; sourceTree = "<group>"; };
 		C1F2A4FC567A4CCC74209DD4 /* AppDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDetailView.swift; sourceTree = "<group>"; };
 		C2150DD286E82127CB5B7C8B /* husk-tl-bionic-pthread.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "husk-tl-bionic-pthread.c"; sourceTree = "<group>"; };
+		C48A155D03D70E7DC8411ED5 /* husk-tl-sdl.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "husk-tl-sdl.c"; sourceTree = "<group>"; };
 		C48A9F257449472675C4201A /* HuskJITHelper.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = HuskJITHelper.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		C575FDA8867C3A75AB2392E3 /* husk-tl-jni-fmod.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "husk-tl-jni-fmod.c"; sourceTree = "<group>"; };
 		C6541CC4432CA2CE74901320 /* HuskLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HuskLog.swift; sourceTree = "<group>"; };
@@ -443,6 +446,8 @@
 				3B72237F810FCE0EE433FA3D /* husk-tl-nativeactivity.c */,
 				B318C3E235A47EA295C46433 /* husk-tl-nativeactivity.h */,
 				FBD3B29AEC525999260507BD /* husk-tl-opensles.c */,
+				C48A155D03D70E7DC8411ED5 /* husk-tl-sdl.c */,
+				9DA435135C98A8EFBDEAF79A /* husk-tl-sdl.h */,
 				BCA22CD85A237E860D437698 /* husk-tl-unity-app.c */,
 				2C2AAB4C0C1CD9F4CC69E4E8 /* husk-tl-unity.c */,
 				E29734A13FFD848BA212FAED /* husk-tl-unity.h */,
@@ -760,6 +765,7 @@
 				622DA3EB6E956A9ED06CF55C /* husk-tl-probe.c in Sources */,
 				308AC941024A28652B15B3F4 /* husk-tl-res.c in Sources */,
 				057DC4AF3D4EBA982E4C3FF8 /* husk-tl-scan.c in Sources */,
+				0EC1E9FBD9A5014FB1AA9334 /* husk-tl-sdl.c in Sources */,
 				BC3BB676A454632D3686E110 /* husk-tl-shim.c in Sources */,
 				08FD8CEA2066A8C013B2DF8B /* husk-tl-unity-app.c in Sources */,
 				EBA260CEB1E1AD0D117CE0D5 /* husk-tl-unity.c in Sources */,
