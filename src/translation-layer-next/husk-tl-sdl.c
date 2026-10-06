@@ -15,6 +15,7 @@
 #include "husk-tl-bionic.h"
 #include "husk-tl-dexindex.h"
 #include "husk-tl-egl.h"
+#include "husk-tl-gamepad.h"
 #include "husk-tl-jni.h"
 #include "husk-tl-ld.h"
 
@@ -142,7 +143,6 @@ HELPER(H_notification, "com/vectorunit/VuNotificationHelper")
 static void H_signature(tl_jcall *c) { c->ret = vl(tl_jni_new_string(S.signature)); }
 static void H_alert(tl_jcall *c) { tl_log_line("sdl: the game shows an alert: \"%s\" / \"%s\"", Str(c->args[0].l), Str(c->args[1].l)); }
 static void H_toast(tl_jcall *c) { tl_log_line("sdl: the game shows a toast: \"%s\"", Str(c->args[0].l)); }
-static void H_androidId(tl_jcall *c) { c->ret = vl(tl_jni_new_string("0123456789abcdef")); }
 
 /* A native of the game's own library, found by its JNI name (the game does not register them). */
 static void *game_native(const char *mangled)
@@ -195,6 +195,60 @@ static void A_initTouch(tl_jcall *c)
     void (*add)(void *, void *, int, void *) = native_of(SDLA, "nativeAddTouch", "(ILjava/lang/String;)V");
     if (add) add(tl_jni_env(), tl_jni_class_object(SDLA), 1, tl_jni_new_string("Touchscreen"));
     atomic_store(&S.touch_ready, true);
+}
+
+/*
+ * Controllers. SDL asks the activity which devices there are (SDLControllerManager.pollInputDevices) and is told of each with nativeAddJoystick; after that the
+ * buttons and axes are native calls too. The gamepad layer shows every pad as an Xbox Wireless Controller, and says what changed through a sink.
+ */
+#define PAD_ID(slot) (100 + (slot))
+static atomic_int g_pads_announced;
+static void A_pollInputDevices(tl_jcall *c)
+{
+    (void)c;
+    void (*add)(void *, void *, int, void *, void *, int, int, int, int, int, int, uint8_t) =
+        native_of(SDLCTRL, "nativeAddJoystick", "(ILjava/lang/String;Ljava/lang/String;IIIIIIZ)V");
+    void (*remove)(void *, void *, int) = native_of(SDLCTRL, "nativeRemoveJoystick", "(I)V");
+    for (int slot = 0; slot < TL_PADS; slot++) {
+        bool connected = tl_pad_connected(slot), announced = (atomic_load(&g_pads_announced) >> slot) & 1;
+        if (connected && !announced && add) {
+            char desc[40]; snprintf(desc, sizeof(desc), "husk-xbox-%d", slot);
+            /* 0x045e:0x02fd, an Xbox One S over Bluetooth; buttons A B X Y Back Guide Start Lstick Rstick L1 R1 and the D-pad; six axes (two sticks and two triggers), no hat -- the D-pad is buttons. */
+            add(tl_jni_env(), tl_jni_class_object(SDLCTRL), PAD_ID(slot), tl_jni_new_string("Xbox Wireless Controller"), tl_jni_new_string(desc), 0x045e, 0x02fd, 0x7fff, 6, 0x003f, 0, 0);
+            atomic_fetch_or(&g_pads_announced, 1 << slot);
+        } else if (!connected && announced && remove) {
+            remove(tl_jni_env(), tl_jni_class_object(SDLCTRL), PAD_ID(slot));
+            atomic_fetch_and(&g_pads_announced, ~(1 << slot));
+        }
+    }
+}
+
+/* Android key codes the gamepad layer sends, in the order of SDL's own table. */
+static void pad_key(jobj *ev, int device, int action, int keycode, int64_t down_ms, int64_t event_ms)
+{
+    (void)down_ms; (void)event_ms;
+    int slot = device - 41;                                     /* the gamepad layer's device ids start at 41 */
+    if (getenv("TL_PAD_TRACE")) tl_log_line("sdl: pad key %s %d on device %d (slot %d, announced %#x)", action == 0 ? "down" : "up", keycode, device, slot, atomic_load(&g_pads_announced));
+    if (slot >= 0 && slot < TL_PADS && ((atomic_load(&g_pads_announced) >> slot) & 1)) {
+        uint8_t (*fn)(void *, void *, int, int) = native_of(SDLCTRL, action == 0 ? "onNativePadDown" : "onNativePadUp", "(II)Z");
+        if (fn) fn(tl_jni_env(), tl_jni_class_object(SDLCTRL), PAD_ID(slot), keycode);
+    }
+    tl_jni_unref(ev);
+}
+static void pad_motion(jobj *ev, int device, int source, int64_t down_ms, int64_t event_ms)
+{
+    (void)source; (void)down_ms; (void)event_ms;
+    int slot = device - 41;
+    float a[48];
+    if (slot >= 0 && slot < TL_PADS && ((atomic_load(&g_pads_announced) >> slot) & 1) && tl_input_event_axes(ev, a)) {
+        void (*joy)(void *, void *, int, int, float) = native_of(SDLCTRL, "onNativeJoy", "(IIF)V");
+        if (joy) {
+            /* Android axes X, Y, Z, RZ, LTRIGGER, RTRIGGER are SDL's axes 0..5, each normalised to -1..1 (a trigger at rest is -1). */
+            const float v[6] = { a[0], a[1], a[11], a[14], a[17] * 2.0f - 1.0f, a[18] * 2.0f - 1.0f };
+            for (int i = 0; i < 6; i++) joy(tl_jni_env(), tl_jni_class_object(SDLCTRL), PAD_ID(slot), i, v[i]);
+        }
+    }
+    tl_jni_unref(ev);
 }
 
 #define M_(c, n, s, f) { c, n, s, f }
@@ -251,9 +305,8 @@ static const tl_jhle k_hle[] = {
     M_("com/vectorunit/VuAdHelper", "canShowPrivacyOptions", "()Z", A_false),
     M_("com/vectorunit/VuAnalyticsHelper", "getInstance", "()Lcom/vectorunit/VuAnalyticsHelper;", H_analytics),
     M_("com/vectorunit/VuNotificationHelper", "getInstance", "()Lcom/vectorunit/VuNotificationHelper;", H_notification),
-    M_("android/provider/Settings$Secure", "getString", "(Landroid/content/ContentResolver;Ljava/lang/String;)Ljava/lang/String;", H_androidId),
     M_(SDLAUDIO, "audioSetThreadPriority", "(ZI)V", A_void),
-    M_(SDLCTRL, "pollInputDevices", "()V", A_void),
+    M_(SDLCTRL, "pollInputDevices", "()V", A_pollInputDevices),
     M_(SDLCTRL, "pollHapticDevices", "()V", A_void),
     M_(SDLCTRL, "hapticRun", "(IFI)V", A_void),
     M_(SDLCTRL, "hapticRumble", "(IFFI)V", A_void),
@@ -324,6 +377,10 @@ bool tl_sdl_start(const tl_ga_config *cfg, const char *activity_class)
     for (int i = 0; fmod[i]; i++) load_library(fmod[i]);
     if (tl_jni_pending()) tl_jni_clear();
     tl_log_line("sdl: libraries loaded");
+    /* The D-pad as buttons (DPAD_UP...), the way SDL maps them, rather than as the hat the gamepad layer sends by default. Read by the layer at the first controller update. */
+    setenv("TL_PAD_DPAD", "keys", 0);
+    static const tl_pad_sink sink = { pad_key, pad_motion };
+    tl_pad_set_sink(&sink);
     S.started = true;
     return true;
 }
@@ -385,7 +442,8 @@ static void *ui_main(void *arg)
     if ((vv = native_of(SDLA, "onNativeSurfaceChanged", "()V"))) vv(env, cls);
     void (*focus)(void *, void *, uint8_t) = native_of(SDLA, "nativeFocusChanged", "(Z)V");
     if (focus) focus(env, cls, 1);
-    if ((vv = native_of(SDLA, "nativeResume", "()V"))) vv(env, cls);
+    /* No nativeResume: SDLActivity does not send one when it starts the app thread, and SDL starts un-paused. A resume that was not preceded by a pause makes SDL release
+     * the GL context it believes it saved, and with nothing saved there is nothing to put back. */
     tl_log_line("sdl: lifecycle delivered");
 
     pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 8u << 20);
@@ -396,7 +454,6 @@ static void *ui_main(void *arg)
     for (int i = 0; i < 300 && tl_egl_frames_presented() == 0; i++) usleep(10000);
     usleep(100000);
     if (focus) focus(env, cls, 1);
-    if ((vv = native_of(SDLA, "nativeResume", "()V"))) vv(env, cls);
 
     /* The activity's message loop: nothing to serve beyond keeping the thread (and its looper) alive. */
     int (*poll_once)(int, int *, int *, void **) = tl_bionic_find("ALooper_pollOnce");
@@ -432,6 +489,9 @@ void tl_sdl_touch(int phase, int id, float x, float y)
 
 void tl_sdl_set_paused(bool paused)
 {
+    /* SDL starts un-paused, and a resume that follows no pause makes it release a GL context it never saved. So only a real change is passed on. */
+    static atomic_bool is_paused;
+    if (atomic_exchange(&is_paused, paused) == paused) return;
     void (*vv)(void *, void *) = tl_jni_native(SDLA, paused ? "nativePause" : "nativeResume", "()V");
     if (vv) vv(tl_jni_env(), tl_jni_class_object(SDLA));
 }

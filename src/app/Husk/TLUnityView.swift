@@ -10,6 +10,7 @@ enum TLNativeEngine {
     case unity     // Subway Surfers and other Unity games: portrait, driven by UnityPlayer's own thread
     case cocos     // Geometry Dash and other cocos2d-x games: landscape, driven by a GL thread of our own
     case minecraft // Minecraft and other GameActivity games: landscape, multi-touch, the game runs its own threads
+    case sdl       // Beach Buggy Racing 2 and other SDL3 games: landscape, multi-touch, the game runs its own threads
 }
 
 /// A Unity game's screen: one CAMetalLayer that the game's own GL (ANGLE over Metal) presents into.
@@ -24,6 +25,8 @@ final class TLUnityUIView: UIView, UIKeyInput {
     nonisolated(unsafe) static weak var cocosView: TLUnityUIView?
 
     private let apk: String
+    /// The app's other APKs -- splits, an asset pack -- which an SDL game's libraries and data may be in.
+    private let extraApks: [String]
     private let dataDir: String
     private let engine: TLNativeEngine
     private var launched = false
@@ -37,10 +40,11 @@ final class TLUnityUIView: UIView, UIKeyInput {
     private let stats = UILabel()
     private var statsTimer: Timer?
 
-    init(apk: String, dataDir: String, engine: TLNativeEngine) {
+    init(apk: String, extraApks: [String] = [], dataDir: String, engine: TLNativeEngine) {
         self.apk = apk
         self.dataDir = dataDir
         self.engine = engine
+        self.extraApks = extraApks
         super.init(frame: .zero)
         backgroundColor = .black
         isMultipleTouchEnabled = true
@@ -134,9 +138,18 @@ final class TLUnityUIView: UIView, UIKeyInput {
             try? session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
             try? session.setActive(true)
         }
-        HuskLog.log("tl", "native: launching \(apk) at \(width)x\(height) (\(engine == .cocos ? "cocos2d-x" : engine == .minecraft ? "gameactivity" : "unity"))")
+        HuskLog.log("tl", "native: launching \(apk) at \(width)x\(height) (\(engine == .cocos ? "cocos2d-x" : engine == .minecraft ? "gameactivity" : engine == .sdl ? "sdl" : "unity"))")
         let started: Bool
         switch engine {
+        case .sdl:
+            // Splits and the asset pack are part of the app; the game's libraries and data may be in any of them.
+            for extra in extraApks.prefix(3) { husk_native_add_package(extra) }
+            // The notch and the rounded corners, in the surface's pixels: the game keeps its controls out of them.
+            if let inset = window?.safeAreaInsets {
+                let k = contentScaleFactor
+                husk_sdl_set_safe_insets(Int32(inset.left * k), Int32(inset.top * k), Int32(inset.right * k), Int32(inset.bottom * k))
+            }
+            started = husk_sdl_launch(apk, dataDir, layerPtr, Int32(width), Int32(height), angle, ca)
         case .cocos: started = husk_cocos_launch(apk, dataDir, layerPtr, Int32(width), Int32(height), angle, ca)
         case .minecraft: started = husk_gameactivity_launch(apk, dataDir, layerPtr, Int32(width), Int32(height), angle, ca)
         case .unity: started = husk_unity_launch(apk, dataDir, layerPtr, Int32(width), Int32(height), angle, ca)
@@ -263,6 +276,7 @@ final class TLUnityUIView: UIView, UIKeyInput {
 
 struct TLUnityScreen: UIViewRepresentable {
     let apk: String
+    var extraApks: [String] = []
     let dataDir: String
     var engine: TLNativeEngine = .unity
     var onStats: ((String) -> Void)? = nil
@@ -272,7 +286,7 @@ struct TLUnityScreen: UIViewRepresentable {
 
     func makeUIView(context: Context) -> TLUnityUIView {
         if let view = Self.shared[apk] { view.onStats = onStats; return view }
-        let view = TLUnityUIView(apk: apk, dataDir: dataDir, engine: engine)
+        let view = TLUnityUIView(apk: apk, extraApks: extraApks, dataDir: dataDir, engine: engine)
         view.onStats = onStats
         Self.shared[apk] = view
         return view
@@ -461,11 +475,17 @@ struct TLCocosAttemptView: View {
     private var showLog: Bool { get { showLogSetting && devInfo } nonmutating set { showLogSetting = newValue } }
 
     /// Geometry Dash and the like are cocos2d-x; Minecraft is built on GameActivity. Both are landscape.
-    private var engine: TLNativeEngine { app.report?.nativeEngine == .minecraft ? .minecraft : .cocos }
+    private var engine: TLNativeEngine {
+        switch app.report?.nativeEngine {
+        case .minecraft: return .minecraft
+        case .sdl: return .sdl
+        default: return .cocos
+        }
+    }
 
     private var dataDir: String {
         TranslationLayer.root.appendingPathComponent(app.id, isDirectory: true)
-            .appendingPathComponent(engine == .minecraft ? "minecraft-data" : "cocos-data", isDirectory: true).path
+            .appendingPathComponent(engine == .minecraft ? "minecraft-data" : engine == .sdl ? "sdl-data" : "cocos-data", isDirectory: true).path
     }
 
     /// Another game is already loaded in this session, and an engine cannot be loaded twice.
@@ -490,7 +510,7 @@ struct TLCocosAttemptView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if let apk = app.apks.first {
                     HStack(spacing: 0) {
-                        TLUnityScreen(apk: apk, dataDir: dataDir, engine: engine, onStats: { stats = $0 })
+                        TLUnityScreen(apk: apk, extraApks: Array(app.apks.dropFirst()), dataDir: dataDir, engine: engine, onStats: { stats = $0 })
                             .background(Color.black)
                         if showLog { logPanel.frame(width: 320) }
                     }

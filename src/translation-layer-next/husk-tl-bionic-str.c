@@ -516,7 +516,7 @@ const tl_bionic_entry tl_tab_str[] = {
     TL_DIRECT(memchr), TL_DIRECT(memcmp), TL_DIRECT(memcpy), TL_DIRECT(memmove), TL_DIRECT(memset),
     TL_WRAP("memrchr", b_memrchr), TL_DIRECT(strcasecmp), TL_DIRECT(strcasestr), TL_DIRECT(strcat),
     TL_DIRECT(strchr), TL_DIRECT(strcmp), TL_DIRECT(strcoll), TL_DIRECT(strcoll_l), TL_DIRECT(strcpy),
-    TL_DIRECT(strcspn), TL_DIRECT(strdup), TL_DIRECT(strlcpy), TL_DIRECT(strlen), TL_DIRECT(strncmp),
+    TL_DIRECT(strcspn), TL_DIRECT(strdup), TL_DIRECT(strlcpy), TL_DIRECT(strlcat), TL_DIRECT(strlen), TL_DIRECT(strncmp),
     TL_DIRECT(strncpy), TL_DIRECT(strnlen), TL_DIRECT(strpbrk), TL_DIRECT(strrchr), TL_DIRECT(strspn),
     TL_DIRECT(strstr), TL_DIRECT(strtok_r), TL_DIRECT(strxfrm), TL_DIRECT(strxfrm_l),
     TL_WRAP("strerror", b_strerror), TL_WRAP("strerror_r", b_strerror_r), TL_WRAP("strsignal", b_strsignal),
@@ -595,6 +595,7 @@ const tl_bionic_entry tl_tab_str[] = {
 static char *b___strcpy_chk(char *d, const char *s, size_t dl) { size_t n = strlen(s); if (n >= dl) chk_fail("__strcpy_chk"); memcpy(d, s, n + 1); return d; }
 static char *b___strcat_chk(char *d, const char *s, size_t dl) { size_t a = strlen(d), n = strlen(s); if (a + n >= dl) chk_fail("__strcat_chk"); memcpy(d + a, s, n + 1); return d; }
 static char *b___strncpy_chk(char *d, const char *s, size_t n, size_t dl) { if (n > dl) chk_fail("__strncpy_chk"); return strncpy(d, s, n); }
+static size_t b___strlcat_chk(char *d, const char *s, size_t n, size_t dl) { if (n > dl) chk_fail("__strlcat_chk"); return strlcat(d, s, n); }
 static size_t b___strlcpy_chk(char *d, const char *s, size_t n, size_t dl) { if (n > dl) chk_fail("__strlcpy_chk"); return strlcpy(d, s, n); }
 static char *b___strrchr_chk(const char *s, int c, size_t len) { (void)len; return strrchr(s, c); }
 static char *b___fgets_chk(char *buf, int size, size_t bufsize, void *f) { if ((size_t)size > bufsize) chk_fail("__fgets_chk"); return b_fgets(buf, size, f); }
@@ -613,7 +614,7 @@ static size_t b_wcsrtombs(char *dst, const wchar_t **src, size_t len, void *ps) 
 
 const tl_bionic_entry tl_tab_str2[] = {
     TL_WRAP("__strcpy_chk", b___strcpy_chk), TL_WRAP("__strcat_chk", b___strcat_chk), TL_WRAP("__strncpy_chk", b___strncpy_chk),
-    TL_WRAP("__strlcpy_chk", b___strlcpy_chk), TL_WRAP("__strrchr_chk", b___strrchr_chk), TL_WRAP("__fgets_chk", b___fgets_chk),
+    TL_WRAP("__strlcpy_chk", b___strlcpy_chk), TL_WRAP("__strlcat_chk", b___strlcat_chk), TL_WRAP("__strrchr_chk", b___strrchr_chk), TL_WRAP("__fgets_chk", b___fgets_chk),
     TL_WRAP("__FD_CLR_chk", b___FD_CLR_chk),
     TL_DATA("stdin", &g_stdin_var), TL_DATA("stdout", &g_stdout_var), TL_DATA("stderr", &g_stderr_var),
     TL_WRAP("perror", b_perror), TL_WRAP("rewind", b_rewind), TL_WRAP("fputwc", b_fputwc), TL_WRAP("popen", b_popen), TL_WRAP("pclose", b_pclose),

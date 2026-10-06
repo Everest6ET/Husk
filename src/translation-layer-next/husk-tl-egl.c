@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "husk-tl-bionic.h"
+#include "husk-tl-ld.h"
 #include "husk-tl-xmem.h"
 
 void *tl_nwindow_native(void *window);
@@ -163,7 +164,13 @@ static EGLBoolean w_eglMakeCurrent(EGLDisplay d, EGLSurface dr, EGLSurface rd, E
     EGLBoolean ok = E.ready ? a_eglMakeCurrent(d, dr, rd, c) : EGL_FALSE;
     static int trace = -1;
     if (trace < 0) trace = getenv("TL_EGL_TRACE") ? 1 : 0;
-    if (trace || !ok) tl_log_line("egl: eglMakeCurrent(draw %p, read %p, context %p) -> %s%s%#x", dr, rd, c, ok ? "true" : "false", ok ? "" : ", eglGetError ", ok ? 0 : (E.ready ? a_eglGetError() : 0x3001));
+    if (trace || !ok) {
+        char who[32] = ""; pthread_getname_np(pthread_self(), who, sizeof(who));
+        const void *lr = __builtin_return_address(0); const char *lib = NULL; const void *base = NULL;
+        const char *sym = tl_ld_symbol_at(lr, &lib, &base);
+        tl_log_line("egl: eglMakeCurrent(draw %p, read %p, context %p) -> %s%s%#x  [thread '%s', called from %s %s+%#lx]", dr, rd, c, ok ? "true" : "false", ok ? "" : ", eglGetError ", ok ? 0 : (E.ready ? a_eglGetError() : 0x3001),
+                    who, lib ? lib : "?", sym ? sym : "?", base ? (unsigned long)((const char *)lr - (const char *)base) : 0ul);
+    }
     return ok;
 }
 PASS_BOOL(eglSwapInterval, (EGLDisplay d, EGLint i), (d, i))

@@ -166,6 +166,15 @@ jobj *tl_input_joystick_event(int device, int source, int64_t down_ms, int64_t e
     return o;
 }
 
+/* The axes of a joystick event (by Android axis number), for an engine that wants values rather than an event object. False if it is not one. */
+bool tl_input_event_axes(const jobj *ev, float *out)
+{
+    const motion *m = ev ? (const motion *)ev->native : NULL;
+    if (!m || !m->joystick) return false;
+    memcpy(out, m->axes, sizeof(m->axes));
+    return true;
+}
+
 #define K(c, n, s, f) { c, n, s, f }
 static const tl_jhle k_input_hle[] = {
     K("android/view/MotionEvent", "getAction", "()I", ME_getAction),

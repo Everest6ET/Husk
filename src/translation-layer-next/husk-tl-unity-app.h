@@ -34,6 +34,16 @@ bool husk_cocos_launch(const char *apk, const char *data_dir, void *metal_layer,
 bool husk_gameactivity_launch(const char *apk, const char *data_dir, void *metal_layer, int width, int height,
                               const char *angle_dylib, const char *ca_bundle);
 
+/*
+ * The same for a game built on SDL3 (Beach Buggy Racing 2): landscape, sound, multi-touch. Its libraries may be in a split, and its data in an asset pack, so every
+ * other APK of the app is given first with husk_native_add_package. The game's activity is the launcher activity of the manifest.
+ */
+bool husk_sdl_launch(const char *apk, const char *data_dir, void *metal_layer, int width, int height,
+                     const char *angle_dylib, const char *ca_bundle);
+/* Another APK of the app about to be launched (a split, an asset pack). Before the launch call; at most three. */
+void husk_native_add_package(const char *apk);
+/* The screen's safe-area insets in pixels, for a game that keeps its controls out of a notch (SDL games ask). Before the launch call, or any time. */
+void husk_sdl_set_safe_insets(int left, int top, int right, int bottom);
 /* Soft keyboard for a cocos2d-x game. The handler is told (on the game's GL thread) 0 = toggle, 1 = show, 2 = hide. */
 void husk_cocos_set_keyboard_handler(void (*handler)(int action));
 void husk_cocos_insert_text(const char *utf8);

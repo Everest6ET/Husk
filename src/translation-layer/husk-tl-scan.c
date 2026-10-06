@@ -65,7 +65,7 @@ static bool is_dex(const char *name)
 
 /* Recognised by the libraries an engine always ships. */
 typedef struct engine_scan {
-    bool il2cpp, unity, mono_unity, flutter, react, dotnet, godot, unreal, cocos, gdx, minecraft;
+    bool il2cpp, unity, mono_unity, flutter, react, dotnet, godot, unreal, cocos, gdx, minecraft, sdl;
 } engine_scan;
 
 static void note_engine(engine_scan *s, const char *f)
@@ -81,6 +81,7 @@ static void note_engine(engine_scan *s, const char *f)
     else if (!strncmp(f, "libcocos", 8)) s->cocos = true;
     else if (!strcmp(f, "libgdx.so")) s->gdx = true;
     else if (!strcmp(f, "libminecraftpe.so")) s->minecraft = true;
+    else if (!strcmp(f, "libSDL3.so")) s->sdl = true;
 }
 
 static const char *engine_name(const engine_scan *s)
@@ -94,6 +95,7 @@ static const char *engine_name(const engine_scan *s)
     if (s->unreal) return "Unreal Engine";
     if (s->cocos) return "Cocos";
     if (s->minecraft) return "Minecraft";
+    if (s->sdl) return "SDL";
     if (s->gdx) return "libGDX";
     return NULL;
 }

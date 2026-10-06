@@ -27,11 +27,12 @@
 #include "husk-tl-cocos.h"
 #include "husk-tl-gameactivity.h"
 #include "husk-tl-gamepad.h"
+#include "husk-tl-sdl.h"
 
 void tl_hle_set_ca_bundle(const char *path);
 extern int tl_log_sink_fd;
 
-enum { ENGINE_UNITY = 0, ENGINE_COCOS = 1, ENGINE_GAMEACTIVITY = 2 };
+enum { ENGINE_UNITY = 0, ENGINE_COCOS = 1, ENGINE_GAMEACTIVITY = 2, ENGINE_SDL = 3 };
 
 static unsigned long engine_frames(void);
 
@@ -39,6 +40,8 @@ static struct {
     atomic_int state;
     int engine;
     char apk[1024], data[1024], package[160], angle[1024], ca[1024];
+    char extra[3][1024];
+    int nextra;
     void *layer;
     int width, height;
 } A;
@@ -158,6 +161,60 @@ static void *heartbeat_thread(void *arg)
     }
 }
 
+/*
+ * The activity a launcher starts: the <activity> that holds <category android:name="android.intent.category.LAUNCHER">, as a JNI class name. A class named in the
+ * manifest with a leading dot (or with no dot) belongs to the app's package.
+ */
+static uint32_t rd32(const uint8_t *p);
+static uint16_t rd16(const uint8_t *p);
+static bool pool_string(const uint8_t *pool, size_t pool_size, uint32_t index, char *out, size_t n);
+static bool manifest_launcher_activity(const char *apk, const char *package, char *out, size_t cap)
+{
+    tl_zip z; char err[160];
+    if (!tl_zip_open(&z, apk, err, sizeof(err))) return false;
+    bool ok = false;
+    const tl_zip_entry *e = tl_zip_find(&z, "AndroidManifest.xml");
+    const uint8_t *data; size_t len; bool owned = false;
+    if (e && tl_zip_data(&z, e, 8u << 20, &data, &len, &owned, err, sizeof(err)) && len > 8 && rd16(data) == 0x0003) {
+        const uint8_t *pool = NULL; size_t pool_size = 0;
+        char activity[200] = "";
+        for (size_t off = rd16(data + 2); off + 8 <= len && !ok; ) {
+            uint16_t type = rd16(data + off); uint32_t size = rd32(data + off + 4);
+            if (size < 8 || off + size > len) break;
+            if (type == 0x0001) { pool = data + off; pool_size = size; }
+            else if ((type == 0x0102 || type == 0x0103) && pool && size >= 24) {
+                const uint8_t *el = data + off;
+                char name[64] = "";
+                pool_string(pool, pool_size, rd32(el + 20), name, sizeof(name));
+                if (type == 0x0103) { if (!strcmp(name, "activity")) activity[0] = 0; }
+                else {
+                    uint16_t astart = rd16(el + 24), asize = rd16(el + 26), acount = rd16(el + 28);
+                    for (unsigned i = 0; i < acount; i++) {
+                        const uint8_t *at = el + 16 + astart + (size_t)i * asize;
+                        char an[64] = "", av[200] = "";
+                        if (!pool_string(pool, pool_size, rd32(at + 4), an, sizeof(an)) || strcmp(an, "name")) continue;
+                        if (rd32(at + 8) != 0xFFFFFFFFu) pool_string(pool, pool_size, rd32(at + 8), av, sizeof(av));
+                        if (!strcmp(name, "activity")) snprintf(activity, sizeof(activity), "%s", av);
+                        else if (!strcmp(name, "category") && !strcmp(av, "android.intent.category.LAUNCHER") && activity[0]) ok = true;
+                    }
+                }
+            }
+            off += size;
+        }
+        if (ok) {
+            char full[260];
+            if (activity[0] == '.') snprintf(full, sizeof(full), "%s%s", package, activity);
+            else if (!strchr(activity, '.')) snprintf(full, sizeof(full), "%s.%s", package, activity);
+            else snprintf(full, sizeof(full), "%s", activity);
+            for (char *c = full; *c; c++) if (*c == '.') *c = '/';
+            snprintf(out, cap, "%s", full);
+        }
+    }
+    if (owned) free((void *)data);
+    tl_zip_close(&z);
+    return ok;
+}
+
 static void *launch_thread(void *arg)
 {
     (void)arg;
@@ -184,6 +241,21 @@ static void *launch_thread(void *arg)
         tl_log_line("gameactivity: starting %s as %s, %dx%d", A.apk, A.package, A.width, A.height);
         tl_audio_install();
         ok = tl_ga_start(&cfg) && tl_ga_run();
+    } else if (A.engine == ENGINE_SDL) {
+        tl_ga_config cfg = {
+            .apk_path = A.apk, .data_dir = A.data, .package_name = A.package, .width = A.width, .height = A.height,
+            .metal_layer = A.layer, .angle_egl = A.angle, .angle_gles = NULL, .frame_dir = NULL, .frame_every = 0,
+        };
+        char activity[260];
+        if (!manifest_launcher_activity(A.apk, A.package, activity, sizeof(activity))) {
+            tl_log_line("sdl: the manifest names no launcher activity");
+            atomic_store(&A.state, HUSK_UNITY_FAILED);
+            return NULL;
+        }
+        for (int i = 0; i < A.nextra; i++) if (!tl_sdl_add_package(A.extra[i])) tl_log_line("sdl: cannot add %s", A.extra[i]);
+        tl_log_line("sdl: starting %s (%s) as %s, %dx%d", A.apk, activity, A.package, A.width, A.height);
+        tl_audio_install();
+        ok = tl_sdl_start(&cfg, activity) && tl_sdl_run();
     } else if (A.engine == ENGINE_COCOS) {
         tl_cocos_config cfg = {
             .apk_path = A.apk, .data_dir = A.data, .package_name = A.package, .width = A.width, .height = A.height,
@@ -224,7 +296,7 @@ static bool launch(int engine, const char *apk, const char *data_dir, void *meta
     snprintf(A.angle, sizeof(A.angle), "%s", angle_dylib);
     snprintf(A.ca, sizeof(A.ca), "%s", ca_bundle ? ca_bundle : "");
     A.layer = metal_layer; A.width = width; A.height = height;
-    if (!husk_unity_package_name(apk, A.package, sizeof(A.package))) snprintf(A.package, sizeof(A.package), "%s", engine == ENGINE_GAMEACTIVITY ? "com.mojang.minecraftpe" : engine == ENGINE_COCOS ? "com.cocos.game" : "com.unity.game");
+    if (!husk_unity_package_name(apk, A.package, sizeof(A.package))) snprintf(A.package, sizeof(A.package), "%s", engine == ENGINE_GAMEACTIVITY ? "com.mojang.minecraftpe" : engine == ENGINE_SDL ? "com.sdl.game" : engine == ENGINE_COCOS ? "com.cocos.game" : "com.unity.game");
     pthread_attr_t at;
     pthread_attr_init(&at);
     pthread_attr_setstacksize(&at, 4u << 20);
@@ -254,6 +326,17 @@ bool husk_gameactivity_launch(const char *apk, const char *data_dir, void *metal
     return launch(ENGINE_GAMEACTIVITY, apk, data_dir, metal_layer, width, height, angle_dylib, ca_bundle);
 }
 
+bool husk_sdl_launch(const char *apk, const char *data_dir, void *metal_layer, int width, int height,
+                     const char *angle_dylib, const char *ca_bundle)
+{
+    return launch(ENGINE_SDL, apk, data_dir, metal_layer, width, height, angle_dylib, ca_bundle);
+}
+void husk_native_add_package(const char *apk)
+{
+    if (apk && A.nextra < 3 && atomic_load(&A.state) == HUSK_UNITY_IDLE) snprintf(A.extra[A.nextra++], sizeof(A.extra[0]), "%s", apk);
+}
+void husk_sdl_set_safe_insets(int left, int top, int right, int bottom) { tl_sdl_set_safe_insets(left, top, right, bottom); }
+
 /* ---------------------------------------------------------------- controllers */
 
 void husk_gamepad_connect(int slot, const char *name) { tl_pad_connect(slot, name); }
@@ -280,16 +363,16 @@ int husk_unity_state(void)
 }
 static unsigned long engine_frames(void)
 {
-    return A.engine == ENGINE_GAMEACTIVITY ? tl_ga_frames() : A.engine == ENGINE_COCOS ? tl_cocos_frames() : tl_unity_frames();
+    return A.engine == ENGINE_SDL ? tl_sdl_frames() : A.engine == ENGINE_GAMEACTIVITY ? tl_ga_frames() : A.engine == ENGINE_COCOS ? tl_cocos_frames() : tl_unity_frames();
 }
 unsigned long husk_unity_frames(void) { return engine_frames(); }
 void husk_unity_perf_snapshot(husk_unity_perf *out)
 {
-    if (A.engine == ENGINE_GAMEACTIVITY) {
+    if (A.engine == ENGINE_GAMEACTIVITY || A.engine == ENGINE_SDL) {
         /* The game paces its own frames; the rate is how many it presented since the last look. */
         static unsigned long last; static struct timespec since;
         struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
-        unsigned long f = tl_ga_frames();
+        unsigned long f = engine_frames();
         double dt = since.tv_sec ? (now.tv_sec - since.tv_sec) + (now.tv_nsec - since.tv_nsec) / 1e9 : 0;
         out->fps = dt > 0.05 ? (double)(f - last) / dt : 0;
         out->mean_ms = out->fps > 0 ? 1000.0 / out->fps : 0; out->max_ms = 0;
@@ -302,13 +385,15 @@ void husk_unity_perf_snapshot(husk_unity_perf *out)
 void husk_unity_touch(int phase, int id, float x, float y)
 {
     if (atomic_load(&A.state) != HUSK_UNITY_RUNNING) return;
-    if (A.engine == ENGINE_GAMEACTIVITY) tl_ga_touch(phase, id, x, y);
+    if (A.engine == ENGINE_SDL) tl_sdl_touch(phase, id, x, y);
+    else if (A.engine == ENGINE_GAMEACTIVITY) tl_ga_touch(phase, id, x, y);
     else if (A.engine == ENGINE_COCOS) tl_cocos_touch(phase, id, x, y); else tl_unity_touch(phase, id, x, y);
 }
 void husk_unity_set_paused(bool paused)
 {
     if (atomic_load(&A.state) != HUSK_UNITY_RUNNING) return;
-    if (A.engine == ENGINE_GAMEACTIVITY) { tl_ga_set_paused(paused); tl_audio_set_paused(paused); }
+    if (A.engine == ENGINE_SDL) { tl_sdl_set_paused(paused); tl_audio_set_paused(paused); }
+    else if (A.engine == ENGINE_GAMEACTIVITY) { tl_ga_set_paused(paused); tl_audio_set_paused(paused); }
     else if (A.engine == ENGINE_COCOS) { tl_cocos_set_paused(paused); tl_audio_set_paused(paused); } else tl_unity_set_paused(paused);
 }
 

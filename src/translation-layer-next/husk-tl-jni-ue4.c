@@ -139,7 +139,8 @@ static void GA_nullObj(tl_jcall *c) { c->ret.l = NULL; }
 static void GA_emptyString(tl_jcall *c) { c->ret = vl(tl_jni_new_string("")); }
 static void GA_commandLine(tl_jcall *c) { c->ret = vl(tl_jni_new_string(getenv("TL_UE4_CMDLINE") ? getenv("TL_UE4_CMDLINE") : "")); }
 static void GA_fontDir(tl_jcall *c) { c->ret = vl(tl_jni_new_string("/system/fonts/")); }
-static void GA_androidId(tl_jcall *c) { c->ret = vl(tl_jni_new_string("0123456789abcdef")); }
+const char *tl_hle_android_id(void);
+static void GA_androidId(tl_jcall *c) { c->ret = vl(tl_jni_new_string(tl_hle_android_id())); }
 static void GA_refresh(tl_jcall *c) { c->ret = vi(60); }
 static void GA_refreshRates(tl_jcall *c) { jobj *a = tl_jni_new_prim_array('I', 1); ((int *)a->arr.data)[0] = 60; c->ret = vl(a); }
 static void GA_orientation(tl_jcall *c) { c->ret = vi(1); }                    /* landscape */

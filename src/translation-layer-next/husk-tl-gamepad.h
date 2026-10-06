@@ -46,6 +46,7 @@ bool tl_pad_connected(int slot);
 
 /* the objects in husk-tl-jni-input.c */
 jobj *tl_input_key_event(int action, int keycode, int device, int source, int repeat, int64_t down_ms, int64_t event_ms);
+bool tl_input_event_axes(const jobj *ev, float *out48);        /* the axes of a joystick event, by Android axis number; false if it is not one */
 jobj *tl_input_joystick_event(int device, int source, int64_t down_ms, int64_t event_ms, const float *axes);
 
 #ifdef __cplusplus

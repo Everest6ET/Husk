@@ -58,6 +58,7 @@ extension TLReport {
         if engine?.hasPrefix("Unity") == true { return .unity }
         if engine == "Cocos" { return .cocos }
         if engine == "Minecraft" { return .minecraft }
+        if engine == "SDL" { return .sdl }
         return nil
     }
 
@@ -67,14 +68,14 @@ extension TLReport {
     var runsOnNativeRuntime: Bool { nativeEngine != nil }
 
     /// "Unity" or "Cocos2d-x", for words on screen.
-    var nativeEngineName: String { nativeEngine == .cocos ? "Cocos2d-x" : nativeEngine == .minecraft ? "Minecraft" : "Unity" }
+    var nativeEngineName: String { nativeEngine == .cocos ? "Cocos2d-x" : nativeEngine == .minecraft ? "Minecraft" : nativeEngine == .sdl ? "SDL" : "Unity" }
 
     var displaySummary: String {
         guard runsOnNativeRuntime else { return summary }
         let flagged = libraries.filter { $0.abi == "arm64-v8a" && $0.status != "ok" }.count
         let total = libraries.filter { $0.abi == "arm64-v8a" }.count
         var text = "A \(nativeEngineName) game. It runs through Husk's native runtime, which loads its \(total) arm64 libraries itself."
-        if nativeEngine == .cocos || nativeEngine == .minecraft { text += " It is a landscape game: Husk turns the screen for it." }
+        if nativeEngine == .cocos || nativeEngine == .minecraft || nativeEngine == .sdl { text += " It is a landscape game: Husk turns the screen for it." }
         if flagged > 0 {
             text += " \(flagged) of them use tricks the older loader could not handle; the native runtime handles those too, "
                   + "except for optional anti-tamper code, which it leaves out."
@@ -180,7 +181,7 @@ final class TranslationLayerStore: ObservableObject {
         guard busy == nil, let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
         let dropped = ((try? FileManager.default.contentsOfDirectory(at: docs, includingPropertiesForKeys: nil,
                                                                       options: [.skipsHiddenFiles])) ?? [])
-            .filter { $0.pathExtension.lowercased() == "apk" }
+            .filter { $0.pathExtension.lowercased() == "apk" || BundleUnpacker.extensions.contains($0.pathExtension.lowercased()) }
         guard let first = dropped.first else { return }
         HuskLog.log("tl", "adopting \(dropped.count) APK(s) found in the Husk folder")
         add([first], move: true)
@@ -218,7 +219,12 @@ final class TranslationLayerStore: ObservableObject {
     nonisolated private static func load(_ dir: URL) -> TLApp? {
         let fm = FileManager.default
         guard let files = try? fm.contentsOfDirectory(atPath: dir.path) else { return nil }
-        let apks = files.filter { $0.lowercased().hasSuffix(".apk") }.sorted()
+        let apks = files.filter { $0.lowercased().hasSuffix(".apk") }
+            .sorted { a, b in
+                // The base first: it is the one a game is started from, and the others are its splits and packs.
+                let ra = BundleUnpacker.rank(a), rb = BundleUnpacker.rank(b)
+                return ra != rb ? ra < rb : a < b
+            }
             .map { dir.appendingPathComponent($0).path }
         guard let first = apks.first else { return nil }
 
@@ -245,6 +251,13 @@ final class TranslationLayerStore: ObservableObject {
                 // Security-scoped: the picker's URL is only readable inside this pair.
                 let scoped = url.startAccessingSecurityScopedResource()
                 defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                // A bundle (.xapk, .apkm, .apks) is a zip of an app's APKs: take them out, and do not keep the bundle itself.
+                if BundleUnpacker.extensions.contains(url.pathExtension.lowercased()) {
+                    let names = try BundleUnpacker.unpack(url, into: dir)
+                    HuskLog.log("tl", "unpacked \(url.lastPathComponent): \(names.joined(separator: ", "))")
+                    if move { try? fm.removeItem(at: url) }
+                    continue
+                }
                 var name = url.lastPathComponent
                 if !name.lowercased().hasSuffix(".apk") { name += ".apk" }
                 let dest = dir.appendingPathComponent(name)
@@ -861,7 +874,7 @@ struct TLAttemptView: View {
     let app: TLApp
 
     var body: some View {
-        if app.report?.nativeEngine == .cocos || app.report?.nativeEngine == .minecraft {
+        if app.report?.nativeEngine == .cocos || app.report?.nativeEngine == .minecraft || app.report?.nativeEngine == .sdl {
             TLCocosAttemptView(app: app)
         } else if app.report?.runsOnNativeRuntime == true {
             TLUnityAttemptView(app: app)
