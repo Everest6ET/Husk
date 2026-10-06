@@ -21,18 +21,71 @@ struct LibraryTab: View {
     @State private var importing = false
     @State private var query = ""
     @State private var filter = "All"
-    @FocusState private var searchFocused: Bool
 
-    private let columns = [GridItem(.adaptive(minimum: 100), spacing: 12)]
+    private let columns = [GridItem(.adaptive(minimum: 104), spacing: 12)]
 
     var body: some View {
         NavigationStack(path: $router.library) {
-            ZStack {
-                Theme.backdrop
-                content
+            ScrollView {
+                VStack(spacing: 16) {
+                    if !host.isReady { machineStrip }
+                    if let busy = host.busy { busyStrip(busy) }
+                    if jit.busy, !jit.showSetup { busyStrip(jit.status ?? "Turning on JIT…") }
+                    if !categories.isEmpty { filterPicker }
+
+                    if !shown.isEmpty {
+                        LazyVGrid(columns: columns, spacing: 12) {
+                            ForEach(shown) { app in
+                                NavigationLink(value: app) {
+                                    AppCard(app: app, dimmed: !host.isReady)
+                                }
+                                .buttonStyle(CardButtonStyle())
+                                .contextMenu {
+                                    Button {
+                                        host.launch(app.name) { onOpenGuest() }
+                                    } label: { Label("Launch", systemImage: "play.fill") }
+                                    .disabled(!host.isReady || host.busy != nil)
+                                    Button {
+                                        router.library.append(app)
+                                    } label: { Label("Details", systemImage: "info.circle") }
+                                }
+                            }
+                        }
+                    } else if !query.isEmpty {
+                        EmptyState(title: "No Results",
+                                   message: "Nothing installed is called “\(query)”.",
+                                   systemImage: "magnifyingglass")
+                    } else if host.packages.isEmpty && host.isReady {
+                        EmptyState(title: "No Apps Yet",
+                                   message: "Install an APK and it appears here. Split sets "
+                                          + "work too — pick every piece at once.",
+                                   systemImage: "square.grid.2x2",
+                                   actionTitle: "Install APK(s)",
+                                   action: { importing = true })
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 8)
+                .padding(.bottom, 24)
             }
-            .navigationBarHidden(true)
-            .toolbar(.hidden, for: .tabBar)
+            .background(Theme.backdrop)
+            .navigationTitle("Library")
+            .searchable(text: $query, prompt: "Search apps")
+            .autocorrectionDisabled()
+            .textInputAutocapitalization(.never)
+            .toolbar {
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    // Android itself, from the library, whenever it is up. It used to be
+                    // reachable only while it was starting, or by opening an app -- so once
+                    // it was ready there was no way to simply look at it.
+                    if started {
+                        Button(action: onOpenGuest) {
+                            Label("Show Android", systemImage: "rectangle.inset.filled")
+                        }
+                    }
+                    Button { importing = true } label: { Label("Install APK", systemImage: "plus") }
+                }
+            }
             .navigationDestination(for: AndroidHost.Package.self) { app in
                 AppDetailView(app: app, onOpenGuest: onOpenGuest)
             }
@@ -44,160 +97,64 @@ struct LibraryTab: View {
         }
     }
 
-    // MARK: content
-
-    @ViewBuilder private var content: some View {
-        ScrollView {
-            VStack(spacing: 16) {
-                HuskHeader(mark: true, title: "Library") {
-                    HStack(spacing: 10) {
-                        // Android itself, from the library, whenever it is up.
-                        // It used to be reachable only while it was starting,
-                        // or by opening an app -- so once it was ready there
-                        // was no way to simply look at it.
-                        if started {
-                            CircleButton(systemImage: "rectangle.inset.filled",
-                                         action: onOpenGuest)
-                        }
-                        CircleButton(systemImage: "plus") { importing = true }
-                    }
-                }
-
-                // Always there, not behind a button. Searching is what you do
-                // with a list of apps; making it a mode you enter first is a
-                // step between you and the thing you came for.
-                if !host.packages.isEmpty { searchField }
-                if !host.isReady { machineStrip }
-                if let busy = host.busy { busyStrip(busy) }
-                if jit.busy, !jit.showSetup { busyStrip(jit.status ?? "Turning on JIT…") }
-                if !categories.isEmpty { chips }
-
-                if !shown.isEmpty {
-                    LazyVGrid(columns: columns, spacing: 12) {
-                        ForEach(shown) { app in
-                            NavigationLink(value: app) {
-                                AppCard(app: app, dimmed: !host.isReady)
-                            }
-                            .buttonStyle(CardButtonStyle())
-                            .contextMenu {
-                                Button {
-                                    host.launch(app.name) { onOpenGuest() }
-                                } label: { Label("Launch", systemImage: "play.fill") }
-                                .disabled(!host.isReady || host.busy != nil)
-                                Button {
-                                    router.library.append(app)
-                                } label: { Label("Details", systemImage: "info.circle") }
-                            }
-                        }
-                    }
-                } else if !query.isEmpty {
-                    EmptyState(title: "No matches",
-                               message: "Nothing installed is called “\(query)”.",
-                               systemImage: "magnifyingglass")
-                } else if host.packages.isEmpty && host.isReady {
-                    EmptyState(title: "No apps yet",
-                               message: "Install an APK and it appears here. Split sets "
-                                      + "work too — pick every piece at once.",
-                               systemImage: "square.grid.2x2",
-                               actionTitle: "Install APK(s)",
-                               action: { importing = true })
-                }
-            }
-            .padding(.horizontal, 18)
-            .padding(.top, 6)
-            .padding(.bottom, 28)
-        }
-    }
-
-    private var searchField: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(Theme.textDim)
-            TextField("Search apps", text: $query)
-                .focused($searchFocused)
-                .foregroundStyle(Theme.text)
-                .autocorrectionDisabled()
-                .textInputAutocapitalization(.never)
-            if !query.isEmpty {
-                Button { query = "" } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(Theme.textDim)
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(.horizontal, 14).padding(.vertical, 11)
-        .huskCard(RoundedRectangle(cornerRadius: Theme.rowCorner, style: .continuous),
-                  high: true)
-    }
+    // MARK: status
 
     /// One line about the machine, only while it cannot open anything.
     private var machineStrip: some View {
         HStack(spacing: 12) {
             ZStack {
-                Circle().fill(Theme.accentSoft).frame(width: 32, height: 32)
+                Circle().fill(Color.accentColor.opacity(0.16)).frame(width: 34, height: 34)
                 if started {
-                    ProgressView().scaleEffect(0.6).tint(Theme.accent)
+                    ProgressView()
                 } else {
                     Image(systemName: "power")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(Theme.accent)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(Color.accentColor)
                 }
             }
-            VStack(alignment: .leading, spacing: 3) {
-                Text(started ? "Starting Android" : "Android is not running")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(Theme.text)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(started ? "Starting Android" : "Android Is Not Running")
+                    .font(.subheadline.weight(.semibold))
                 if started, runner.bootProgress > 0 {
                     ProgressView(value: Double(runner.bootProgress), total: 100)
-                        .progressViewStyle(.linear).tint(Theme.accent)
-                        .frame(height: 3)
                 } else {
                     Text(started ? host.status
                                  : JITBootstrap.isDebuggerAttached
                                    ? "Your apps are here; start it to open them."
                                    : "Husk needs JIT, which only a debugger can grant.")
-                        .font(.system(size: 12))
-                        .foregroundStyle(Theme.textDim)
-                        .lineLimit(1)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
                 }
             }
             Spacer(minLength: 6)
             Button(started ? "Show" : JITBootstrap.isDebuggerAttached ? "Start" : "JIT") {
                 if started { onOpenGuest() } else { onStartAndroid() }
             }
-            .font(.system(size: 13, weight: .semibold))
-            .foregroundStyle(.white)
-            .padding(.horizontal, 14).padding(.vertical, 8)
-            .background(Theme.accent, in: Capsule())
-            .buttonStyle(.plain)
+            .buttonStyle(.borderedProminent)
+            .buttonBorderShape(.capsule)
+            .controlSize(.small)
         }
-        .padding(.horizontal, 13).padding(.vertical, 11)
-        .huskCard(RoundedRectangle(cornerRadius: Theme.rowCorner, style: .continuous))
+        .padding(14)
+        .huskCard()
     }
 
     private func busyStrip(_ text: String) -> some View {
-        HStack(spacing: 11) {
-            ProgressView().tint(Theme.accent)
-            Text(text).font(.system(size: 13)).foregroundStyle(Theme.text).lineLimit(2)
+        HStack(spacing: 12) {
+            ProgressView()
+            Text(text).font(.subheadline).lineLimit(2)
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 14).padding(.vertical, 12)
-        .huskCard(RoundedRectangle(cornerRadius: Theme.rowCorner, style: .continuous),
-                  high: true)
+        .padding(14)
+        .huskCard()
     }
 
-    private var chips: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                Chip(title: "All", selected: filter == "All") { filter = "All" }
-                ForEach(categories, id: \.self) { c in
-                    Chip(title: plural(c), selected: filter == c) { filter = c }
-                }
-            }
-            .padding(.horizontal, 1)
+    private var filterPicker: some View {
+        Picker("Show", selection: $filter) {
+            Text("All").tag("All")
+            ForEach(categories, id: \.self) { c in Text(plural(c)).tag(c) }
         }
+        .pickerStyle(.segmented)
     }
 
     // MARK: what to show
@@ -233,16 +190,16 @@ struct AppCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            AppIcon(path: app.iconPath, size: 46)
+            AppIcon(path: app.iconPath, size: 50)
                 .opacity(dimmed ? 0.5 : 1)
             VStack(alignment: .leading, spacing: 2) {
                 Text(app.label)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Theme.text)
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.primary)
                     .lineLimit(1)
                 Text(app.category ?? app.bitness ?? " ")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Theme.textDim)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
         }

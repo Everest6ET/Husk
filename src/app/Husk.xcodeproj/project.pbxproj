@@ -109,6 +109,7 @@
 		F1E2ED25F28A24BA7197C5DB /* PipeShim.c in Sources */ = {isa = PBXBuildFile; fileRef = 766F6F7816E672E83CFFE47D /* PipeShim.c */; };
 		F4833815482790E167401965 /* husk-tl-ld.c in Sources */ = {isa = PBXBuildFile; fileRef = 4D54C1E4F20A020AC62C9419 /* husk-tl-ld.c */; };
 		F6880CA30640F688356229CF /* HuskMetalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D91C1E7D6301EBCE06FEE0FE /* HuskMetalView.swift */; };
+		F6B3DA43CA16FAF920EF236D /* AppTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = D05B2EFC533719ED2E455C24 /* AppTheme.swift */; };
 		FA8097D8E118A8CE8DBCF763 /* LICENSE-StikJIT-MPL-2.0.txt in Resources */ = {isa = PBXBuildFile; fileRef = 2E95AED70FA457D447AE0DFF /* LICENSE-StikJIT-MPL-2.0.txt */; };
 		FC2A6DCF8BB4C5E874D4F4D3 /* HuskGamepad.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE13DC571D193621CD6149EA /* HuskGamepad.swift */; };
 		FC8F2E79EF7CDBC99D95F4F6 /* husk-tl-jni-input.c in Sources */ = {isa = PBXBuildFile; fileRef = 28152D0874B73915225FE8EA /* husk-tl-jni-input.c */; };
@@ -264,6 +265,7 @@
 		CC860BD7A5AF9DC83B015219 /* fishhook.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = fishhook.c; sourceTree = "<group>"; };
 		CE99D9E12CB5823C669D9CBC /* husk-tl-egl-es31.inc */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.pascal; path = "husk-tl-egl-es31.inc"; sourceTree = "<group>"; };
 		CFAB9C41A483CA08C1037AAC /* husk-tl-gameactivity.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "husk-tl-gameactivity.c"; sourceTree = "<group>"; };
+		D05B2EFC533719ED2E455C24 /* AppTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppTheme.swift; sourceTree = "<group>"; };
 		D08FCD7F480D6E2F65F26636 /* husk-tl-elf.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "husk-tl-elf.c"; sourceTree = "<group>"; };
 		D0A9148DED6969D97D56406C /* LICENSES-rppairing-crates.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "LICENSES-rppairing-crates.txt"; sourceTree = "<group>"; };
 		D50A30F186B58956276C9B24 /* husk-tl-framework.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "husk-tl-framework.c"; sourceTree = "<group>"; };
@@ -315,6 +317,7 @@
 				2C3D6F74AFBE5CD222DE0553 /* ApkMetadata.swift */,
 				C1F2A4FC567A4CCC74209DD4 /* AppDetailView.swift */,
 				15D08F1730303C74C1B7DE23 /* AppSource.swift */,
+				D05B2EFC533719ED2E455C24 /* AppTheme.swift */,
 				28D3E1CEE343707BE986FA6E /* Assets.xcassets */,
 				6F40192B3EDAD27D2CBFFC2F /* BootScreen.swift */,
 				6CAD18BA88F03D63EF1F5DF2 /* ContentView.swift */,
@@ -690,6 +693,7 @@
 				D354FA5AC96B3361B4A5A635 /* ApkMetadata.swift in Sources */,
 				5C20168883D258DF9715F6D9 /* AppDetailView.swift in Sources */,
 				8C743346878007F8D22CEA0A /* AppSource.swift in Sources */,
+				F6B3DA43CA16FAF920EF236D /* AppTheme.swift in Sources */,
 				853E83FF7FF5B9A7FDE5E638 /* BootScreen.swift in Sources */,
 				4E1329C07A116B3BE1FDFA7A /* ContentView.swift in Sources */,
 				EBDBC46EF4E65E1DA2342F6B /* DiscoverTab.swift in Sources */,

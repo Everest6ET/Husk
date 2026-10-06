@@ -26,11 +26,12 @@ struct ContentView: View {
     /// True while the launch boot screen is up, rather than the library.
     @State private var booting = false
     @Environment(\.scenePhase) private var scenePhase
-    @AppStorage(Theme.Appearance.key) private var appearance = Theme.Appearance.dark
+    @AppStorage(Theme.Appearance.key) private var appearance = Theme.Appearance.system
+    @ObservedObject private var theme = AppTheme.shared
 
     var body: some View {
         ZStack {
-            // Two tabs, and the guest on top of them.
+            // The tabs, and the guest on top of them.
             //
             // The guest is not a tab: HuskGLView owns the CAMetalLayer QEMU
             // renders into, and it has to stay in the hierarchy for the whole
@@ -57,9 +58,6 @@ struct ContentView: View {
                 SettingsTab()
                     .tabItem { Label("Settings", systemImage: "gearshape.fill") }
                     .tag(HuskTab.settings)
-            }
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                HuskTabBar(selection: $router.tab)
             }
             .opacity(showGuestScreen && started && runner.isRunning ? 0 : 1)
 
@@ -108,8 +106,8 @@ struct ContentView: View {
                     .transition(.opacity)
             }
         }
-        .tint(Theme.accent)
-        // The user's appearance, dark unless they chose otherwise. Set on the
+        .tint(theme.accentColor)
+        // The user's appearance: the system's, unless they pinned one. Set on the
         // window rather than with .preferredColorScheme — see Theme.apply.
         .onAppear { Theme.apply(appearance) }
         .onChange(of: appearance) { Theme.apply($0) }

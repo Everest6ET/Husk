@@ -1,120 +1,79 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import SwiftUI
 
-/// Settings, as a hierarchy rather than one long form.
-///
-/// Everything used to live on a single scrolling page, so choices that change
-/// the machine sat next to choices that change a colour, and the ones with
-/// consequences were easy to reach by accident. The grouping here is the
-/// concept's: what belongs to the app, what belongs to the emulator, and what
-/// the thing actually is.
+/// Settings, as the iOS Settings app lays them out: a card for the app up top, then groups of rows that each
+/// push a page of their own. What belongs to the app, what belongs to the emulator, and what the thing is.
 struct SettingsTab: View {
-    @ObservedObject private var runner = QemuRunner.shared
-    @ObservedObject private var host = AndroidHost.shared
-    @State private var searching = false
-
     var body: some View {
         NavigationStack {
-            ZStack {
-                Theme.backdrop
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 22) {
-                        HuskHeader(mark: true, title: "Settings")
+            List {
+                Section {
+                    NavigationLink { AboutSettings() } label: { appCard }
+                }
 
-                        group("General") {
-                            link(LibrarySettings(), "square.grid.2x2", "Library",
-                                 "Your apps and their icons")
-                            RowDivider()
-                            link(PerformanceSettings(), "speedometer", "Performance",
-                                 "Renderer, sound")
-                            RowDivider()
-                            link(AppearanceSettings(), "paintbrush", "Appearance",
-                                 "Light or dark, app icon")
-                        }
+                Section("General") {
+                    row(LibrarySettings(), "square.grid.2x2.fill", .blue, "Library", "Your apps and their icons")
+                    row(PerformanceSettings(), "speedometer", .orange, "Performance", "Renderer, sound")
+                    row(AppearanceSettings(), "paintbrush.fill", .pink, "Appearance", "Light or dark, accent colour, app icon")
+                }
 
-                        group("Emulator") {
-                            link(JITSettings(), "bolt.circle", "JIT & sideload",
-                                 "Executable memory, starting up")
-                            RowDivider()
-                            link(InputSettings(), "hand.tap", "Input",
-                                 "Screen, touch, keyboard")
-                            RowDivider()
-                            link(NetworkSettings(), "globe", "Network",
-                                 "Internet and saved sessions")
-                            RowDivider()
-                            link(SavedMachineSettings(), "externaldrive",
-                                 "Saved machine", "Snapshots and automatic saving")
-                        }
+                Section("Emulator") {
+                    row(JITSettings(), "bolt.fill", .yellow, "JIT & Sideload", "Executable memory, starting up")
+                    row(InputSettings(), "hand.tap.fill", .indigo, "Input", "Screen, touch, keyboard")
+                    row(NetworkSettings(), "globe", .green, "Network", "Internet and saved sessions")
+                    row(SavedMachineSettings(), "externaldrive.fill", .teal, "Saved Machine", "Snapshots and automatic saving")
+                }
 
-                        group("Experimental") {
-                            link(TranslationLayerSettings(), "testtube.2",
-                                 "Android Translation Layer",
-                                 "Apps without booting Android")
-                        }
-
-                        group("About") {
-                            NavigationLink { AboutSettings() } label: {
-                                HStack(spacing: 14) {
-                                    HuskMark(size: 34)
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text("Husk")
-                                            .font(.system(size: 15, weight: .medium))
-                                            .foregroundStyle(Theme.text)
-                                        Text("Version \(Bundle.main.version) "
-                                           + "· \(Bundle.main.commit)")
-                                            .font(.system(size: 12))
-                                            .foregroundStyle(Theme.textDim)
-                                    }
-                                    Spacer(minLength: 8)
-                                    Image(systemName: "chevron.right")
-                                        .font(.system(size: 13, weight: .semibold))
-                                        .foregroundStyle(Theme.textDim.opacity(0.7))
-                                }
-                                .padding(.horizontal, 14).padding(.vertical, 12)
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                    .padding(.horizontal, 18)
-                    .padding(.top, 6)
-                    .padding(.bottom, 28)
+                Section {
+                    row(TranslationLayerSettings(), "testtube.2", .purple, "Android Translation Layer", "Apps without booting Android")
+                } header: {
+                    Text("Experimental")
                 }
             }
-            .navigationBarHidden(true)
-            .toolbar(.hidden, for: .tabBar)
+            .listStyle(.insetGrouped)
+            .navigationTitle("Settings")
         }
     }
 
-    @ViewBuilder
-    private func group<Content: View>(_ title: String,
-                                      @ViewBuilder rows: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(title)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(Theme.textDim)
-                .padding(.leading, 4)
-            RowGroup { rows() }
+    private var appCard: some View {
+        HStack(spacing: 14) {
+            HuskMark(size: 56)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Husk").font(.title3.weight(.semibold))
+                Text("Version \(Bundle.main.version) · \(Bundle.main.commit)")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
         }
+        .padding(.vertical, 6)
     }
 
-    private func link<D: View>(_ destination: D, _ icon: String,
-                               _ title: String, _ subtitle: String) -> some View {
+    private func row<D: View>(_ destination: D, _ icon: String, _ tint: Color,
+                              _ title: String, _ subtitle: String) -> some View {
         NavigationLink { destination } label: {
-            HuskRow(systemImage: icon, title: title, subtitle: subtitle)
+            Label {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title)
+                    Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+            } icon: {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(tint.gradient)
+                    .frame(width: 30, height: 30)
+                    .overlay {
+                        Image(systemName: icon)
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundStyle(.white)
+                    }
+            }
         }
-        .buttonStyle(.plain)
     }
 }
 
-/// A Form, on Husk's page rather than the system's.
+/// A Form, as the system draws one.
 private struct HuskForm: ViewModifier {
     func body(content: Content) -> some View {
-        content
-            .scrollContentBackground(.hidden)
-            .background(Theme.backdrop)
-            .tint(Theme.accent)
-            .navigationBarTitleDisplayMode(.inline)
+        content.navigationBarTitleDisplayMode(.inline)
     }
 }
 
@@ -640,35 +599,55 @@ struct SavedMachineSettings: View {
 
 struct AppearanceSettings: View {
     @State private var appIcon = HuskAppIcon.current
-    @AppStorage(Theme.Appearance.key) private var appearance = Theme.Appearance.dark
+    @AppStorage(Theme.Appearance.key) private var appearance = Theme.Appearance.system
+    @ObservedObject private var theme = AppTheme.shared
     @Environment(\.colorScheme) private var scheme
+    @State private var custom: Color = AppTheme.shared.accentColor
 
-    private let columns = [GridItem(.adaptive(minimum: 92), spacing: 14)]
+    private let iconColumns = [GridItem(.adaptive(minimum: 92), spacing: 14)]
 
     var body: some View {
-        ZStack {
-            Theme.backdrop
-            ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
-                    Picker("Appearance", selection: $appearance) {
-                        ForEach(Theme.Appearance.allCases) { Text($0.title).tag($0) }
-                    }
-                    .pickerStyle(.segmented)
-                    .onChange(of: appearance) { v in
-                        HuskLog.log("ui", "appearance: \(v.rawValue)")
-                    }
-                    Text("System follows the phone. The guest's own screen stays dark "
-                       + "either way — it is a picture of another phone.")
-                        .font(.system(size: 12))
-                        .foregroundStyle(Theme.textDim)
-                        .padding(.horizontal, 4)
+        Form {
+            Section {
+                Picker("Appearance", selection: $appearance) {
+                    ForEach(Theme.Appearance.allCases) { Text($0.title).tag($0) }
                 }
-                .padding(.horizontal, 18).padding(.top, 12)
+                .pickerStyle(.segmented)
+                .onChange(of: appearance) { v in
+                    HuskLog.log("ui", "appearance: \(v.rawValue)")
+                }
+            } header: {
+                Text("Theme")
+            } footer: {
+                Text("System follows the phone: light by day, dark by night. The guest's own "
+                   + "screen stays dark either way — it is a picture of another phone.")
+            }
 
-                SectionHeader(title: "App icon")
-                    .padding(.horizontal, 22).padding(.top, 14)
+            Section {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 5), spacing: 14) {
+                    ForEach(AppTheme.presets) { preset in
+                        Button {
+                            theme.accentColor = preset.color
+                            custom = preset.color
+                        } label: {
+                            swatch(preset.color, selected: preset.color.themeHex == theme.accentColor.themeHex)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(preset.name)
+                    }
+                }
+                .padding(.vertical, 6)
 
-                LazyVGrid(columns: columns, spacing: 14) {
+                ColorPicker("Custom Colour", selection: $custom, supportsOpacity: false)
+                    .onChange(of: custom) { theme.accentColor = $0 }
+            } header: {
+                Text("Accent Colour")
+            } footer: {
+                Text("Tints buttons, switches and selected states throughout the app.")
+            }
+
+            Section {
+                LazyVGrid(columns: iconColumns, spacing: 14) {
                     ForEach(HuskAppIcon.allCases) { icon in
                         Button {
                             appIcon = icon
@@ -679,45 +658,45 @@ struct AppearanceSettings: View {
                                     Image(uiImage: art)
                                         .resizable().scaledToFit()
                                         .frame(width: 60, height: 60)
-                                        .clipShape(RoundedRectangle(cornerRadius: 14,
-                                                                    style: .continuous))
+                                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                                        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                            .strokeBorder(appIcon == icon ? Color.accentColor : .clear, lineWidth: 3))
                                 }
                                 Text(icon.title)
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(Theme.text)
+                                    .font(.caption)
+                                    .foregroundStyle(appIcon == icon ? Color.accentColor : .primary)
                                     .lineLimit(1)
                             }
                             .frame(maxWidth: .infinity)
-                            .padding(.vertical, 14)
-                            // The selected icon is ringed in the accent rather
-                            // than filled with it: the artwork is the subject
-                            // here, and a tinted panel behind it changes how
-                            // the thing you are choosing looks.
-                            .background(Theme.surface,
-                                        in: RoundedRectangle(cornerRadius: Theme.cardCorner,
-                                                             style: .continuous))
-                            .overlay(RoundedRectangle(cornerRadius: Theme.cardCorner,
-                                                      style: .continuous)
-                                        .stroke(appIcon == icon ? Theme.accent
-                                                                : Theme.hairline,
-                                                lineWidth: appIcon == icon ? 2 : 0.5))
                         }
-                        .buttonStyle(CardButtonStyle())
+                        .buttonStyle(.plain)
                     }
                 }
-                .padding(.horizontal, 18).padding(.top, 8)
-
-                Text("Automatic follows the system appearance — light, dark and "
-                   + "tinted. The others pin one look. iOS shows its own confirmation "
-                   + "after a change; that alert cannot be turned off.")
-                    .font(.system(size: 12))
-                    .foregroundStyle(Theme.textDim)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 28).padding(.vertical, 18)
+                .padding(.vertical, 6)
+            } header: {
+                Text("App Icon")
+            } footer: {
+                Text("Automatic follows the system appearance — light, dark and tinted. The others pin "
+                   + "one look. iOS shows its own confirmation after a change; that alert cannot be turned off.")
             }
         }
         .navigationTitle("Appearance")
         .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func swatch(_ color: Color, selected: Bool) -> some View {
+        Circle()
+            .fill(color)
+            .frame(width: 34, height: 34)
+            .overlay(Circle().strokeBorder(Color.primary.opacity(0.9), lineWidth: selected ? 2 : 0).padding(-4))
+            .overlay {
+                if selected {
+                    Image(systemName: "checkmark")
+                        .font(.caption.bold())
+                        .foregroundStyle(color.isLight ? .black : .white)
+                }
+            }
+            .frame(maxWidth: .infinity)
     }
 }
 
@@ -729,63 +708,44 @@ struct AboutSettings: View {
     @AppStorage(TranslationLayer.devInfoKey) private var devInfo = false
 
     var body: some View {
-        ZStack {
-            Theme.backdrop
-            ScrollView {
-                VStack(spacing: 18) {
-                    VStack(spacing: 10) {
-                        HuskMark(size: 76)
-                        Text("Husk")
-                            .font(.system(size: 22, weight: .semibold))
-                            .foregroundStyle(Theme.text)
-                        Text("Version \(Bundle.main.version)")
-                            .font(.system(size: 13))
-                            .foregroundStyle(Theme.textDim)
-                    }
-                    .padding(.top, 10)
-
-                    RowGroup {
-                        VStack(spacing: 12) {
-                            DetailRow(label: "Build", value: Bundle.main.commit)
-                            DetailRow(label: "Guest image", value: GuestImage.imageVersion)
-                            DetailRow(label: "Renderer",
-                                      value: runner.displayKind == .gl ? "GPU"
-                                           : runner.displayKind == .software ? "CPU"
-                                           : "not started")
-                        }
-                        .padding(14)
-                    }
-
-                    RowGroup {
-                        Toggle(isOn: $devInfo) {
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text("Developer info")
-                                    .font(.system(size: 15, weight: .medium))
-                                    .foregroundStyle(Theme.text)
-                                Text("Technical detail in the Android Translation Layer screens: "
-                                   + "library reports, device checks and run logs.")
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(Theme.textDim)
-                            }
-                        }
-                        .padding(14)
-                    }
-
-                    Button { showLogs = true } label: {
-                        Label("Open console", systemImage: "terminal")
-                    }
-                    .buttonStyle(PrimaryButtonStyle())
-
-                    Text("Husk runs unmodified Android APKs in a real Android system "
-                       + "on your iPhone. The console shows Husk's live log, the "
-                       + "guest's serial output and QEMU's own output — the three "
-                       + "files any problem here is diagnosed from.")
-                        .font(.system(size: 12))
-                        .foregroundStyle(Theme.textDim)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 14)
+        List {
+            Section {
+                VStack(spacing: 8) {
+                    HuskMark(size: 84)
+                    Text("Husk").font(.title2.weight(.semibold))
+                    Text("Version \(Bundle.main.version)")
+                        .font(.subheadline).foregroundStyle(.secondary)
                 }
-                .padding(.horizontal, 18).padding(.vertical, 14)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
+                .listRowBackground(Color.clear)
+            }
+
+            Section {
+                LabeledContent("Build", value: Bundle.main.commit)
+                LabeledContent("Guest image", value: GuestImage.imageVersion)
+                LabeledContent("Renderer",
+                               value: runner.displayKind == .gl ? "GPU"
+                                    : runner.displayKind == .software ? "CPU"
+                                    : "Not started")
+            }
+
+            Section {
+                Toggle(isOn: $devInfo) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Developer Info")
+                        Text("Technical detail in the Android Translation Layer screens: "
+                           + "library reports, device checks and run logs.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                Button { showLogs = true } label: {
+                    Label("Open Console", systemImage: "terminal")
+                }
+            } footer: {
+                Text("Husk runs unmodified Android APKs in a real Android system on your iPhone. "
+                   + "The console shows Husk's live log, the guest's serial output and QEMU's own "
+                   + "output — the three files any problem here is diagnosed from.")
             }
         }
         .navigationTitle("About")

@@ -21,7 +21,6 @@ struct FilesTab: View {
                 .navigationDestination(for: String.self) { path in
                     DirectoryView(path: path,
                                   title: (path as NSString).lastPathComponent)
-                        .toolbar(.hidden, for: .tabBar)
                 }
         }
     }
@@ -40,17 +39,45 @@ struct DirectoryView: View {
     @State private var importing = false
     @State private var showImportSheet = false
     @State private var installing: AndroidHost.GuestEntry?
-    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        ZStack {
-            Theme.backdrop
-            content
+        List {
+            if let space {
+                Section { storage(space) }
+            }
+            if !entries.isEmpty {
+                Section {
+                    ForEach(entries, id: \.id) { e in row(e) }
+                } footer: {
+                    if path != FilesTab.root {
+                        Text(path).font(.footnote).lineLimit(1).truncationMode(.head)
+                    }
+                }
+            }
         }
-        .navigationBarHidden(true)
+        .listStyle(.insetGrouped)
+        .overlay {
+            if loading && entries.isEmpty {
+                ProgressView()
+            } else if let failure {
+                EmptyState(title: "Cannot Read This Folder", message: failure, systemImage: "lock")
+            } else if entries.isEmpty {
+                EmptyState(title: "Empty", message: "Nothing is in this folder yet.",
+                           systemImage: "folder", actionTitle: "Import Files",
+                           action: { showImportSheet = true })
+            }
+        }
+        .navigationTitle(title)
+        .navigationBarTitleDisplayMode(path == FilesTab.root ? .large : .inline)
+        .toolbar {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                Button { load() } label: { Label("Refresh", systemImage: "arrow.clockwise") }
+                Button { showImportSheet = true } label: { Label("Import", systemImage: "plus") }
+            }
+        }
         .sheet(isPresented: $showImportSheet) {
             ImportSheet(destination: path) { showImportSheet = false; importing = true }
-                .presentationDetents([.height(320)])
+                .presentationDetents([.height(340)])
         }
         .huskFilePicker(isPresented: $importing) { urls in
             host.sendFiles(urls, to: path)
@@ -71,69 +98,40 @@ struct DirectoryView: View {
         .refreshable { load() }
     }
 
-    @ViewBuilder private var content: some View {
-        ScrollView {
-            VStack(spacing: 14) {
-                HuskHeader(back: path == FilesTab.root ? nil : { dismiss() },
-                           title: title) {
-                    HStack(spacing: 10) {
-                        CircleButton(systemImage: "arrow.clockwise") { load() }
-                        CircleButton(systemImage: "plus") { showImportSheet = true }
-                    }
-                }
-
-                if path != FilesTab.root {
-                    Text(path)
-                        .font(.technical(11))
-                        .foregroundStyle(Theme.textDim)
-                        .lineLimit(1).truncationMode(.head)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-
-                if let space { storage(space) }
-
-                if loading && entries.isEmpty {
-                    ProgressView().tint(Theme.accent).padding(.top, 60)
-                } else if let failure {
-                    EmptyState(title: "Cannot read this folder",
-                               message: failure, systemImage: "lock")
-                } else if entries.isEmpty {
-                    EmptyState(title: "Empty",
-                               message: "Nothing is in this folder yet.",
-                               systemImage: "folder",
-                               actionTitle: "Import files",
-                               action: { showImportSheet = true })
-                } else {
-                    RowGroup {
-                        ForEach(Array(entries.enumerated()), id: \.element.id) { i, e in
-                            row(e)
-                            if i < entries.count - 1 { RowDivider() }
-                        }
-                    }
-                }
-            }
-            .padding(.horizontal, 18)
-            .padding(.top, 6)
-            .padding(.bottom, 28)
-        }
-    }
-
     @ViewBuilder private func row(_ e: AndroidHost.GuestEntry) -> some View {
         if e.isDirectory {
             NavigationLink(value: e.path) {
-                HuskRow(systemImage: "folder.fill", title: e.name,
-                        subtitle: e.modified.map(Self.when))
+                fileLabel(icon: "folder.fill", tint: .accentColor, title: e.name,
+                          subtitle: e.modified.map(Self.when))
             }
-            .buttonStyle(.plain)
         } else {
             Button {
                 if e.name.lowercased().hasSuffix(".apk") { installing = e }
             } label: {
-                HuskRow(systemImage: icon(for: e.name), title: e.name,
-                        subtitle: subtitle(e),
-                        showsChevron: e.name.lowercased().hasSuffix(".apk"))
+                HStack {
+                    fileLabel(icon: icon(for: e.name), tint: .secondary, title: e.name, subtitle: subtitle(e))
+                    if e.name.lowercased().hasSuffix(".apk") {
+                        Spacer()
+                        Image(systemName: "arrow.down.circle").foregroundStyle(Color.accentColor)
+                    }
+                }
             }
-            .buttonStyle(.plain)
+            .foregroundStyle(.primary)
+        }
+    }
+
+    private func fileLabel(icon: String, tint: Color, title: String, subtitle: String?) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.title3)
+                .foregroundStyle(tint)
+                .frame(width: 28)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).lineLimit(1).truncationMode(.middle)
+                if let subtitle {
+                    Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+            }
         }
     }
 
@@ -141,25 +139,14 @@ struct DirectoryView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("Storage")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(Theme.text)
                 Spacer()
-                Text("\(AppDetailView.bytes(s.total - s.free)) of "
-                   + "\(AppDetailView.bytes(s.total))")
-                    .font(.system(size: 12))
-                    .foregroundStyle(Theme.textDim)
+                Text("\(AppDetailView.bytes(s.total - s.free)) of \(AppDetailView.bytes(s.total))")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
             }
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(Theme.surfaceHigh)
-                    Capsule().fill(Theme.accent)
-                        .frame(width: geo.size.width * used(s))
-                }
-            }
-            .frame(height: 5)
+            ProgressView(value: Double(used(s)))
         }
-        .padding(.horizontal, 14).padding(.vertical, 13)
-        .huskCard(RoundedRectangle(cornerRadius: Theme.rowCorner, style: .continuous))
+        .padding(.vertical, 4)
     }
 
     private func used(_ s: (free: Int64, total: Int64)) -> CGFloat {
@@ -215,7 +202,7 @@ struct DirectoryView: View {
     }
 }
 
-/// The import screen from the concept: one target, one button.
+/// The import screen: one target, one button.
 struct ImportSheet: View {
     let destination: String
     let onBrowse: () -> Void
@@ -223,50 +210,35 @@ struct ImportSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        ZStack {
-            Theme.backdrop
+        NavigationStack {
             VStack(spacing: 18) {
-                HStack {
-                    Spacer()
-                    Button { dismiss() } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(Theme.textDim)
-                            .frame(width: 30, height: 30)
-                            .background(Theme.surfaceHigh, in: Circle())
-                    }
-                    .buttonStyle(.plain)
-                }
-
                 VStack(spacing: 10) {
                     Image(systemName: "doc.badge.plus")
-                        .font(.system(size: 30, weight: .light))
-                        .foregroundStyle(Theme.textDim)
-                    Text("Tap to import")
-                        .font(.system(size: 15, weight: .medium))
-                        .foregroundStyle(Theme.text)
-                    Text("Goes to \((destination as NSString).lastPathComponent). "
+                        .font(.system(size: 34, weight: .light))
+                        .foregroundStyle(Color.accentColor)
+                    Text("Import Files").font(.headline)
+                    Text("They go to \((destination as NSString).lastPathComponent). "
                        + "Unmodified APKs install from here too.")
-                        .font(.system(size: 12))
-                        .foregroundStyle(Theme.textDim)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
-                        .padding(.horizontal, 20)
                 }
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, 30)
-                .background(
-                    RoundedRectangle(cornerRadius: Theme.cardCorner, style: .continuous)
-                        .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [6, 5]))
-                        .foregroundStyle(Theme.hairline))
-                .contentShape(Rectangle())
-                .onTapGesture { onBrowse() }
+                .padding(.vertical, 24)
+                .huskCard()
 
-                Button("Browse files", action: onBrowse)
-                    .buttonStyle(PrimaryButtonStyle())
+                Button("Browse Files", action: onBrowse)
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, 20)
-            .padding(.top, 14)
+            .padding(16)
+            .background(Theme.backdrop)
+            .navigationTitle("Import")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } }
+            }
         }
     }
 }
