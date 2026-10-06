@@ -41,6 +41,9 @@ bool tl_ld_add_apk(const char *path);
 struct tl_zip;
 const struct tl_zip *tl_ld_apk_at(int index);
 
+/* Whether one of the APKs carries this arm64 library (an engine is told by the libraries it ships). */
+bool tl_ld_has_lib(const char *name);
+
 /*
  * Load a library by file name or soname (already-loaded ones are returned as
  * they are), with everything it needs. Returns NULL and logs why on failure.

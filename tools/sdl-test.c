@@ -434,7 +434,7 @@ int main(int argc, char **argv)
     char frames[] = "/tmp/husk-sdlframes-XXXXXX"; mkdtemp(frames);
     fprintf(stderr, "frames: %s\ndata: %s\n", frames, tmp);
     int w = argc > 4 ? atoi(argv[3]) : 1200, h = argc > 4 ? atoi(argv[4]) : 552;
-    tl_ga_config cfg = { .apk_path = argv[1], .data_dir = tmp, .package_name = "com.vectorunit.cobalt.googleplay", .width = w, .height = h,
+    tl_ga_config cfg = { .apk_path = argv[1], .data_dir = tmp, .package_name = getenv("TL_PKG") ? getenv("TL_PKG") : "com.vectorunit.cobalt.googleplay", .width = w, .height = h,
                          .angle_egl = getenv("TL_ANGLE_EGL") ? getenv("TL_ANGLE_EGL") : egl, .angle_gles = getenv("TL_ANGLE_GLES") ? getenv("TL_ANGLE_GLES") : gles,
                          .frame_dir = frames, .frame_every = getenv("TL_FRAMES") ? atoi(getenv("TL_FRAMES")) : -6 };
     g_frame_dir = frames;
@@ -442,7 +442,7 @@ int main(int argc, char **argv)
     if (getenv("TL_EXTRA_APKS")) { char ex[2000]; snprintf(ex, sizeof(ex), "%s", getenv("TL_EXTRA_APKS")); for (char *p = strtok(ex, ":"); p; p = strtok(NULL, ":")) if (!tl_sdl_add_package(p)) fprintf(stderr, "cannot add %s\n", p); }
     if (getenv("TL_AUDIO")) tl_audio_install();
     if (getenv("TL_PAD")) tl_pad_connect(0, "Xbox Wireless Controller");
-    if (!tl_sdl_start(&cfg, "com/vectorunit/cobalt/MainActivity")) { fprintf(stderr, "ue4: start failed\n"); return 1; }
+    if (!tl_sdl_start(&cfg, getenv("TL_ACTIVITY") ? getenv("TL_ACTIVITY") : "com/vectorunit/cobalt/MainActivity")) { fprintf(stderr, "ue4: start failed\n"); return 1; }
     if (getenv("TL_PROBE")) install_probes(getenv("TL_PROBE"));
     if (getenv("TL_BLR_PROBE")) install_blr_probes(getenv("TL_BLR_PROBE"));
     if (getenv("TL_WINFLAGS_PROBE")) { tl_lib *L = tl_ld_find_lib("libmain.so"); if (L && !tl_ld_probe(L, strtoull(getenv("TL_WINFLAGS_PROBE"), NULL, 16), winflags_probe)) fprintf(stderr, "window flags probe failed\n"); }

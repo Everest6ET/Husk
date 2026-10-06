@@ -29,13 +29,15 @@ void tl_fmod_install(void);
 #define SDLA "org/libsdl/app/SDLActivity"
 #define SDLAUDIO "org/libsdl/app/SDLAudioManager"
 #define SDLCTRL "org/libsdl/app/SDLControllerManager"
+#define STKA "org/supertuxkart/stk/SuperTuxKartActivity"
+#define SDLHID "org/libsdl/app/HIDDeviceManager"
 
 static struct {
     tl_ga_config cfg;
     char apk[1024], data[512], pkg[128], frame_dir[512], angle_egl[600], angle_gles[600], activity_class[160];
     jobj *activity, *surface;
     pthread_t ui, sdl;
-    bool started;
+    bool started, sdl2;           /* sdl2: the game ships SDL 2 (natives exported by name, a smaller Java surface) rather than SDL 3 (registered, larger) */
     atomic_bool touch_ready;
     atomic_int fingers;
     char signature[100];          /* SHA-256 of the APK signing certificate, "aa:bb:..." as PackageInfo.signatures would give it */
@@ -180,11 +182,36 @@ static void H_checkAge(tl_jcall *c)
     if (cb) cb(tl_jni_env(), tl_jni_class_object("com/vectorunit/VuAgeHelper"));
 }
 
-/* A native of SDLActivity (or its helpers): registered by SDL3 when it loaded. */
-static void *native_of(const char *cls, const char *name, const char *sig)
+/* JNI's name for an exported native: Java_<class with / as _>_<method>, with a literal underscore written _1. */
+static void jni_mangle(char *out, size_t cap, const char *cls, const char *name)
+{
+    size_t n = 0;
+    const char *parts[] = { "Java_", cls, "_", name };
+    for (int i = 0; i < 4; i++)
+        for (const char *p = parts[i]; *p && n + 3 < cap; p++) {
+            if (i == 1 && *p == '/') out[n++] = '_';
+            else if (*p == '_' && i != 0 && i != 2) { out[n++] = '_'; out[n++] = '1'; }
+            else out[n++] = *p;
+        }
+    out[n] = 0;
+}
+
+/* A native of SDLActivity (or its helpers), if it has one: SDL3 registers them when it loads, SDL2 exports them under their JNI names. */
+static void *find_native(const char *cls, const char *name, const char *sig)
 {
     void *fn = tl_jni_native(cls, name, sig);
-    if (!fn) tl_log_line("sdl: native %s.%s%s is not registered", cls, name, sig);
+    if (fn || !S.sdl2) return fn;
+    char mangled[256];
+    jni_mangle(mangled, sizeof(mangled), cls, name);
+    const char *libs[] = { "libSDL2.so", "libmain.so" };
+    for (int i = 0; i < 2 && !fn; i++) { tl_lib *lib = tl_ld_find_lib(libs[i]); if (lib) fn = tl_ld_sym(lib, mangled); }
+    return fn;
+}
+
+static void *native_of(const char *cls, const char *name, const char *sig)
+{
+    void *fn = find_native(cls, name, sig);
+    if (!fn) tl_log_line("sdl: native %s.%s%s is not there", cls, name, sig);
     return fn;
 }
 
@@ -207,7 +234,7 @@ static void A_pollInputDevices(tl_jcall *c)
 {
     (void)c;
     void (*add)(void *, void *, int, void *, void *, int, int, int, int, int, int, uint8_t) =
-        native_of(SDLCTRL, "nativeAddJoystick", "(ILjava/lang/String;Ljava/lang/String;IIIIIIZ)V");
+        S.sdl2 ? NULL : native_of(SDLCTRL, "nativeAddJoystick", "(ILjava/lang/String;Ljava/lang/String;IIIIIIZ)V");
     void (*remove)(void *, void *, int) = native_of(SDLCTRL, "nativeRemoveJoystick", "(I)V");
     for (int slot = 0; slot < TL_PADS; slot++) {
         bool connected = tl_pad_connected(slot), announced = (atomic_load(&g_pads_announced) >> slot) & 1;
@@ -250,6 +277,35 @@ static void pad_motion(jobj *ev, int device, int source, int64_t down_ms, int64_
     }
     tl_jni_unref(ev);
 }
+
+
+/* ---- SDL 2's differences from SDL 3, and SuperTuxKart's own activity. */
+static jvalue vf(float f) { jvalue v; v.j = 0; v.f = f; return v; }
+static void A_float0(tl_jcall *c) { c->ret = vf(0.0f); }
+static void A_one(tl_jcall *c) { c->ret = vi(1); }
+static void A_two(tl_jcall *c) { c->ret = vi(2); }
+static void A_nullObject(tl_jcall *c) { c->ret = vl(NULL); }
+
+/* SDLActivity.getDisplayDPI: the screen's DisplayMetrics (SDL 2 reads xdpi/ydpi from it). */
+static void A_displayDPI(tl_jcall *c)
+{
+    jobj *m = tl_jni_new_object(tl_jni_class("android/util/DisplayMetrics"));
+    jvalue f; f.j = 0; f.f = 460.0f; tl_jni_set_field(m, "xdpi", "F", f); tl_jni_set_field(m, "ydpi", "F", f);
+    f.f = 3.0f; tl_jni_set_field(m, "density", "F", f); tl_jni_set_field(m, "scaledDensity", "F", f);
+    jvalue i; i.j = 0; i.i = 460; tl_jni_set_field(m, "densityDpi", "I", i);
+    i.i = S.cfg.width; tl_jni_set_field(m, "widthPixels", "I", i);
+    i.i = S.cfg.height; tl_jni_set_field(m, "heightPixels", "I", i);
+    c->ret = vl(m);
+}
+
+/* The "extracting data" bar of SuperTuxKart: the game unpacks its assets itself on the first start and reports how far it is. */
+static void STK_progress(tl_jcall *c)
+{
+    static int last = -1;
+    if (c->args[0].i != last && (c->args[0].i % 10 == 0 || c->args[0].i >= 99)) tl_log_line("sdl: the game reports its data %d%% unpacked", c->args[0].i);
+    last = c->args[0].i;
+}
+static void STK_splash(tl_jcall *c) { (void)c; tl_log_line("sdl: the game hides its splash screen"); }
 
 #define M_(c, n, s, f) { c, n, s, f }
 static const tl_jhle k_hle[] = {
@@ -311,6 +367,37 @@ static const tl_jhle k_hle[] = {
     M_(SDLCTRL, "hapticRun", "(IFI)V", A_void),
     M_(SDLCTRL, "hapticRumble", "(IFFI)V", A_void),
     M_(SDLCTRL, "hapticStop", "(I)V", A_void),
+    /* SDL 2's SDLActivity: the same questions as SDL 3's, a few asked with other signatures. */
+    M_(SDLA, "showTextInput", "(IIII)Z", A_true),
+    M_(SDLA, "openURL", "(Ljava/lang/String;)I", A_minus1),
+    M_(SDLA, "showToast", "(Ljava/lang/String;IIII)I", A_zero),
+    M_(SDLA, "getDisplayDPI", "()Landroid/util/DisplayMetrics;", A_displayDPI),
+    M_(SDLA, "getCurrentOrientation", "()I", A_one),
+    M_(SDLA, "manualBackButton", "()V", A_void),
+    M_(SDLA, "destroyCustomCursor", "(I)V", A_void),
+    /* SDL 2's HID bridge: it is told there are no USB or Bluetooth HID devices to find, and nothing to open. */
+    M_(SDLHID, "initialize", "(ZZ)Z", A_true),
+    M_(SDLHID, "openDevice", "(I)Z", A_false),
+    M_(SDLHID, "closeDevice", "(I)V", A_void),
+    M_(SDLHID, "sendOutputReport", "(I[B)I", A_minus1),
+    M_(SDLHID, "sendFeatureReport", "(I[B)I", A_minus1),
+    M_(SDLHID, "getFeatureReport", "(I[B)Z", A_false),
+    /* SuperTuxKart's activity: its edit box, the display cutout paddings, the unpacking progress, the DNS lookups. */
+    M_(STKA, "getScreenSize", "()I", A_two),
+    M_(STKA, "getInitialOrientation", "()I", A_one),
+    M_(STKA, "getKeyboardHeight", "()I", A_zero),
+    M_(STKA, "getMovedHeight", "()I", A_zero),
+    M_(STKA, "getTopPadding", "()F", A_float0),
+    M_(STKA, "getBottomPadding", "()F", A_float0),
+    M_(STKA, "getLeftPadding", "()F", A_float0),
+    M_(STKA, "getRightPadding", "()F", A_float0),
+    M_(STKA, "isHardwareKeyboardConnected", "()Z", A_false),
+    M_(STKA, "showKeyboard", "(II)V", A_void),
+    M_(STKA, "hideKeyboard", "(Z)V", A_void),
+    M_(STKA, "hideSplashScreen", "()V", STK_splash),
+    M_(STKA, "showExtractProgress", "(I)V", STK_progress),
+    M_(STKA, "getDNSTxtRecords", "(Ljava/lang/String;)[Ljava/lang/String;", A_nullObject),
+    M_(STKA, "getDNSSrvRecords", "(Ljava/lang/String;)V", A_void),
     { NULL, NULL, NULL, NULL }
 };
 
@@ -366,21 +453,26 @@ bool tl_sdl_start(const tl_ga_config *cfg, const char *activity_class)
     S.activity = tl_jni_new_object(tl_jni_class(S.activity_class));
     tl_hle_set_activity(S.activity);
 
-    /* SDLActivity.loadLibraries: the libraries getLibraries() names, SDL3 and then the game's own. */
-    static const char *const libs[] = { "SDL3", "main", NULL };
+    /* SDLActivity.loadLibraries: the libraries getLibraries() names. SDL 3 games name SDL3 and their own library; an SDL 2 game (SuperTuxKart) names only SDL2, and the
+     * activity's main library is opened by nativeRunMain. */
+    S.sdl2 = tl_ld_has_lib("libSDL2.so") && !tl_ld_has_lib("libSDL3.so");
+    static const char *const libs3[] = { "SDL3", "main", NULL }, *const libs2[] = { "SDL2", NULL };
+    const char *const *libs = S.sdl2 ? libs2 : libs3;
     for (int i = 0; libs[i]; i++) {
         load_library(libs[i]);
         if (tl_jni_pending()) { tl_log_line("sdl: loading lib%s.so failed", libs[i]); return false; }
     }
     /* The game's own onCreate then loads FMOD (whose JNI_OnLoad is what lets it find the Java side) and initialises it. */
     static const char *const fmod[] = { "fmod", "fmodstudio", NULL };
-    for (int i = 0; fmod[i]; i++) load_library(fmod[i]);
-    if (tl_jni_pending()) tl_jni_clear();
-    tl_log_line("sdl: libraries loaded");
+    if (tl_ld_has_lib("libfmod.so")) {
+        for (int i = 0; fmod[i]; i++) load_library(fmod[i]);
+        if (tl_jni_pending()) tl_jni_clear();
+    }
+    tl_log_line("sdl: libraries loaded (SDL %d)", S.sdl2 ? 2 : 3);
     /* The D-pad as buttons (DPAD_UP...), the way SDL maps them, rather than as the hat the gamepad layer sends by default. Read by the layer at the first controller update. */
     setenv("TL_PAD_DPAD", "keys", 0);
     static const tl_pad_sink sink = { pad_key, pad_motion };
-    tl_pad_set_sink(&sink);
+    if (!S.sdl2) tl_pad_set_sink(&sink);
     S.started = true;
     return true;
 }
@@ -392,9 +484,9 @@ static void *sdl_main_thread(void *arg)
     pthread_setname_np("SDLThread");
     void *env = tl_jni_env();
     void *cls = tl_jni_class_object(SDLA);
-    void (*init_main)(void *, void *) = native_of(SDLA, "nativeInitMainThread", "()V");
+    void (*init_main)(void *, void *) = find_native(SDLA, "nativeInitMainThread", "()V");
     int (*run_main)(void *, void *, void *, void *, void *) = native_of(SDLA, "nativeRunMain", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/Object;)I");
-    void (*cleanup)(void *, void *) = native_of(SDLA, "nativeCleanupMainThread", "()V");
+    void (*cleanup)(void *, void *) = find_native(SDLA, "nativeCleanupMainThread", "()V");
     if (!run_main) return NULL;
     if (init_main) init_main(env, cls);
     tl_log_line("sdl: SDL_main starting");
@@ -421,19 +513,34 @@ static void *ui_main(void *arg)
     int (*setup_ctrl)(void *, void *) = native_of(SDLCTRL, "nativeSetupJNI", "()I");
     if (setup_ctrl) setup_ctrl(env, tl_jni_class_object(SDLCTRL));
 
+    /* SDL 2's activity also starts its HID bridge (HIDDeviceManager.acquire): the native half keeps the VM and the bridge object to call back into, and SDL's joystick
+     * start-up asks it for devices -- with neither set it dereferences a null VM. */
+    if (S.sdl2) {
+        void (*hid_register)(void *, void *) = find_native(SDLHID, "HIDDeviceRegisterCallback", "()V");
+        if (hid_register) hid_register(env, tl_jni_new_object(tl_jni_class(SDLHID)));
+    }
+
     /* The game's own activity hands its command line over before SDL starts. */
-    void (*set_cmdline)(void *, void *, void *) = tl_jni_native(S.activity_class, "nativeSetCmdLine", "(Ljava/lang/String;)V");
+    void (*set_cmdline)(void *, void *, void *) = find_native(S.activity_class, "nativeSetCmdLine", "(Ljava/lang/String;)V");
     if (set_cmdline) set_cmdline(env, tl_jni_class_object(S.activity_class), tl_jni_new_string(""));
 
-    /* onCreate: orientation, rotation, the screen. SDL_ORIENTATION_PORTRAIT is the natural one of a phone; the surface is landscape, so rotated once. */
-    void (*nat_orient)(void *, void *, int) = native_of(SDLA, "nativeSetNaturalOrientation", "(I)V");
-    if (nat_orient) nat_orient(env, cls, 3);
-    void (*rotation)(void *, void *, int) = native_of(SDLA, "onNativeRotationChanged", "(I)V");
-    if (rotation) rotation(env, cls, 1);
-    void (*insets)(void *, void *, int, int, int, int) = native_of(SDLA, "onNativeInsetsChanged", "(IIII)V");
-    if (insets) insets(env, cls, 0, 0, 0, 0);
-    void (*resolution)(void *, void *, int, int, int, int, float, float) = native_of(SDLA, "nativeSetScreenResolution", "(IIIIFF)V");
-    if (resolution) resolution(env, cls, w, h, w, h, 3.0f, 60.0f);
+    if (S.sdl2) {
+        /* SDLSurface.surfaceChanged: the screen's size, then the rotation (SDL_ORIENTATION_LANDSCAPE, as a phone held sideways), in that order. */
+        void (*resolution2)(void *, void *, int, int, int, int, float) = native_of(SDLA, "nativeSetScreenResolution", "(IIIIF)V");
+        if (resolution2) resolution2(env, cls, w, h, w, h, 60.0f);
+        void (*orient)(void *, void *, int) = native_of(SDLA, "onNativeOrientationChanged", "(I)V");
+        if (orient) orient(env, cls, 1);
+    } else {
+        /* onCreate: orientation, rotation, the screen. SDL_ORIENTATION_PORTRAIT is the natural one of a phone; the surface is landscape, so rotated once. */
+        void (*nat_orient)(void *, void *, int) = native_of(SDLA, "nativeSetNaturalOrientation", "(I)V");
+        if (nat_orient) nat_orient(env, cls, 3);
+        void (*rotation)(void *, void *, int) = native_of(SDLA, "onNativeRotationChanged", "(I)V");
+        if (rotation) rotation(env, cls, 1);
+        void (*insets)(void *, void *, int, int, int, int) = native_of(SDLA, "onNativeInsetsChanged", "(IIII)V");
+        if (insets) insets(env, cls, 0, 0, 0, 0);
+        void (*resolution)(void *, void *, int, int, int, int, float, float) = native_of(SDLA, "nativeSetScreenResolution", "(IIIIFF)V");
+        if (resolution) resolution(env, cls, w, h, w, h, 3.0f, 60.0f);
+    }
 
     /* SDLSurface.surfaceCreated / surfaceChanged, then the activity resuming with focus. */
     void (*vv)(void *, void *);
@@ -477,7 +584,7 @@ unsigned long tl_sdl_frames(void) { return tl_egl_frames_presented(); }
 void tl_sdl_touch(int phase, int id, float x, float y)
 {
     if (!atomic_load(&S.touch_ready) || S.cfg.width <= 0 || S.cfg.height <= 0) return;
-    void (*touch)(void *, void *, int, int, int, float, float, float) = tl_jni_native(SDLA, "onNativeTouch", "(IIIFFF)V");
+    void (*touch)(void *, void *, int, int, int, float, float, float) = find_native(SDLA, "onNativeTouch", "(IIIFFF)V");
     if (!touch) return;
     int action, n;
     if (phase == 0) { n = atomic_fetch_add(&S.fingers, 1) + 1; action = n == 1 ? 0 /* ACTION_DOWN */ : 5 /* ACTION_POINTER_DOWN */; }
@@ -492,6 +599,6 @@ void tl_sdl_set_paused(bool paused)
     /* SDL starts un-paused, and a resume that follows no pause makes it release a GL context it never saved. So only a real change is passed on. */
     static atomic_bool is_paused;
     if (atomic_exchange(&is_paused, paused) == paused) return;
-    void (*vv)(void *, void *) = tl_jni_native(SDLA, paused ? "nativePause" : "nativeResume", "()V");
+    void (*vv)(void *, void *) = find_native(SDLA, paused ? "nativePause" : "nativeResume", "()V");
     if (vv) vv(tl_jni_env(), tl_jni_class_object(SDLA));
 }

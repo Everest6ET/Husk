@@ -126,6 +126,14 @@ bool tl_ld_add_apk(const char *path)
 
 const tl_zip *tl_ld_apk_at(int i) { return (i >= 0 && i < G.napks) ? &G.apks[i] : NULL; }
 
+bool tl_ld_has_lib(const char *name)
+{
+    char path[160];
+    snprintf(path, sizeof(path), "lib/arm64-v8a/%s", name);
+    for (int i = 0; i < G.napks; i++) if (tl_zip_find(&G.apks[i], path)) return true;
+    return false;
+}
+
 static bool fetch_from_apks(const char *name, uint8_t **out, size_t *len)
 {
     char path[160];

@@ -234,6 +234,7 @@ static int b_fputs(const char *str, void *f)
     if (is_log_stream(s)) { console_write(s, str, strlen(str)); return 1; }
     TL_ERRNO_BEGIN(); int r = fputs(str, s); TL_ERRNO_END(); return r;
 }
+static int b_putchar(int c) { char ch = (char)c; console_write(stdout, &ch, 1); return c & 0xff; }
 static int b_puts(const char *str) { console_write(stdout, str, strlen(str)); console_write(stdout, "\n", 1); return 1; }
 static size_t b_wcsftime(wchar_t *buf, size_t n, const wchar_t *fmt, const struct tm *tm) { return wcsftime(buf, n, fmt, tm); }
 static int b_putc(int c, void *f) { return b_fputc(c, f); }
@@ -596,6 +597,7 @@ static char *b___strcpy_chk(char *d, const char *s, size_t dl) { size_t n = strl
 static char *b___strcat_chk(char *d, const char *s, size_t dl) { size_t a = strlen(d), n = strlen(s); if (a + n >= dl) chk_fail("__strcat_chk"); memcpy(d + a, s, n + 1); return d; }
 static char *b___strncpy_chk(char *d, const char *s, size_t n, size_t dl) { if (n > dl) chk_fail("__strncpy_chk"); return strncpy(d, s, n); }
 static size_t b___strlcat_chk(char *d, const char *s, size_t n, size_t dl) { if (n > dl) chk_fail("__strlcat_chk"); return strlcat(d, s, n); }
+static char *b___stpcpy_chk(char *d, const char *s, size_t dl) { size_t n = strlen(s); if (n + 1 > dl) chk_fail("__stpcpy_chk"); return stpcpy(d, s); }
 static size_t b___strlcpy_chk(char *d, const char *s, size_t n, size_t dl) { if (n > dl) chk_fail("__strlcpy_chk"); return strlcpy(d, s, n); }
 static char *b___strrchr_chk(const char *s, int c, size_t len) { (void)len; return strrchr(s, c); }
 static char *b___fgets_chk(char *buf, int size, size_t bufsize, void *f) { if ((size_t)size > bufsize) chk_fail("__fgets_chk"); return b_fgets(buf, size, f); }
@@ -614,14 +616,14 @@ static size_t b_wcsrtombs(char *dst, const wchar_t **src, size_t len, void *ps) 
 
 const tl_bionic_entry tl_tab_str2[] = {
     TL_WRAP("__strcpy_chk", b___strcpy_chk), TL_WRAP("__strcat_chk", b___strcat_chk), TL_WRAP("__strncpy_chk", b___strncpy_chk),
-    TL_WRAP("__strlcpy_chk", b___strlcpy_chk), TL_WRAP("__strlcat_chk", b___strlcat_chk), TL_WRAP("__strrchr_chk", b___strrchr_chk), TL_WRAP("__fgets_chk", b___fgets_chk),
+    TL_WRAP("__stpcpy_chk", b___stpcpy_chk), TL_WRAP("putchar", b_putchar), TL_WRAP("__strlcpy_chk", b___strlcpy_chk), TL_WRAP("__strlcat_chk", b___strlcat_chk), TL_WRAP("__strrchr_chk", b___strrchr_chk), TL_WRAP("__fgets_chk", b___fgets_chk),
     TL_WRAP("__FD_CLR_chk", b___FD_CLR_chk),
     TL_DATA("stdin", &g_stdin_var), TL_DATA("stdout", &g_stdout_var), TL_DATA("stderr", &g_stderr_var),
     TL_WRAP("perror", b_perror), TL_WRAP("rewind", b_rewind), TL_WRAP("fputwc", b_fputwc), TL_WRAP("popen", b_popen), TL_WRAP("pclose", b_pclose),
     TL_WRAP("tmpfile", b_tmpfile), TL_WRAP("wcsrtombs", b_wcsrtombs),
     TL_DIRECT(strncat), TL_DIRECT(strptime), TL_DIRECT(ldiv), TL_DIRECT(sleep), TL_DIRECT(pause), TL_DIRECT(arc4random_buf), TL_DIRECT(nan), TL_DIRECT(nanf),
     TL_DIRECT(ceil), TL_DIRECT(floor), TL_DIRECT(fabs), TL_DIRECT(trunc), TL_DIRECT(cbrt), TL_DIRECT(acosh), TL_DIRECT(atanh), TL_DIRECT(cosh),
-    TL_DIRECT(sinh), TL_DIRECT(exp2), TL_DIRECT(expm1), TL_DIRECT(log1p), TL_DIRECT(hypotf), TL_DIRECT(ilogbf), TL_DIRECT(nextafter),
+    TL_DIRECT(sinh), TL_DIRECT(sinhf), TL_DIRECT(scalbnf), TL_DIRECT(mbstowcs), TL_DIRECT(wcstombs), TL_DIRECT(exp2), TL_DIRECT(expm1), TL_DIRECT(log1p), TL_DIRECT(hypotf), TL_DIRECT(ilogbf), TL_DIRECT(nextafter),
     TL_DIRECT(nextafterf), TL_DIRECT(frexpf), TL_DIRECT(if_indextoname),
     TL_END
 };

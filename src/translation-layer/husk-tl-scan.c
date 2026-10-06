@@ -65,7 +65,7 @@ static bool is_dex(const char *name)
 
 /* Recognised by the libraries an engine always ships. */
 typedef struct engine_scan {
-    bool il2cpp, unity, mono_unity, flutter, react, dotnet, godot, unreal, cocos, gdx, minecraft, sdl;
+    bool il2cpp, unity, mono_unity, flutter, react, dotnet, godot, unreal, cocos, gdx, minecraft, sdl, sdl2, mainlib;
 } engine_scan;
 
 static void note_engine(engine_scan *s, const char *f)
@@ -82,6 +82,8 @@ static void note_engine(engine_scan *s, const char *f)
     else if (!strcmp(f, "libgdx.so")) s->gdx = true;
     else if (!strcmp(f, "libminecraftpe.so")) s->minecraft = true;
     else if (!strcmp(f, "libSDL3.so")) s->sdl = true;
+    else if (!strcmp(f, "libSDL2.so")) s->sdl2 = true;
+    else if (!strcmp(f, "libmain.so")) s->mainlib = true;
 }
 
 static const char *engine_name(const engine_scan *s)
@@ -95,7 +97,8 @@ static const char *engine_name(const engine_scan *s)
     if (s->unreal) return "Unreal Engine";
     if (s->cocos) return "Cocos";
     if (s->minecraft) return "Minecraft";
-    if (s->sdl) return "SDL";
+    /* SDL 2 is told by the pair its Java shell always loads: libSDL2 and the game's own libmain (SDL 3 games ship libSDL3 alone, as it is the only SDL there). */
+    if (s->sdl || (s->sdl2 && s->mainlib)) return "SDL";
     if (s->gdx) return "libGDX";
     return NULL;
 }
