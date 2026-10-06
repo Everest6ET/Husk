@@ -34,6 +34,7 @@
 #include <sys/uio.h>
 #include <mach/mach.h>
 #include <time.h>
+#include <search.h>
 #include <unistd.h>
 #include <utime.h>
 
@@ -350,6 +351,8 @@ static void fill_stat(guest_stat *g, const struct stat *s)
     g->mtime = s->st_mtimespec.tv_sec; g->mtime_ns = s->st_mtimespec.tv_nsec;
     g->ctime = s->st_ctimespec.tv_sec; g->ctime_ns = s->st_ctimespec.tv_nsec;
 }
+static int b_fstat(int fd, guest_stat *g);
+#define fstat_guest_fd b_fstat
 static int b_stat(const char *p, guest_stat *g)
 {
     char b[1024], c[8192]; struct stat s;
@@ -370,6 +373,16 @@ static int b_lstat(const char *p, guest_stat *g)
 {
     char b[1024]; struct stat s;
     TL_ERRNO_BEGIN(); int r = lstat(tl_path_resolve(p, b, sizeof(b)), &s); TL_ERRNO_END();
+    if (r == 0) fill_stat(g, &s);
+    return r;
+}
+/* fstatat: Android's AT_FDCWD is -100 and AT_SYMLINK_NOFOLLOW is 0x100 (macOS: -2 and 0x20). */
+static int b_fstatat(int dirfd, const char *p, guest_stat *g, int flags)
+{
+    if (!p[0] && (flags & 0x1000 /* AT_EMPTY_PATH */)) return fstat_guest_fd(dirfd, g);
+    if (p[0] == '/' || dirfd == -100) return (flags & 0x100) ? b_lstat(p, g) : b_stat(p, g);
+    struct stat s;
+    TL_ERRNO_BEGIN(); int r = fstatat(dirfd, p, &s, (flags & 0x100) ? AT_SYMLINK_NOFOLLOW : 0); TL_ERRNO_END();
     if (r == 0) fill_stat(g, &s);
     return r;
 }
@@ -445,6 +458,17 @@ static void *b_opendir(const char *p)
     g->dir = d;
     return g;
 }
+static void *b_fdopendir(int fd)
+{
+    TL_ERRNO_BEGIN(); DIR *d = fdopendir(fd); int e = errno; TL_ERRNO_END();
+    ftrace("fdopendir", "", d ? 0 : -1, e);
+    if (!d) return NULL;
+    guest_dir *g = calloc(1, sizeof(*g));
+    g->dir = d;
+    return g;
+}
+static int b_dirfd(void *dp) { return dirfd(((guest_dir *)dp)->dir); }
+static void b_rewinddir(void *dp) { rewinddir(((guest_dir *)dp)->dir); }
 static void *b_readdir(void *dp)
 {
     guest_dir *g = dp;
@@ -455,6 +479,30 @@ static void *b_readdir(void *dp)
     return &g->ent;
 }
 static int b_closedir(void *dp) { guest_dir *g = dp; int r = closedir(g->dir); free(g); return r; }
+
+/* scandir: the entries of a directory, optionally filtered and sorted by functions of the guest's own (the same ISA, so they are called directly). */
+static int b_alphasort(const guest_dirent **a, const guest_dirent **b) { return strcoll((*a)->d_name, (*b)->d_name); }
+static int b_scandir(const char *path, guest_dirent ***list, int (*filter)(const guest_dirent *), int (*cmp)(const guest_dirent **, const guest_dirent **))
+{
+    char b[1024];
+    TL_ERRNO_BEGIN(); DIR *d = opendir(tl_path_resolve(path, b, sizeof(b))); TL_ERRNO_END();
+    if (!d) return -1;
+    size_t cap = 16, n = 0;
+    guest_dirent **v = malloc(cap * sizeof(*v));
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        guest_dirent *g = calloc(1, sizeof(*g));
+        g->d_ino = e->d_ino; g->d_reclen = sizeof(*g); g->d_type = e->d_type;
+        snprintf(g->d_name, sizeof(g->d_name), "%s", e->d_name);
+        if (filter && !filter(g)) { free(g); continue; }
+        if (n == cap) { cap *= 2; v = realloc(v, cap * sizeof(*v)); }
+        v[n++] = g;
+    }
+    closedir(d);
+    if (cmp && n > 1) qsort(v, n, sizeof(*v), (int (*)(const void *, const void *))cmp);
+    *list = v;
+    return (int)n;
+}
 
 /* ----------------------------------------------------------------- mmap */
 
@@ -604,7 +652,26 @@ static int b_munmap(void *a, size_t l)
     if (real == 0) return 0;                                 /* the half of a phantom range that was never mapped */
     TL_ERRNO_BEGIN(); int r = munmap(a, real); TL_ERRNO_END(); mm_trace("munmap", a, real, r, errno); return r;
 }
-static int b_mprotect(void *a, size_t l, int prot) { TL_ERRNO_BEGIN(); int r = mprotect(a, l, prot_filter(prot, "mprotect")); int e = errno; TL_ERRNO_END(); mm_trace("mprotect", a, l, prot, r ? e : 0); return r; }
+/* Whether a range is inside memory the guest mapped for itself (not a library's own pages). */
+static bool anon_contains(uintptr_t addr, size_t len)
+{
+    bool in = false;
+    pthread_mutex_lock(&g_anon_lock);
+    for (int i = 0; i < g_nanon && !in; i++) in = addr >= g_anon[i].addr && addr + len <= g_anon[i].addr + g_anon[i].len;
+    pthread_mutex_unlock(&g_anon_lock);
+    return in;
+}
+
+/* A guest turning its own anonymous memory executable is a JIT (LuaJIT, a regex engine) and can not be given that; saying so lets it fall back to its interpreter, where
+ * pretending to succeed would have it jump into data. */
+static int b_mprotect(void *a, size_t l, int prot)
+{
+    if ((prot & PROT_EXEC) && anon_contains((uintptr_t)a, l)) {
+        tl_note_once("mprotect asked to make the guest's own memory executable: refused");
+        tl_set_guest_errno(13);                                                                                            /* EACCES */
+        return -1;
+    }
+    TL_ERRNO_BEGIN(); int r = mprotect(a, l, prot_filter(prot, "mprotect")); int e = errno; TL_ERRNO_END(); mm_trace("mprotect", a, l, prot, r ? e : 0); return r; }
 static int b_madvise(void *a, size_t l, int adv)
 {
     mm_trace("madvise", a, l, adv, 0);
@@ -955,22 +1022,23 @@ const tl_bionic_entry tl_tab_io[] = {
     TL_WRAP("open", b_open), TL_WRAP("__open_2", b___open_2), TL_WRAP("close", b_close), TL_WRAP("read", b_read),
     TL_WRAP("__read_chk", b___read_chk), TL_WRAP("write", b_write), TL_WRAP("writev", b_writev),
     TL_WRAP("pread64", b_pread64), TL_WRAP("pwrite64", b_pwrite64), TL_WRAP("__pread64_chk", b___pread64_chk), TL_WRAP("__pwrite64_chk", b___pwrite64_chk), TL_WRAP("__pwrite_chk", b___pwrite64_chk), TL_WRAP("__pread_chk", b___pread64_chk), TL_WRAP("lseek", b_lseek), TL_WRAP("lseek64", b_lseek),
-    TL_WRAP("dup", b_dup), TL_WRAP("dup2", b_dup2), TL_WRAP("pipe", b_pipe), TL_WRAP("fsync", b_fsync),
+    TL_WRAP("dup", b_dup), TL_WRAP("dup2", b_dup2), TL_WRAP("pipe", b_pipe), TL_WRAP("fsync", b_fsync), TL_WRAP("fdatasync", b_fsync),
     TL_WRAP("ftruncate", b_ftruncate), TL_WRAP("truncate", b_truncate), TL_WRAP("isatty", b_isatty), TL_WRAP("flock", b_flock),
     TL_WRAP("unlink", b_unlink), TL_WRAP("rmdir", b_rmdir), TL_WRAP("mkdir", b_mkdir), TL_WRAP("access", b_access),
     TL_WRAP("chmod", b_chmod), TL_WRAP("fchmod", b_fchmod), TL_WRAP("link", b_link), TL_WRAP("symlink", b_symlink),
     TL_WRAP("readlink", b_readlink), TL_WRAP("realpath", b_realpath), TL_WRAP("getcwd", b_getcwd),
     TL_WRAP("utimes", b_utimes), TL_WRAP("utime", b_utime), TL_WRAP("futimens", b_futimens),
     TL_WRAP("__umask_chk", b___umask_chk), TL_WRAP("sendfile", b_sendfile),
-    TL_WRAP("stat", b_stat), TL_WRAP("lstat", b_lstat), TL_WRAP("fstat", b_fstat), TL_WRAP("statfs", b_statfs),
+    TL_WRAP("stat", b_stat), TL_WRAP("fstatat", b_fstatat), TL_WRAP("fstatat64", b_fstatat), TL_WRAP("lstat", b_lstat), TL_WRAP("fstat", b_fstat), TL_WRAP("statfs", b_statfs),
     TL_WRAP("fcntl", b_fcntl), TL_WRAP("ioctl", b_ioctl),
-    TL_WRAP("opendir", b_opendir), TL_WRAP("readdir", b_readdir), TL_WRAP("closedir", b_closedir),
+    TL_WRAP("scandir", b_scandir), TL_WRAP("alphasort", b_alphasort), TL_WRAP("versionsort", b_alphasort), TL_WRAP("opendir", b_opendir), TL_WRAP("fdopendir", b_fdopendir), TL_WRAP("dirfd", b_dirfd), TL_WRAP("rewinddir", b_rewinddir), TL_WRAP("readdir", b_readdir), TL_WRAP("closedir", b_closedir),
     TL_WRAP("mmap", b_mmap), TL_WRAP("munmap", b_munmap), TL_WRAP("mprotect", b_mprotect), TL_WRAP("madvise", b_madvise),
     TL_WRAP("mremap", b_mremap),
     TL_WRAP("clock_gettime", b_clock_gettime), TL_WRAP("clock_getres", b_clock_getres), TL_WRAP("gettimeofday", b_gettimeofday),
     TL_WRAP("nanosleep", b_nanosleep), TL_WRAP("usleep", b_usleep),
     TL_DIRECT(clock), TL_DIRECT(time), TL_DIRECT(difftime), TL_DIRECT(gmtime), TL_DIRECT(gmtime_r), TL_DIRECT(localtime),
     TL_DIRECT(localtime_r), TL_DIRECT(mktime), TL_DIRECT(strftime), TL_DIRECT(strftime_l), TL_DIRECT(tzset),
+    TL_DIRECT(tfind), TL_DIRECT(tsearch), TL_DIRECT(tdelete), TL_DIRECT(twalk), TL_DIRECT(stpcpy),
     TL_DIRECT(ctime), TL_DIRECT(ctime_r), TL_DIRECT(asctime), TL_DIRECT(asctime_r), TL_DIRECT(timegm),
     TL_WRAP("sigaction", b_sigaction), TL_WRAP("signal", b_signal), TL_WRAP("sigemptyset", b_sigemptyset),
     TL_WRAP("sigfillset", b_sigfillset), TL_WRAP("sigaddset", b_sigaddset), TL_WRAP("sigdelset", b_sigdelset),
