@@ -42,14 +42,7 @@ struct JITCard: View {
                     Image(systemName: "bolt.fill").font(.title3).foregroundStyle(Color.accentColor)
                 }
                 VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 8) {
-                        Text("StikJIT").font(.title3.weight(.semibold))
-                        Text("RECOMMENDED")
-                            .font(.caption2.weight(.bold))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 7).padding(.vertical, 3)
-                            .background(Color.accentColor, in: Capsule())
-                    }
+                    Text("StikJIT").font(.title3.weight(.semibold))
                     Text("Turn on JIT").font(.subheadline).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 0)
