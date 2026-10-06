@@ -121,14 +121,14 @@ struct LibraryTab: View {
                     Text(started ? host.status
                                  : JITBootstrap.isDebuggerAttached
                                    ? "Your apps are here; start it to open them."
-                                   : "Husk needs JIT, which only a debugger can grant.")
+                                   : "Needs JIT. StikJIT is built in — the recommended way.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
                 }
             }
             Spacer(minLength: 6)
-            Button(started ? "Show" : JITBootstrap.isDebuggerAttached ? "Start" : "JIT") {
+            Button(started ? "Show" : JITBootstrap.isDebuggerAttached ? "Start" : "Enable JIT") {
                 if started { onOpenGuest() } else { onStartAndroid() }
             }
             .buttonStyle(.borderedProminent)

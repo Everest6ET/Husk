@@ -192,9 +192,9 @@ struct OnboardingView: View {
                 .font(.system(size: 54))
                 .foregroundStyle(Theme.accent)
             Text("Turn on JIT").font(.largeTitle.weight(.semibold))
-            Text("Android needs JIT, which on iOS only an attached debugger can grant. "
-               + "Husk can be that debugger itself: on iOS 27 it pairs with this iPhone "
-               + "from Settings, no computer needed. StikDebug works too.")
+            Text("Android and Translation Layer games need JIT, which on iOS only an attached debugger can grant. "
+               + "StikJIT is built into Husk and is the recommended way: it turns JIT on from inside the app, "
+               + "with no computer and no other app. StikDebug and TrollStore work too.")
                 .font(.callout).foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 34)
@@ -202,7 +202,7 @@ struct OnboardingView: View {
                 Label(state, systemImage: "checkmark.circle.fill")
                     .font(.callout.weight(.medium)).foregroundStyle(.green)
             }
-            Button(jitState == nil ? "Set up JIT now" : "Change JIT setup") { settingUpJIT = true }
+            Button(jitState == nil ? "Set Up StikJIT Now" : "Change JIT Setup") { settingUpJIT = true }
                 .font(.body.weight(.semibold))
                 .foregroundStyle(Theme.accent)
                 .padding(.top, 4)

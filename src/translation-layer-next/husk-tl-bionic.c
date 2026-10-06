@@ -7,6 +7,7 @@
 #define _DARWIN_C_SOURCE
 #include "husk-tl-bionic.h"
 
+#include <crt_externs.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <libgen.h>
@@ -666,6 +667,9 @@ static void build(void)
 void *tl_bionic_find(const char *name)
 {
     pthread_once(&g_once, build);
+    /* environ is a variable the guest reads whenever it walks the environment. The process may change it under the guest (setenv reallocates the array and frees the
+     * old one), so the guest is given the address of the live variable, not of a copy made at start-up. */
+    if (name[0] == 'e' && !strcmp(name, "environ")) return _NSGetEnviron();
     size_t i = fnv(name) & (g_nslots - 1);
     while (g_slots[i].name) {
         if (!strcmp(g_slots[i].name, name)) return g_slots[i].addr;

@@ -11,23 +11,25 @@ struct SettingsTab: View {
                     NavigationLink { AboutSettings() } label: { appCard }
                 }
 
+                Section {
+                    row(JITSettings(), "bolt.fill", .yellow, "JIT & Sideload", "StikJIT is built in — the recommended way")
+                } header: {
+                    Text("JIT")
+                } footer: {
+                    Text("Android and Translation Layer games need JIT. StikJIT, built into Husk, turns it on without a computer.")
+                }
+
                 Section("General") {
+                    row(DiscoverView(), "sparkle.magnifyingglass", .mint, "Discover", "Find apps in F-Droid and other repositories")
                     row(LibrarySettings(), "square.grid.2x2.fill", .blue, "Library", "Your apps and their icons")
                     row(PerformanceSettings(), "speedometer", .orange, "Performance", "Renderer, sound")
                     row(AppearanceSettings(), "paintbrush.fill", .pink, "Appearance", "Light or dark, accent colour, app icon")
                 }
 
                 Section("Emulator") {
-                    row(JITSettings(), "bolt.fill", .yellow, "JIT & Sideload", "Executable memory, starting up")
                     row(InputSettings(), "hand.tap.fill", .indigo, "Input", "Screen, touch, keyboard")
                     row(NetworkSettings(), "globe", .green, "Network", "Internet and saved sessions")
                     row(SavedMachineSettings(), "externaldrive.fill", .teal, "Saved Machine", "Snapshots and automatic saving")
-                }
-
-                Section {
-                    row(TranslationLayerSettings(), "testtube.2", .purple, "Android Translation Layer", "Apps without booting Android")
-                } header: {
-                    Text("Experimental")
                 }
             }
             .listStyle(.insetGrouped)
@@ -408,6 +410,12 @@ struct JITSettings: View {
     var body: some View {
         Form {
             Section {
+                JITCard()
+            }
+            .listRowInsets(EdgeInsets())
+            .listRowBackground(Color.clear)
+
+            Section {
                 Picker("Method", selection: $jit.method) {
                     ForEach(JITMethod.allCases) { Text($0.title).tag($0) }
                 }
@@ -422,7 +430,7 @@ struct JITSettings: View {
                     Label("Set up JIT", systemImage: "wand.and.stars")
                 }
             } header: {
-                Text("Method")
+                Text("Other Ways to Turn On JIT")
             } footer: {
                 Text(jit.method == .automatic
                      ? jit.automaticDescription + " Built-in StikJIT needs iOS 26, LocalDevVPN, and a "

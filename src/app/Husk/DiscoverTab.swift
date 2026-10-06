@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import SwiftUI
 
-/// Apps from the repositories you add, to install into Android.
-struct DiscoverTab: View {
+/// Apps from the repositories you add, to install into Android. Pushed from Settings, so it has no navigation stack of its own.
+struct DiscoverView: View {
     @ObservedObject private var manager = SourceManager.shared
     @ObservedObject private var host = AndroidHost.shared
 
@@ -13,53 +13,52 @@ struct DiscoverTab: View {
     @State private var debouncedSearchText = ""
 
     var body: some View {
-        NavigationStack {
-            Group {
-                if manager.isLoading && manager.sources.isEmpty {
-                    ProgressView("Fetching Repositories…")
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if manager.sources.isEmpty {
-                    EmptyState(title: "No Repositories",
-                               message: "Add a source to start discovering apps.",
-                               systemImage: "tray",
-                               actionTitle: "Add Source",
-                               action: { showingAddSource = true })
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else {
-                    list
-                }
+        Group {
+            if manager.isLoading && manager.sources.isEmpty {
+                ProgressView("Fetching Repositories…")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if manager.sources.isEmpty {
+                EmptyState(title: "No Repositories",
+                           message: "Add a source to start discovering apps.",
+                           systemImage: "tray",
+                           actionTitle: "Add Source",
+                           action: { showingAddSource = true })
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                list
             }
-            .background(Theme.backdrop)
-            .navigationTitle("Discover")
-            .searchable(text: $searchText, prompt: "Search \(totalAppCount) apps")
-            .toolbar {
-                ToolbarItemGroup(placement: .topBarTrailing) {
-                    Button { Task { await manager.fetchSources() } } label: {
-                        Label("Refresh", systemImage: "arrow.clockwise")
+        }
+        .background(Theme.backdrop)
+        .navigationTitle("Discover")
+        .navigationBarTitleDisplayMode(.large)
+        .searchable(text: $searchText, prompt: "Search \(totalAppCount) apps")
+        .toolbar {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                Button { Task { await manager.fetchSources() } } label: {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                }
+                Menu {
+                    Button { showingAddSource = true } label: {
+                        Label("Add Source", systemImage: "plus")
                     }
-                    Menu {
-                        Button { showingAddSource = true } label: {
-                            Label("Add Source", systemImage: "plus")
-                        }
-                        Button { showingSources = true } label: {
-                            Label("Manage Repositories", systemImage: "list.bullet")
-                        }
-                    } label: { Label("Repositories", systemImage: "ellipsis.circle") }
-                }
+                    Button { showingSources = true } label: {
+                        Label("Manage Repositories", systemImage: "list.bullet")
+                    }
+                } label: { Label("Repositories", systemImage: "ellipsis.circle") }
             }
-            .sheet(isPresented: $showingSources) { sourcesSheet }
-            .sheet(isPresented: $showingAddSource) { addSourceSheet }
-            .onAppear {
-                if manager.sources.isEmpty && !manager.isLoading {
-                    Task { await manager.fetchSources() }
-                }
+        }
+        .sheet(isPresented: $showingSources) { sourcesSheet }
+        .sheet(isPresented: $showingAddSource) { addSourceSheet }
+        .onAppear {
+            if manager.sources.isEmpty && !manager.isLoading {
+                Task { await manager.fetchSources() }
             }
-            .task(id: searchText) {
-                do {
-                    try await Task.sleep(nanoseconds: 200_000_000)
-                    debouncedSearchText = searchText
-                } catch {}
-            }
+        }
+        .task(id: searchText) {
+            do {
+                try await Task.sleep(nanoseconds: 200_000_000)
+                debouncedSearchText = searchText
+            } catch {}
         }
     }
 

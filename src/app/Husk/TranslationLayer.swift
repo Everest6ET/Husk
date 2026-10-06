@@ -3,27 +3,16 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
-/// Experimental: Android apps without booting Android.
+/// Android apps without booting Android.
 ///
-/// Husk runs an APK by booting a whole Android system under QEMU and showing
-/// one app's surface. That works, and it costs a kernel, an init, a system
-/// server and minutes of emulated CPU before the first frame. Android
-/// Translation Layer, on Linux, shows the other way: keep only the app's own
-/// code -- its Dex and its native libraries -- and run it against a rewrite of
-/// the Android framework on the host itself, so there is nothing to boot.
-///
-/// Doing that on iOS is a long road, and docs/04-translation-layer.md is the
-/// map. What exists so far is the first stretch: apps can be added here and
-/// each gets a report of what running it would take, and the phone can be
-/// asked the questions the design rests on. Nothing opens an app yet, and
-/// nothing here changes how the rest of Husk runs.
+/// Husk runs an APK in one of two ways. It can boot a whole Android system under QEMU and show one app's surface:
+/// that runs anything, and costs a kernel, an init, a system server and minutes of emulated CPU before the first frame.
+/// Or -- this -- it can keep only the app's own code, its Dex and its native libraries, and run it against a rewrite of the
+/// Android framework on the phone itself, so there is nothing to boot. Games built on Unity, cocos2d-x, Minecraft's
+/// GameActivity and SDL3 start in seconds this way. docs/04-translation-layer.md is the design.
 enum TranslationLayer {
-    static let enabledKey = "husk.translationLayer"
-
-    static var isEnabled: Bool { UserDefaults.standard.bool(forKey: enabledKey) }
-
     /// Whether the technical detail is shown: library reports, device checks, logs. Off, the screens carry
-    /// only what is needed to add an app, switch the layer on and run it. Set in Settings > About.
+    /// only what is needed to add an app and run it. Set in Settings > About.
     static let devInfoKey = "husk.devInfo"
 
     /// One folder per app. Kept apart from Android's apps: those live on the
@@ -360,58 +349,48 @@ final class TranslationLayerStore: ObservableObject {
 
 // MARK: - Settings
 
-struct TranslationLayerSettings: View {
+struct TranslationLayerTab: View {
     @ObservedObject private var store = TranslationLayerStore.shared
-    @State private var enabled = TranslationLayer.isEnabled
     @State private var importing = false
     @AppStorage(TranslationLayer.devInfoKey) private var devInfo = false
 
     var body: some View {
-        Form {
-            Section {
-                Toggle("Android Translation Layer", isOn: $enabled)
-                    .onChange(of: enabled) { v in
-                        UserDefaults.standard.set(v, forKey: TranslationLayer.enabledKey)
-                        HuskLog.log("ui", v ? "translation layer on" : "translation layer off")
-                    }
-            } header: {
-                Text("Experimental")
-            } footer: {
-                if !devInfo {
-                    Text("Runs some Android apps, such as Unity and cocos2d-x games, straight on your iPhone without starting "
-                       + "Android. Experimental, and it needs JIT turned on.")
-                } else {
-                Text("Runs an app's own code directly, against a rewrite of Android's "
-                   + "framework, instead of booting a whole Android system -- the "
-                   + "approach of Android Translation Layer on Linux, rebuilt for iOS. "
-                   + "It can run Unity and cocos2d-x games (experimental) and reports what other apps "
-                   + "would need, and checks this iPhone for what the design depends on. "
-                   + "Android itself is unaffected either way.")
+        NavigationStack {
+            Form {
+                // Everything here needs JIT, and StikJIT -- built into Husk -- is the way to get it.
+                Section {
+                    JITCard()
                 }
-            }
+                .listRowInsets(EdgeInsets())
+                .listRowBackground(Color.clear)
 
-            if enabled {
                 appsSection
                 if devInfo {
                     checksSection
                     progressSection
                 }
             }
-        }
-        .huskForm()
-        .navigationTitle("Translation Layer")
-        .huskFilePicker(isPresented: $importing) { urls in
-            HuskLog.log("ui", "translation layer: adding \(urls.count) file(s): "
-                      + urls.map(\.lastPathComponent).joined(separator: ", "))
-            store.add(urls)
-        }
-        .onAppear { store.adoptDroppedAPKs() }
-        .alert("Could not add the app", isPresented: Binding(
-                get: { store.lastError != nil },
-                set: { if !$0 { store.lastError = nil } })) {
-            Button("OK", role: .cancel) { store.lastError = nil }
-        } message: {
-            Text(store.lastError ?? "")
+            .navigationTitle("Translation Layer")
+            .navigationBarTitleDisplayMode(.large)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { importing = true } label: { Label("Add App", systemImage: "plus") }
+                        .disabled(store.busy != nil)
+                }
+            }
+            .huskFilePicker(isPresented: $importing) { urls in
+                HuskLog.log("ui", "translation layer: adding \(urls.count) file(s): "
+                          + urls.map(\.lastPathComponent).joined(separator: ", "))
+                store.add(urls)
+            }
+            .onAppear { store.adoptDroppedAPKs() }
+            .alert("Could not add the app", isPresented: Binding(
+                    get: { store.lastError != nil },
+                    set: { if !$0 { store.lastError = nil } })) {
+                Button("OK", role: .cancel) { store.lastError = nil }
+            } message: {
+                Text(store.lastError ?? "")
+            }
         }
     }
 
@@ -433,14 +412,15 @@ struct TranslationLayerSettings: View {
             Button {
                 importing = true
             } label: {
-                Label("Add APK", systemImage: "plus")
+                Label("Add APK or Bundle", systemImage: "plus")
             }
             .disabled(store.busy != nil)
         } header: {
             Text("Apps")
         } footer: {
-            Text("Husk keeps its own copy, apart from Android's. Pick a base APK and "
-               + "its split pieces together to add them as one app.")
+            Text("Runs Android games straight on your iPhone, without starting Android. Add an APK, or a bundle "
+               + "(.xapk, .apkm, .apks) — or pick a base APK and its split pieces together. "
+               + "Husk keeps its own copy, apart from Android's.")
         }
     }
 
@@ -483,8 +463,8 @@ struct TranslationLayerSettings: View {
             DetailRow(label: "App reports", value: "working", mono: false)
             DetailRow(label: "Device checks", value: "working", mono: false)
             DetailRow(label: "Library loader", value: "working", mono: false)
-            DetailRow(label: "Android runtime", value: "Unity, cocos2d-x games", mono: false)
-            DetailRow(label: "Opening apps", value: "Unity, cocos2d-x games (experimental)", mono: false)
+            DetailRow(label: "Android runtime", value: "Unity, cocos2d-x, GameActivity, SDL3", mono: false)
+            DetailRow(label: "Opening apps", value: "Unity, cocos2d-x, Minecraft and SDL3 games", mono: false)
         } header: {
             Text("Where it stands")
         } footer: {
@@ -514,14 +494,14 @@ struct TLVerdict {
     }
 }
 
-/// What a person who is not debugging needs to know about an app: can it be run, or is it only an experiment.
+/// What a person who is not debugging needs to know about an app: will it run here, or may it not.
 struct TLPlainStatus {
     let title: String
     let tint: Color
 
     init(_ report: TLReport?) {
         if report?.runsOnNativeRuntime == true { title = "Ready to run"; tint = Theme.good }
-        else { title = "Experimental"; tint = Theme.textDim }
+        else { title = "May not run"; tint = Theme.textDim }
     }
 }
 

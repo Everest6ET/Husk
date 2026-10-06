@@ -111,6 +111,7 @@
 		F4833815482790E167401965 /* husk-tl-ld.c in Sources */ = {isa = PBXBuildFile; fileRef = 4D54C1E4F20A020AC62C9419 /* husk-tl-ld.c */; };
 		F6880CA30640F688356229CF /* HuskMetalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D91C1E7D6301EBCE06FEE0FE /* HuskMetalView.swift */; };
 		F6B3DA43CA16FAF920EF236D /* AppTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = D05B2EFC533719ED2E455C24 /* AppTheme.swift */; };
+		FA5016C04E0EFC5FD0CF32F9 /* JITCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = F54A47159D39CB8039E9E44E /* JITCard.swift */; };
 		FA8097D8E118A8CE8DBCF763 /* LICENSE-StikJIT-MPL-2.0.txt in Resources */ = {isa = PBXBuildFile; fileRef = 2E95AED70FA457D447AE0DFF /* LICENSE-StikJIT-MPL-2.0.txt */; };
 		FC2A6DCF8BB4C5E874D4F4D3 /* HuskGamepad.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE13DC571D193621CD6149EA /* HuskGamepad.swift */; };
 		FC8F2E79EF7CDBC99D95F4F6 /* husk-tl-jni-input.c in Sources */ = {isa = PBXBuildFile; fileRef = 28152D0874B73915225FE8EA /* husk-tl-jni-input.c */; };
@@ -285,6 +286,7 @@
 		EF6C1917FEC08090833D9CF0 /* JITPairing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JITPairing.swift; sourceTree = "<group>"; };
 		F13D91C39BBC9C52E70E1520 /* husk-tl-dexindex.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "husk-tl-dexindex.h"; sourceTree = "<group>"; };
 		F337AAF2A6860FCB03810AA6 /* HuskGLView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HuskGLView.swift; sourceTree = "<group>"; };
+		F54A47159D39CB8039E9E44E /* JITCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JITCard.swift; sourceTree = "<group>"; };
 		F7FE1E9438A6B743456806DF /* husk-tl-xmem.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "husk-tl-xmem.h"; sourceTree = "<group>"; };
 		FBD3B29AEC525999260507BD /* husk-tl-opensles.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "husk-tl-opensles.c"; sourceTree = "<group>"; };
 		FD559A37CF59C3290F29FA43 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
@@ -347,6 +349,7 @@
 				FD559A37CF59C3290F29FA43 /* Info.plist */,
 				5664FE015975D16E7500F3C7 /* JITBootstrap.swift */,
 				43C233A62FB57030C0818489 /* JITBuiltIn.swift */,
+				F54A47159D39CB8039E9E44E /* JITCard.swift */,
 				EF6C1917FEC08090833D9CF0 /* JITPairing.swift */,
 				83275C7FEF2DEB950028D914 /* JITSetup.swift */,
 				5894E74BA308222C01AEE311 /* JITSetupView.swift */,
@@ -718,6 +721,7 @@
 				F6880CA30640F688356229CF /* HuskMetalView.swift in Sources */,
 				507309F42DC8965C816DC580 /* JITBootstrap.swift in Sources */,
 				C1A4C57DAA6BFD79AAE5FD88 /* JITBuiltIn.swift in Sources */,
+				FA5016C04E0EFC5FD0CF32F9 /* JITCard.swift in Sources */,
 				E7095C2C706335203227319A /* JITPairing.swift in Sources */,
 				70AF7E999105691EB51B54FD /* JITSetup.swift in Sources */,
 				D61EF536158A8495F2B0CE79 /* JITSetupView.swift in Sources */,
