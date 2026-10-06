@@ -28,6 +28,7 @@ extern "C" {
  */
 /* Describe the driver as OpenGL ES 3.1 and write the game's "#version 310 es" shaders down to 300 es (see husk-tl-egl-es31.inc) */
 void tl_egl_es31_shim(bool on);
+void tl_egl_offscreen_windows(bool on);     /* window surfaces are off-screen buffers: the layer belongs to another API (Vulkan) */
 bool tl_egl_init(const char *egl_path, const char *gles_path, const char *frame_dir, int frame_every);
 
 /* The address of a GLES/EGL function by name, adapters first, or NULL. */

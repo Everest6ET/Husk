@@ -178,6 +178,7 @@ bool tl_na_start(const tl_ga_config *cfg)
     tl_log_line("ue4: %d classes in the APK's DEX", n);
     if (!tl_ld_add_apk(cfg->apk_path)) return false;
     tl_egl_es31_shim(true);
+    tl_egl_offscreen_windows(!getenv("TL_UE4_NO_VULKAN") && (getenv("TL_UE4_FORCE_VULKAN") || tl_vk_available()));
     if (cfg->angle_egl && !tl_egl_init(cfg->angle_egl, cfg->angle_gles, cfg->frame_dir, cfg->frame_every)) return false;
     tl_jni_init();
     tl_hle_configure(cfg->package_name, cfg->apk_path, cfg->data_dir, cfg->width, cfg->height);
@@ -303,4 +304,19 @@ unsigned long tl_na_frames(void) { return tl_egl_frames_presented() + tl_vk_fram
 
 void tl_inq_touch(int phase, int id, float x, float y);
 void tl_na_touch(int phase, int id, float x, float y) { tl_inq_touch(phase, id, x, y); }
-void tl_na_set_paused(bool paused) { (void)paused; }
+/* The app left the screen or came back: the engine is told as an activity is -- onPause and the window losing focus, onResume and gaining it -- so it stops drawing and
+ * silences its audio instead of feeding a GPU iOS will no longer let it have. Only real changes are passed on. */
+void tl_na_set_paused(bool paused)
+{
+    static atomic_bool is_paused;
+    if (!N.started || !N.callbacks.onResume) return;
+    if (atomic_exchange(&is_paused, paused) == paused) return;
+    tl_log_line("ue4: %s", paused ? "pausing" : "resuming");
+    if (paused) {
+        if (N.callbacks.onWindowFocusChanged) N.callbacks.onWindowFocusChanged(&N.na, 0);
+        if (N.callbacks.onPause) N.callbacks.onPause(&N.na);
+    } else {
+        if (N.callbacks.onResume) N.callbacks.onResume(&N.na);
+        if (N.callbacks.onWindowFocusChanged) N.callbacks.onWindowFocusChanged(&N.na, 1);
+    }
+}

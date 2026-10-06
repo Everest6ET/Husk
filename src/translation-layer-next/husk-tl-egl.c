@@ -211,9 +211,12 @@ static EGLenum w_eglQueryAPI(void) { return a_eglQueryAPI(); }
 static EGLint w_eglGetError(void) { return E.ready ? a_eglGetError() : 0x3001; }
 
 /* The guest's ANativeWindow: a Metal layer on the phone, an off-screen buffer for tests. */
+static bool g_offscreen_windows;
+/* A game that draws with Vulkan on the window's layer still makes an OpenGL ES context first, to read what the device offers. The layer is MoltenVK's, so ANGLE gets a buffer instead. */
+void tl_egl_offscreen_windows(bool on) { g_offscreen_windows = on; }
 static EGLSurface w_eglCreateWindowSurface(EGLDisplay d, EGLConfig cfg, void *win, const EGLint *at)
 {
-    if (E.frame_dir[0]) {
+    if (E.frame_dir[0] || g_offscreen_windows) {
         EGLint pb[] = { EGL_WIDTH, tl_nwindow_width(win), EGL_HEIGHT, tl_nwindow_height(win), EGL_NONE };
         EGLSurface s = a_eglCreatePbufferSurface(d, cfg, pb);
         tl_log_line("egl: window %dx%d -> off-screen surface %p", pb[1], pb[3], s);
