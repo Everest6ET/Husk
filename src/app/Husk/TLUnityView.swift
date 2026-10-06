@@ -109,7 +109,9 @@ final class TLUnityUIView: UIView, UIKeyInput {
         guard bounds.width > 0, bounds.height > 0 else { return }
         let w = Int((bounds.width * contentScaleFactor).rounded())
         let h = Int((bounds.height * contentScaleFactor).rounded())
-        (layer as? CAMetalLayer)?.drawableSize = CGSize(width: w, height: h)
+        // An Unreal game draws with MoltenVK, which sizes this layer itself to the swapchain it made; sizing it back here on every layout would leave the layer and the
+        // swapchain disagreeing from then on.
+        if !(engine == .ue4 && launched) { (layer as? CAMetalLayer)?.drawableSize = CGSize(width: w, height: h) }
         // A landscape game is told its size once, when it starts, so it must not start while the screen is still
         // turning: wait for a surface that is wider than it is tall.
         let ready = engine != .unity ? (portrait ? h > w : w > h) : true
