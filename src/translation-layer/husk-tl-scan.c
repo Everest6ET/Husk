@@ -65,7 +65,7 @@ static bool is_dex(const char *name)
 
 /* Recognised by the libraries an engine always ships. */
 typedef struct engine_scan {
-    bool il2cpp, unity, mono_unity, flutter, react, dotnet, godot, unreal, cocos, gdx, minecraft, sdl, sdl2, mainlib;
+    bool il2cpp, unity, mono_unity, flutter, react, dotnet, godot, unreal, cocos, gdx, minecraft, sdl, sdl2, mainlib, rockstar_game, openal, mpg123;
 } engine_scan;
 
 static void note_engine(engine_scan *s, const char *f)
@@ -84,10 +84,15 @@ static void note_engine(engine_scan *s, const char *f)
     else if (!strcmp(f, "libSDL3.so")) s->sdl = true;
     else if (!strcmp(f, "libSDL2.so")) s->sdl2 = true;
     else if (!strcmp(f, "libmain.so")) s->mainlib = true;
+    else if (!strcmp(f, "libGame.so")) s->rockstar_game = true;
+    else if (!strcmp(f, "libopenal.so")) s->openal = true;
+    else if (!strcmp(f, "libVendor_mpg123.so")) s->mpg123 = true;
 }
 
 static const char *engine_name(const engine_scan *s)
 {
+    /* Rockstar's GTA port: libGame with its own OpenAL and mpg123 (a Flutter shell around it would otherwise make it look like a Flutter app). */
+    if (s->rockstar_game && s->openal && s->mpg123) return "Rockstar";
     if (s->il2cpp) return "Unity (IL2CPP)";
     if (s->unity) return s->mono_unity ? "Unity (Mono)" : "Unity";
     if (s->flutter) return "Flutter";

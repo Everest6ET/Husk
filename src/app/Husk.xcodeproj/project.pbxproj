@@ -88,6 +88,7 @@
 		BC3BB676A454632D3686E110 /* husk-tl-shim.c in Sources */ = {isa = PBXBuildFile; fileRef = 08B65F9A6BAA4E2376A0CBD8 /* husk-tl-shim.c */; };
 		BCE050943992B8B07A7B70A9 /* HuskJITHelper.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = C48A9F257449472675C4201A /* HuskJITHelper.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		BEDEEECE3AEB59701665C0D3 /* StikJIT.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = BBCF8D04E0CEDAB3542C5271 /* StikJIT.xcframework */; };
+		BF3B75F24D911729EFB2E8A6 /* husk-tl-gtasa.c in Sources */ = {isa = PBXBuildFile; fileRef = FCBE4C5BD3BC5033100C968E /* husk-tl-gtasa.c */; };
 		C1A4C57DAA6BFD79AAE5FD88 /* JITBuiltIn.swift in Sources */ = {isa = PBXBuildFile; fileRef = 43C233A62FB57030C0818489 /* JITBuiltIn.swift */; };
 		C561B0A164BC213A2A56D9C9 /* husk-tl-zip.c in Sources */ = {isa = PBXBuildFile; fileRef = 9E133BDBB6CB711003066815 /* husk-tl-zip.c */; };
 		CE5D4B4D666CC7B351345EB3 /* LibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56DAE8E0DADC5483D33F6B7B /* LibraryView.swift */; };
@@ -233,6 +234,7 @@
 		766F6F7816E672E83CFFE47D /* PipeShim.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = PipeShim.c; sourceTree = "<group>"; };
 		771B4FD56CABC214FEED6DFE /* GuestImage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GuestImage.swift; sourceTree = "<group>"; };
 		79E4865C5FE44ADD210A4917 /* OnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingView.swift; sourceTree = "<group>"; };
+		7B5E2D3E9F12A2A3BB5BBDC7 /* husk-tl-gtasa.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "husk-tl-gtasa.h"; sourceTree = "<group>"; };
 		7CC582FAC1F17C1C659C9D47 /* husk-tl-bionic-io.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "husk-tl-bionic-io.c"; sourceTree = "<group>"; };
 		7F8AFBCC1E9A402444C2D1E6 /* husk-tl-bionic-net.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "husk-tl-bionic-net.c"; sourceTree = "<group>"; };
 		7FD8DC66414547110F0E0B0E /* husk-tl-res.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "husk-tl-res.c"; sourceTree = "<group>"; };
@@ -294,6 +296,7 @@
 		F54A47159D39CB8039E9E44E /* JITCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JITCard.swift; sourceTree = "<group>"; };
 		F7FE1E9438A6B743456806DF /* husk-tl-xmem.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "husk-tl-xmem.h"; sourceTree = "<group>"; };
 		FBD3B29AEC525999260507BD /* husk-tl-opensles.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "husk-tl-opensles.c"; sourceTree = "<group>"; };
+		FCBE4C5BD3BC5033100C968E /* husk-tl-gtasa.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "husk-tl-gtasa.c"; sourceTree = "<group>"; };
 		FD559A37CF59C3290F29FA43 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		FE13DC571D193621CD6149EA /* HuskGamepad.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HuskGamepad.swift; sourceTree = "<group>"; };
 		FE8922E7AB75C8C61B37986A /* husk-tl-jni-loop.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "husk-tl-jni-loop.c"; sourceTree = "<group>"; };
@@ -443,6 +446,8 @@
 				0C8178C469873F2DA90BB728 /* husk-tl-gameactivity.h */,
 				46287061DCF461334B1A8D2E /* husk-tl-gamepad.c */,
 				CC60CF82D64B2CBA61196F88 /* husk-tl-gamepad.h */,
+				FCBE4C5BD3BC5033100C968E /* husk-tl-gtasa.c */,
+				7B5E2D3E9F12A2A3BB5BBDC7 /* husk-tl-gtasa.h */,
 				97E83F7EE31FE180D0FA3105 /* husk-tl-http.h */,
 				4B24977AD9B892864CD39481 /* husk-tl-http.m */,
 				B76CE6F39722749AA0027959 /* husk-tl-jni-cocos.c */,
@@ -764,6 +769,7 @@
 				80F03D2EAABE3BFEA4A2785B /* husk-tl-framework.c in Sources */,
 				12F633F698047D7DED62A51D /* husk-tl-gameactivity.c in Sources */,
 				B9D7168A505DD009DE222599 /* husk-tl-gamepad.c in Sources */,
+				BF3B75F24D911729EFB2E8A6 /* husk-tl-gtasa.c in Sources */,
 				5926C1BBD1419AFBBFA2D1D6 /* husk-tl-http.m in Sources */,
 				240D4917EC7FC510B753EB4E /* husk-tl-jni-cocos.c in Sources */,
 				50F7B80FBADEAF705EC960F8 /* husk-tl-jni-fmod.c in Sources */,

@@ -352,6 +352,14 @@ static const char *const k_hidden_ext[] = { "GL_EXT_disjoint_timer_query", "GL_E
 static bool ext_hidden(const char *name, size_t n)
 {
     for (int i = 0; k_hidden_ext[i]; i++) if (strlen(k_hidden_ext[i]) == n && !strncmp(k_hidden_ext[i], name, n)) return true;
+    /* TL_GL_HIDE=GL_a,GL_b: more to leave out, for finding which an engine's choice depends on (which texture format it picks, say). */
+    const char *extra = getenv("TL_GL_HIDE");
+    while (extra && *extra) {
+        const char *e = strchr(extra, ',');
+        size_t m = e ? (size_t)(e - extra) : strlen(extra);
+        if (m == n && !strncmp(extra, name, n)) return true;
+        extra += m; if (e) extra++;
+    }
     return false;
 }
 

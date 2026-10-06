@@ -46,6 +46,9 @@ bool husk_sdl_launch(const char *apk, const char *data_dir, void *metal_layer, i
  */
 bool husk_ue4_launch(const char *apk, const char *data_dir, void *metal_layer, int width, int height,
                      const char *angle_dylib, const char *ca_bundle);
+/* Rockstar's GTA San Andreas (libGame.so behind the oswrapper): landscape, sound, touch and controllers. Its data is inside the APK. */
+bool husk_gta_launch(const char *apk, const char *data_dir, void *metal_layer, int width, int height,
+                     const char *angle_dylib, const char *ca_bundle);
 void husk_ue4_set_vulkan(const char *dylib);
 /* Another APK of the app about to be launched (a split, an asset pack). Before the launch call; at most three. */
 void husk_native_add_package(const char *apk);
