@@ -96,6 +96,7 @@
 		D354FA5AC96B3361B4A5A635 /* ApkMetadata.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C3D6F74AFBE5CD222DE0553 /* ApkMetadata.swift */; };
 		D5795B7B2815D857E136AC85 /* LibraryTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = 34EE1ED95268ED65B2AA9A5A /* LibraryTab.swift */; };
 		D61EF536158A8495F2B0CE79 /* JITSetupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5894E74BA308222C01AEE311 /* JITSetupView.swift */; };
+		D6E9F96BE6AF7C985488D030 /* VirtualPad.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F570EB6EAB321272B32955C /* VirtualPad.swift */; };
 		DD78A64F53CD2C615EB004B3 /* LICENSE-idevice-MIT.txt in Resources */ = {isa = PBXBuildFile; fileRef = A45038B8E06A02311695BE90 /* LICENSE-idevice-MIT.txt */; };
 		E165A4CCFD518F67D08A4696 /* husk-tl-bionic-ndk.c in Sources */ = {isa = PBXBuildFile; fileRef = FF5A120A4E0B3EE166D789C4 /* husk-tl-bionic-ndk.c */; };
 		E1F5B2BE674BB476433BFCEF /* husk-tl-cocos-text.c in Sources */ = {isa = PBXBuildFile; fileRef = 9217F354B8587F75369229F8 /* husk-tl-cocos-text.c */; };
@@ -161,6 +162,7 @@
 		02BDBFFD3329C33172416AEB /* husk-tl-ld.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "husk-tl-ld.h"; sourceTree = "<group>"; };
 		08B65F9A6BAA4E2376A0CBD8 /* husk-tl-shim.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "husk-tl-shim.c"; sourceTree = "<group>"; };
 		0C8178C469873F2DA90BB728 /* husk-tl-gameactivity.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "husk-tl-gameactivity.h"; sourceTree = "<group>"; };
+		0F570EB6EAB321272B32955C /* VirtualPad.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VirtualPad.swift; sourceTree = "<group>"; };
 		100DF87CB49D35A4DA089C94 /* husk-tl-framework.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "husk-tl-framework.h"; sourceTree = "<group>"; };
 		14E50E2B9CCFF7B1FEF73608 /* HuskAudio.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HuskAudio.swift; sourceTree = "<group>"; };
 		15D08F1730303C74C1B7DE23 /* AppSource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSource.swift; sourceTree = "<group>"; };
@@ -367,6 +369,7 @@
 				66DDBC0AF7BE5742AA867515 /* TLScreenView.swift */,
 				211CC4F06EC722E5972D7F3B /* TLUnityView.swift */,
 				4BD6ABD20471B2CACF60ABD4 /* TranslationLayer.swift */,
+				0F570EB6EAB321272B32955C /* VirtualPad.swift */,
 				FA84FD81F71FF2ACDEB879A5 /* Resources */,
 			);
 			path = Husk;
@@ -740,6 +743,7 @@
 				0BB57A13C0D48446CB4FBCD5 /* TLUnityView.swift in Sources */,
 				3743DAF4A88A08B2946A4066 /* Theme.swift in Sources */,
 				1A97D1F8D5FAFEB3145D4AE5 /* TranslationLayer.swift in Sources */,
+				D6E9F96BE6AF7C985488D030 /* VirtualPad.swift in Sources */,
 				7EF41C59B3AF51A4E96F20E0 /* fishhook.c in Sources */,
 				AC5C07974C7A8658358A55C9 /* husk-tl-a64.c in Sources */,
 				80C126C7BDB5EE56A7139C20 /* husk-tl-audio.c in Sources */,

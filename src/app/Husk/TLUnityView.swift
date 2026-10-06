@@ -477,6 +477,8 @@ struct TLCocosAttemptView: View {
     @AppStorage(TranslationLayer.devInfoKey) private var devInfo = false
     @State private var stats = "starting"
     @ObservedObject private var pads = HuskGamepads.shared
+    @StateObject private var virtualPad = VirtualPad()
+    @AppStorage("husk.tl.virtualPad") private var showVirtualPad = true
     private var showLog: Bool { get { showLogSetting && devInfo } nonmutating set { showLogSetting = newValue } }
 
     /// Geometry Dash and the like are cocos2d-x; Minecraft is built on GameActivity. Both are landscape.
@@ -520,6 +522,12 @@ struct TLCocosAttemptView: View {
                             .background(Color.black)
                         if showLog { logPanel.frame(width: 320) }
                     }
+                    .overlay {
+                        // Unreal's menus answer only a controller: with none paired, one on the glass.
+                        if engine == .ue4, showVirtualPad, pads.names.isEmpty, model.state == Int32(HUSK_UNITY_RUNNING) {
+                            VirtualPadView(pad: virtualPad)
+                        }
+                    }
                     .ignoresSafeArea(.container, edges: [.horizontal, .bottom])
                 }
             }
@@ -545,6 +553,12 @@ struct TLCocosAttemptView: View {
             if !pads.names.isEmpty {
                 Label(pads.names.count == 1 ? pads.names[0] : "\(pads.names.count) controllers", systemImage: "gamecontroller.fill")
                     .font(.system(size: 11, weight: .medium)).foregroundStyle(.white.opacity(0.7)).lineLimit(1)
+            }
+            if engine == .ue4, pads.names.isEmpty {
+                Button { showVirtualPad.toggle() } label: {
+                    Label(showVirtualPad ? "Hide pad" : "Pad", systemImage: "gamecontroller").font(.system(size: 12, weight: .semibold))
+                }
+                .tint(.white)
             }
             if model.state == Int32(HUSK_UNITY_RUNNING) {
                 Text(stats).font(.technical(11)).foregroundStyle(.white.opacity(0.7)).lineLimit(1)
