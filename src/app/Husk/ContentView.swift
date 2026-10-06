@@ -42,7 +42,7 @@ struct ContentView: View {
             // why it appears instantly rather than reloading.
             TabView(selection: $router.tab) {
                 TranslationLayerTab()
-                    .tabItem { Label("Games", systemImage: "gamecontroller.fill") }
+                    .tabItem { Label("Native", systemImage: "gamecontroller.fill") }
                     .tag(HuskTab.translation)
 
                 LibraryTab(onOpenGuest: { showGuestScreen = true },

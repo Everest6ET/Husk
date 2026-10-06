@@ -106,7 +106,7 @@ enum HuskTab: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .translation: return "Games"
+        case .translation: return "Native"
         case .library:  return "Library"
         case .files:    return "Files"
         case .settings: return "Settings"
