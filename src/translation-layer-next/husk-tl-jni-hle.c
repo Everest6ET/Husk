@@ -290,6 +290,60 @@ static void read_manifest_version(const char *apk)
 }
 
 /*
+ * The <meta-data> elements of the manifest, by name: an Unreal Engine game reads its project's settings (engine version, project name, whether Vulkan is
+ * supported) back through the activity from them, and they differ from game to game.
+ */
+#define MAX_META 64
+static struct { char key[110]; char val[130]; } g_meta[MAX_META];
+static int g_nmeta;
+static void read_manifest_meta(const char *apk)
+{
+    g_nmeta = 0;
+    tl_zip z; char err[160];
+    if (!tl_zip_open(&z, apk, err, sizeof(err))) return;
+    const tl_zip_entry *e = tl_zip_find(&z, "AndroidManifest.xml");
+    const uint8_t *data; size_t len; bool owned = false;
+    if (e && tl_zip_data(&z, e, 8u << 20, &data, &len, &owned, err, sizeof(err)) && len > 8 && ax16(data) == 0x0003) {
+        const uint8_t *pool = NULL; size_t pool_size = 0;
+        for (size_t off = ax16(data + 2); off + 8 <= len; ) {
+            uint16_t type = ax16(data + off); uint32_t size = ax32(data + off + 4);
+            if (size < 8 || off + size > len) break;
+            if (type == 0x0001) { pool = data + off; pool_size = size; }
+            else if (type == 0x0102 && pool && off + 36 <= len) {
+                const uint8_t *el = data + off; char tag[24];
+                if (ax_string(pool, pool_size, ax32(el + 20), tag, sizeof(tag)) && !strcmp(tag, "meta-data") && g_nmeta < MAX_META) {
+                    uint16_t astart = ax16(el + 24), asize = ax16(el + 26), acount = ax16(el + 28);
+                    char key[110] = "", val[130] = ""; bool has_val = false;
+                    for (unsigned i = 0; i < acount; i++) {
+                        const uint8_t *at = el + 16 + astart + (size_t)i * asize; char an[16];
+                        if (at + 20 > data + len || !ax_string(pool, pool_size, ax32(at + 4), an, sizeof(an))) continue;
+                        uint8_t vtype = at[15]; uint32_t vdata = ax32(at + 16);
+                        if (!strcmp(an, "name")) { if (ax32(at + 8) != 0xFFFFFFFFu) ax_string(pool, pool_size, ax32(at + 8), key, sizeof(key)); else if (vtype == 0x03) ax_string(pool, pool_size, vdata, key, sizeof(key)); }
+                        else if (!strcmp(an, "value")) {
+                            has_val = true;
+                            if (vtype == 0x03) { if (!ax_string(pool, pool_size, vdata, val, sizeof(val))) val[0] = 0; }
+                            else if (vtype == 0x12) snprintf(val, sizeof(val), "%s", vdata ? "true" : "false");
+                            else if (vtype == 0x10 || vtype == 0x11) snprintf(val, sizeof(val), "%d", (int)vdata);
+                            else if (vtype == 0x04) { float f; memcpy(&f, &vdata, 4); snprintf(val, sizeof(val), "%g", f); }
+                            else has_val = false;               /* a resource reference: nothing a game asks for by name */
+                        }
+                    }
+                    if (key[0] && has_val) { snprintf(g_meta[g_nmeta].key, sizeof(g_meta[0].key), "%s", key); snprintf(g_meta[g_nmeta].val, sizeof(g_meta[0].val), "%s", val); g_nmeta++; }
+                }
+            }
+            off += size;
+        }
+    }
+    if (owned) free((void *)data);
+    tl_zip_close(&z);
+}
+const char *tl_hle_manifest_meta(const char *key)
+{
+    for (int i = 0; i < g_nmeta; i++) if (!strcmp(g_meta[i].key, key)) return g_meta[i].val;
+    return NULL;
+}
+
+/*
  * Settings.Secure.ANDROID_ID: the id a game uses to tell this device from the others, and which servers tie an account to. It must be this install's own and
  * stable: a constant shared by every install is one account for everyone (a game's server happily hands back whoever had it first), and one that changed on
  * every launch would be a new player each time. So it is made once, at random, and kept in the app's data directory.
@@ -930,6 +984,7 @@ void tl_hle_configure(const char *pkg, const char *apk, const char *data, int w,
     H.width = w; H.height = h; H.density = 3.0f;
     H.version_name[0] = 0; H.version_code = 0;
     read_manifest_version(apk);
+    read_manifest_meta(apk);
     mkdirs(H.files); mkdirs(H.cache); mkdirs(H.ext_files); mkdirs(H.ext_cache);
 }
 

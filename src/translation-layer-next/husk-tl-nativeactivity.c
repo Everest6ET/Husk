@@ -27,6 +27,7 @@ void tl_nwindow_configure(int w, int h, void *layer);
 void *tl_nwindow_get(void);
 void tl_ue4_hle_install(const char *pkg, const char *apk, const char *data, const char *ext_files);
 void tl_ue4_set_activity(jobj *activity);
+const char *tl_ue4_meta(const char *key);
 
 #define CLS "com/epicgames/ue4/GameActivity"
 
@@ -171,12 +172,17 @@ bool tl_na_start(const tl_ga_config *cfg)
     /* GameActivity's static initialiser, and NativeActivity's loading of the library its manifest names. */
     static const char *const libs[] = { "c++_shared", "EOSSDK", "UE4", NULL };
     for (int i = 0; libs[i]; i++) {
+        if (!strcmp(libs[i], "EOSSDK") && !tl_ld_has_lib("libEOSSDK.so")) continue;      /* Epic Online Services: only the games that use it ship it */
         load_library(libs[i]);
         if (tl_jni_pending()) { tl_log_line("ue4: loading lib%s.so failed", libs[i]); return false; }
     }
     if (getenv("TL_UE4_NO_VULKAN")) {
         tl_lib *ue = tl_ld_find_lib("libUE4.so");
         if (ue) { patch_return(ue, "_ZN12FAndroidMisc15ShouldUseVulkanEv", 0); patch_return(ue, "_ZN12FAndroidMisc22ShouldUseDesktopVulkanEv", 0); }
+    }
+    if (getenv("TL_UE4_FORCE_VULKAN")) {            /* a game whose project defaults to OpenGL ES (bDetectVulkanByDefault off): ask for Vulkan anyway */
+        tl_lib *ue = tl_ld_find_lib("libUE4.so");
+        if (ue) { patch_return(ue, "_ZN12FAndroidMisc15ShouldUseVulkanEv", 1); patch_return(ue, "_ZN12FAndroidMisc17IsVulkanAvailableEv", 1); }
     }
     tl_log_line("ue4: libraries loaded");
     N.started = true;
@@ -201,7 +207,7 @@ static void *ui_main(void *arg)
     if (set_global) set_global(env, activity, 1, 1, tl_jni_new_string(N.internal_dir), tl_jni_new_string(N.ext_dir), 0, tl_jni_new_string(N.apk));
     typedef void (*obb_fn)(void *env, void *self, void *project, void *package, int version, int patch, void *apptype);
     obb_fn set_obb = (obb_fn)NATIVE("nativeSetObbInfo", "(Ljava/lang/String;Ljava/lang/String;IILjava/lang/String;)V");
-    if (set_obb) set_obb(env, activity, tl_jni_new_string("ShooterGame"), tl_jni_new_string(N.pkg), OBB_VERSION, 0, tl_jni_new_string(""));
+    if (set_obb) set_obb(env, activity, tl_jni_new_string(tl_ue4_meta("com.epicgames.ue4.GameActivity.ProjectName") ? tl_ue4_meta("com.epicgames.ue4.GameActivity.ProjectName") : "ShooterGame"), tl_jni_new_string(N.pkg), OBB_VERSION, 0, tl_jni_new_string(""));
     typedef void (*obbp_fn)(void *env, void *self, void *a, void *b, void *c, void *d);
     obbp_fn set_obb_paths = (obbp_fn)NATIVE("nativeSetObbFilePaths", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V");
     if (set_obb_paths) set_obb_paths(env, activity, tl_jni_new_string(N.obb_file), tl_jni_new_string(""), tl_jni_new_string(""), tl_jni_new_string(""));
@@ -268,7 +274,8 @@ bool tl_na_run(void)
     return true;
 }
 
-unsigned long tl_na_frames(void) { return tl_egl_frames_presented(); }
+unsigned long tl_vk_frames_presented(void);
+unsigned long tl_na_frames(void) { return tl_egl_frames_presented() + tl_vk_frames_presented(); }
 
 void tl_na_touch(int phase, int id, float x, float y) { (void)phase; (void)id; (void)x; (void)y; }
 void tl_na_set_paused(bool paused) { (void)paused; }

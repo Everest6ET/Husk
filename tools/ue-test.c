@@ -292,6 +292,9 @@ static void *sampler(void *arg)
                     if (!safe_read(fp, fr, sizeof(fr))) break;
                     const char *l3 = NULL; const void *s3 = NULL;
                     const char *sy3 = tl_ld_symbol_at((void *)fr[1], &l3, &s3);
+                    Dl_info hi;
+                    if (!l3 && dladdr((void *)fr[1], &hi)) fprintf(stderr, "      frame [host] %s %s+%#lx\n", hi.dli_fname ? strrchr(hi.dli_fname, '/') ? strrchr(hi.dli_fname, '/') + 1 : hi.dli_fname : "?", hi.dli_sname ? hi.dli_sname : "?", hi.dli_saddr ? (unsigned long)(fr[1] - (uintptr_t)hi.dli_saddr) : 0ul);
+                    else
                     fprintf(stderr, "      frame %s %s+%#lx\n", l3 ? l3 : "?", l3 && sy3 ? sy3 : "?", l3 && s3 ? (unsigned long)(fr[1] - (uintptr_t)s3) : 0ul);
                     fp = fr[0];
                 }
@@ -408,7 +411,7 @@ int main(int argc, char **argv)
     char frames[] = "/tmp/husk-ueframes-XXXXXX"; mkdtemp(frames);
     fprintf(stderr, "frames: %s\ndata: %s\n", frames, tmp);
     int w = argc > 4 ? atoi(argv[3]) : 1200, h = argc > 4 ? atoi(argv[4]) : 552;
-    tl_ga_config cfg = { .apk_path = argv[1], .data_dir = tmp, .package_name = "com.studiowildcard.arkuse", .width = w, .height = h,
+    tl_ga_config cfg = { .apk_path = argv[1], .data_dir = tmp, .package_name = getenv("TL_PKG") ? getenv("TL_PKG") : "com.studiowildcard.arkuse", .width = w, .height = h,
                          .angle_egl = getenv("TL_ANGLE_EGL") ? getenv("TL_ANGLE_EGL") : egl, .angle_gles = getenv("TL_ANGLE_GLES") ? getenv("TL_ANGLE_GLES") : gles,
                          .frame_dir = frames, .frame_every = getenv("TL_FRAMES") ? atoi(getenv("TL_FRAMES")) : -6 };
     g_frame_dir = frames;

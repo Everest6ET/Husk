@@ -2,6 +2,10 @@
 #include "husk-tl-vulkan.h"
 
 #import <QuartzCore/CAMetalLayer.h>
+#include <TargetConditionals.h>
+#if TARGET_OS_OSX
+#include <dispatch/dispatch.h>
+#endif
 #include <dlfcn.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -159,6 +163,73 @@ static int w_vkCreateAndroidSurfaceKHR(void *instance, const vk_android_surface_
     return r;
 }
 
+#if TARGET_OS_OSX
+#import <Metal/Metal.h>
+/* A test on a Mac has no view to look at: the frame about to be presented is read back from its swapchain image's Metal texture and written out like the GL path's
+ * frames (latest.bmp, 24-bit). The queue is waited idle first, so the texture holds the finished frame. */
+static void capture_frame(void *queue, const void *info)
+{
+    if (!V.frame_dir[0] || !V.lib) return;
+    typedef int (*pfn_wait)(void *);
+    typedef int (*pfn_get_images)(void *, uint64_t, uint32_t *, uint64_t *);
+    typedef int (*pfn_get_tex)(uint64_t, void *);
+    pfn_wait wait_idle = (pfn_wait)dlsym(V.lib, "vkQueueWaitIdle");
+    pfn_get_images get_images = (pfn_get_images)dlsym(V.lib, "vkGetSwapchainImagesKHR");
+    pfn_get_tex get_tex = (pfn_get_tex)dlsym(V.lib, "vkGetMTLTextureMVK");
+    if (!wait_idle || !get_images || !get_tex) { tl_log_line("vulkan: capture: missing entry points (%p %p %p)", (void *)wait_idle, (void *)get_images, (void *)get_tex); return; }
+    const uint8_t *pi = info;
+    uint32_t nsw; memcpy(&nsw, pi + 32, 4);
+    const uint64_t *sws; memcpy(&sws, pi + 40, 8);
+    const uint32_t *idx; memcpy(&idx, pi + 48, 8);
+    if (nsw < 1 || !sws || !idx) return;
+    wait_idle(queue);
+    uint32_t cnt = 0; get_images(NULL, sws[0], &cnt, NULL);
+    if (idx[0] >= cnt || cnt > 8) { tl_log_line("vulkan: capture: image %u of %u", idx[0], cnt); return; }
+    uint64_t imgs[8]; get_images(NULL, sws[0], &cnt, imgs);
+    void *raw = NULL;
+    get_tex(imgs[idx[0]], &raw);                          /* returns void: the texture is what it wrote */
+    if (!raw) return;
+    id<MTLTexture> tex = (__bridge id<MTLTexture>)raw;
+    int w = (int)tex.width, h = (int)tex.height;
+    static int said; if (said++ < 2) tl_log_line("vulkan: capture %dx%d format %d storage %d", w, h, (int)tex.pixelFormat, (int)tex.storageMode);
+    if (tex.storageMode == MTLStorageModePrivate || w <= 0 || h <= 0) return;
+    size_t bpr = (size_t)w * 4; uint8_t *px = malloc(bpr * h);
+    [tex getBytes:px bytesPerRow:bpr fromRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:0];
+    char tmp[760], fin[760]; snprintf(tmp, sizeof(tmp), "%s/latest.tmp", V.frame_dir); snprintf(fin, sizeof(fin), "%s/latest.bmp", V.frame_dir);
+    FILE *f = fopen(tmp, "wb");
+    if (f) {
+        uint32_t rowbytes = ((uint32_t)w * 3 + 3) & ~3u, size = 54 + rowbytes * (uint32_t)h;
+        uint8_t hdr[54] = { 'B', 'M' };
+        memcpy(hdr + 2, &size, 4); uint32_t off = 54; memcpy(hdr + 10, &off, 4);
+        uint32_t dib = 40; memcpy(hdr + 14, &dib, 4); memcpy(hdr + 18, &w, 4); memcpy(hdr + 22, &h, 4);
+        hdr[26] = 1; hdr[28] = 24; uint32_t img = rowbytes * (uint32_t)h; memcpy(hdr + 34, &img, 4);
+        fwrite(hdr, 1, 54, f);
+        uint8_t *row = calloc(1, rowbytes);
+        for (int y = h - 1; y >= 0; y--) {                         /* BMP is bottom-up; the drawable is BGRA */
+            const uint8_t *src = px + (size_t)y * bpr;
+            for (int x = 0; x < w; x++) { row[x * 3] = src[x * 4]; row[x * 3 + 1] = src[x * 4 + 1]; row[x * 3 + 2] = src[x * 4 + 2]; }
+            fwrite(row, 1, rowbytes, f);
+        }
+        free(row); fclose(f); rename(tmp, fin);
+    }
+    free(px);
+}
+#endif
+
+typedef int (*pfn_queue_present)(void *, const void *);
+static int w_vkQueuePresentKHR(void *queue, const void *info)
+{
+    static pfn_queue_present real;
+    if (!real && V.lib) real = (pfn_queue_present)dlsym(V.lib, "vkQueuePresentKHR");
+    unsigned long n = atomic_fetch_add(&V.frames, 1) + 1;
+#if TARGET_OS_OSX
+    if (V.frame_dir[0] && n % (V.frame_every > 0 ? (unsigned)V.frame_every : 60u) == 0) capture_frame(queue, info);
+#endif
+    int r = real ? real(queue, info) : -3;
+    { static int tr = -1; if (tr < 0) tr = getenv("TL_VK_TRACE") ? 1 : 0; if (tr && n <= 5) tl_log_line("vulkan: vkQueuePresentKHR #%lu -> %d", n, r); }
+    return r;
+}
+
 static void *w_vkGetInstanceProcAddr(void *instance, const char *name);
 static void *w_vkGetDeviceProcAddr(void *device, const char *name);
 
@@ -168,6 +239,7 @@ static const struct { const char *name; void *fn; } k_over[] = {
     { "vkCreateInstance", w_vkCreateInstance },
     { "vkEnumerateInstanceExtensionProperties", w_vkEnumerateInstanceExtensionProperties },
     { "vkCreateAndroidSurfaceKHR", w_vkCreateAndroidSurfaceKHR },
+    { "vkQueuePresentKHR", w_vkQueuePresentKHR },
 };
 
 static void *overridden(const char *name)

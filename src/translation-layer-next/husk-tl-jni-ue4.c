@@ -27,7 +27,7 @@ static struct { char pkg[160], data[512], ext[700], apk[1024]; jobj *activity; }
 
 /*
  * <meta-data> of the manifest, which the engine reads through GetMetaData*: the project's settings as the packager recorded them.
- * These are ARK's; another UE4 game's differ, and reading them from the manifest is the general answer.
+ * These are ARK's, and only the fallback: the game's own manifest is read first (tl_hle_manifest_meta).
  */
 static const struct { const char *key, *value; } k_meta[] = {
     { "com.epicgames.ue4.GameActivity.EngineVersion", "4.26.2" }, { "com.epicgames.ue4.GameActivity.EngineBranch", "++UE4+Release-4.26" },
@@ -41,13 +41,34 @@ static const struct { const char *key, *value; } k_meta[] = {
     { "com.epicgames.ue4.GameActivity.bAllowIMU", "true" }, { "com.epicgames.ue4.GameActivity.bSupportsVulkan", "false" },
     { "com.epicgames.ue4.GameActivity.StartupPermissions", "" },
 };
-static const char *meta(const char *key)
+const char *tl_hle_manifest_meta(const char *key);
+const char *tl_ue4_meta(const char *key)
 {
     /* Not in the manifest: GameActivity computes it from the display's metrics. x dpi, y dpi. */
     if (!strcmp(key, "ue4.displaymetrics.dpi")) return "440.0,440.0";
+    /* Likewise AudioManager's answers (PROPERTY_OUTPUT_FRAMES_PER_BUFFER, PROPERTY_OUTPUT_SAMPLE_RATE) and the display's refresh rate. A zero buffer size is not an
+     * answer the engine can survive: it rounds its callback buffer up to a multiple of it, and a multiple of zero is never reached. */
+    if (!strcmp(key, "audiomanager.framesPerBuffer")) return "256";
+    if (!strcmp(key, "audiomanager.optimalSampleRate")) return "48000";
+    if (!strcmp(key, "ue4.display.getRefreshRate")) return "60";
+    /* A setting forced from the environment ("key=value;key=value", keys without the com.epicgames.ue4.GameActivity. prefix), for trying things. */
+    const char *force = getenv("TL_UE4_META");
+    if (force) {
+        static char buf[160]; size_t pl = strlen("com.epicgames.ue4.GameActivity.");
+        if (!strncmp(key, "com.epicgames.ue4.GameActivity.", pl)) {
+            for (const char *p = force; *p; ) {
+                const char *eq = strchr(p, '='), *end = strchr(p, ';'); if (!end) end = p + strlen(p);
+                if (eq && eq < end && (size_t)(eq - p) == strlen(key + pl) && !strncmp(p, key + pl, eq - p)) { snprintf(buf, sizeof(buf), "%.*s", (int)(end - eq - 1), eq + 1); return buf; }
+                p = *end ? end + 1 : end;
+            }
+        }
+    }
+    const char *m = tl_hle_manifest_meta(key);
+    if (m) return m;
     for (size_t i = 0; i < sizeof(k_meta) / sizeof(k_meta[0]); i++) if (!strcmp(key, k_meta[i].key)) return k_meta[i].value;
     return NULL;
 }
+#define meta tl_ue4_meta
 static void GA_hasMeta(tl_jcall *c) { c->ret = vz(meta(S(c->args[0].l)) != NULL); }
 static void GA_metaString(tl_jcall *c) { const char *v = meta(S(c->args[0].l)); c->ret = vl(v ? tl_jni_new_string(v) : NULL); }
 static void GA_metaBool(tl_jcall *c) { const char *v = meta(S(c->args[0].l)); c->ret = vz(v && !strcmp(v, "true")); }

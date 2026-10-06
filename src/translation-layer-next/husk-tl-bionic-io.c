@@ -199,14 +199,14 @@ static int b_open(const char *path, int flags, unsigned mode)
         int e = errno;
         TL_ERRNO_END();
         if (fd >= 0 && fd < 4096) g_vfd[fd] = (vfd){ true, vf->off, vf->size, 0 };
-        { static int tr = -1; if (tr < 0) tr = getenv("TL_FILE_TRACE") ? 1 : 0; if (tr) tl_log_line("file: open(%s) -> %d (virtual: %llu bytes at %llu of %s)%s", path, fd, (unsigned long long)vf->size, (unsigned long long)vf->off, vf->host, fd < 0 ? (e == ENOENT ? " ENOENT" : " error") : ""); }
+        { static int tr = -1; if (tr < 0) tr = getenv("TL_FILE_TRACE") ? atoi(getenv("TL_FILE_TRACE")) : 0; if (tr) tl_log_line("file: open(%s) -> %d (virtual: %llu bytes at %llu of %s)%s", path, fd, (unsigned long long)vf->size, (unsigned long long)vf->off, vf->host, fd < 0 ? (e == ENOENT ? " ENOENT" : " error") : ""); }
         return fd;
     }
     TL_ERRNO_BEGIN();
     int fd = open(real, oflags_to_darwin(flags), mode);
     int e = errno;
     TL_ERRNO_END();
-    { static int tr = -1; if (tr < 0) tr = getenv("TL_FILE_TRACE") ? 1 : 0; if (tr) tl_log_line("file: open(%s, %#x) -> %d%s", path, flags, fd, fd < 0 ? (e == ENOENT ? " ENOENT" : " error") : ""); }
+    { static int tr = -1; if (tr < 0) tr = getenv("TL_FILE_TRACE") ? atoi(getenv("TL_FILE_TRACE")) : 0; if (tr) tl_log_line("file: open(%s, %#x) -> %d%s", path, flags, fd, fd < 0 ? (e == ENOENT ? " ENOENT" : " error") : ""); }
     return fd;
 }
 static int b___open_2(const char *path, int flags) { return b_open(path, flags, 0); }
@@ -226,14 +226,14 @@ static long b_read(int fd, void *p, size_t n)
         vfd *v = &g_vfd[fd];
         if (v->pos >= v->size) return 0;
         if (n > v->size - v->pos) n = (size_t)(v->size - v->pos);
-        { static int tr = -1, said; if (tr < 0) tr = getenv("TL_FILE_TRACE") ? 1 : 0; if (tr && said++ < 400) tl_log_line("file: read(fd %d, %zu bytes at %llu of the virtual file)", fd, n, (unsigned long long)v->pos); }
+        { static int tr = -1, said; if (tr < 0) tr = getenv("TL_FILE_TRACE") ? atoi(getenv("TL_FILE_TRACE")) : 0; if (tr && said++ < (tr > 1 ? 4000000 : 400)) tl_log_line("file: read(fd %d, %zu bytes at %llu of the virtual file)", fd, n, (unsigned long long)v->pos); }
         TL_ERRNO_BEGIN(); long r = pread(fd, p, n, (off_t)(v->off + v->pos)); TL_ERRNO_END();
         if (r > 0) v->pos += (uint64_t)r;
         return r;
     }
     TL_ERRNO_BEGIN(); long r = read(fd, p, n); int e = errno; TL_ERRNO_END();
     if (net_trace_fd(fd)) tl_log_line("net: read(fd %d, %zu) -> %ld errno %d", fd, n, r, r < 0 ? e : 0);
-    { static int tr = -1, said; if (tr < 0) tr = getenv("TL_FILE_TRACE") ? 1 : 0; if (tr && n == 32 && said++ < 20) tl_log_line("file: read(fd %d, 32) -> %ld errno %d", fd, r, r < 0 ? e : 0); }
+    { static int tr = -1, said; if (tr < 0) tr = getenv("TL_FILE_TRACE") ? atoi(getenv("TL_FILE_TRACE")) : 0; if (tr && n == 32 && said++ < 20) tl_log_line("file: read(fd %d, 32) -> %ld errno %d", fd, r, r < 0 ? e : 0); }
     return r;
 }
 static long b___read_chk(int fd, void *p, size_t n, size_t bufsz)
@@ -255,7 +255,7 @@ static long b_pread64(int fd, void *p, size_t n, long off)
         if (off < 0) { tl_set_guest_errno(22); return -1; }
         if ((uint64_t)off >= v->size) return 0;
         if (n > v->size - (uint64_t)off) n = (size_t)(v->size - (uint64_t)off);
-        { static int tr = -1, said; if (tr < 0) tr = getenv("TL_FILE_TRACE") ? 1 : 0; if (tr && said++ < 400) tl_log_line("file: pread(fd %d, %zu bytes at %ld of the virtual file)", fd, n, off); }
+        { static int tr = -1, said; if (tr < 0) tr = getenv("TL_FILE_TRACE") ? atoi(getenv("TL_FILE_TRACE")) : 0; if (tr && said++ < (tr > 1 ? 4000000 : 400)) tl_log_line("file: pread(fd %d, %zu bytes at %ld of the virtual file)", fd, n, off); }
         off += (long)v->off;
     }
     TL_ERRNO_BEGIN(); long r = pread(fd, p, n, off); TL_ERRNO_END(); return r;
@@ -300,7 +300,7 @@ static int b_mkdir(const char *p, unsigned mode) { char b[1024]; TL_ERRNO_BEGIN(
 static void ftrace(const char *what, const char *path, int r, int e)
 {
     static int tr = -1;
-    if (tr < 0) tr = getenv("TL_FILE_TRACE") ? 1 : 0;
+    if (tr < 0) tr = getenv("TL_FILE_TRACE") ? atoi(getenv("TL_FILE_TRACE")) : 0;
     if (tr) tl_log_line("file: %s(%s) -> %d%s", what, path ? path : "(null)", r, r < 0 ? (e == ENOENT ? " ENOENT" : " error") : "");
 }
 static int b_access(const char *p, int m) { char b[1024]; if (vfile_find(p)) { if (m & 2) { tl_set_guest_errno(13); return -1; } return 0; } TL_ERRNO_BEGIN(); int r = access(tl_path_resolve(p, b, sizeof(b)), m); int e = errno; TL_ERRNO_END(); ftrace("access", p, r, e); return r; }
@@ -921,7 +921,7 @@ static int b_select(int n, fd_set *r, fd_set *w, fd_set *e, struct timeval *tv)
 {
     TL_ERRNO_BEGIN(); int x = select(n, r, w, e, tv); int er = errno; TL_ERRNO_END();
     if (net_trace_fd(n - 1)) tl_log_line("net: select(%d, %s%s) -> %d", n, r ? "r" : "", w ? "w" : "", x);
-    { static int tr = -1, said; if (tr < 0) tr = getenv("TL_FILE_TRACE") ? 1 : 0; if (tr && said++ < 40) tl_log_line("file: select(%d, %s%s%s, timeout %ldus) -> %d errno %d", n, r ? "r" : "", w ? "w" : "", e ? "e" : "", tv ? (long)tv->tv_sec * 1000000 + tv->tv_usec : -1L, x, x < 0 ? er : 0); }
+    { static int tr = -1, said; if (tr < 0) tr = getenv("TL_FILE_TRACE") ? atoi(getenv("TL_FILE_TRACE")) : 0; if (tr && said++ < 40) tl_log_line("file: select(%d, %s%s%s, timeout %ldus) -> %d errno %d", n, r ? "r" : "", w ? "w" : "", e ? "e" : "", tv ? (long)tv->tv_sec * 1000000 + tv->tv_usec : -1L, x, x < 0 ? er : 0); }
     return x;
 }
 static void b___FD_SET_chk(int fd, uint64_t *set, size_t size)
@@ -954,7 +954,7 @@ static int b_inotify_add_watch(int a, const char *b, unsigned c) { (void)a; (voi
 const tl_bionic_entry tl_tab_io[] = {
     TL_WRAP("open", b_open), TL_WRAP("__open_2", b___open_2), TL_WRAP("close", b_close), TL_WRAP("read", b_read),
     TL_WRAP("__read_chk", b___read_chk), TL_WRAP("write", b_write), TL_WRAP("writev", b_writev),
-    TL_WRAP("pread64", b_pread64), TL_WRAP("__pread64_chk", b___pread64_chk), TL_WRAP("__pwrite64_chk", b___pwrite64_chk), TL_WRAP("__pwrite_chk", b___pwrite64_chk), TL_WRAP("__pread_chk", b___pread64_chk), TL_WRAP("lseek", b_lseek), TL_WRAP("lseek64", b_lseek),
+    TL_WRAP("pread64", b_pread64), TL_WRAP("pwrite64", b_pwrite64), TL_WRAP("__pread64_chk", b___pread64_chk), TL_WRAP("__pwrite64_chk", b___pwrite64_chk), TL_WRAP("__pwrite_chk", b___pwrite64_chk), TL_WRAP("__pread_chk", b___pread64_chk), TL_WRAP("lseek", b_lseek), TL_WRAP("lseek64", b_lseek),
     TL_WRAP("dup", b_dup), TL_WRAP("dup2", b_dup2), TL_WRAP("pipe", b_pipe), TL_WRAP("fsync", b_fsync),
     TL_WRAP("ftruncate", b_ftruncate), TL_WRAP("truncate", b_truncate), TL_WRAP("isatty", b_isatty), TL_WRAP("flock", b_flock),
     TL_WRAP("unlink", b_unlink), TL_WRAP("rmdir", b_rmdir), TL_WRAP("mkdir", b_mkdir), TL_WRAP("access", b_access),
