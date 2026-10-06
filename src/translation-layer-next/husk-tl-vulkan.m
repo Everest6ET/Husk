@@ -324,6 +324,20 @@ static int w_vkQueuePresentKHR(void *queue, const void *info)
     if (V.frame_dir[0] && n % (V.frame_every > 0 ? (unsigned)V.frame_every : 60u) == 0) capture_frame(queue, info);
 #endif
     if (n == 3 || n == 60 || n == 400 || n == 3000) { probe_frame(queue, info, n); log_layer_state(g_swapchain_layer, "present"); }
+    /* VK_GOOGLE_display_timing: the game may ask for each frame to appear at a time of its own choosing. MoltenVK hands that to Metal as an absolute time on the system's media
+     * clock, which is not the clock an Android game counted its nanoseconds on, so a time that was "now" to the game can be hours away to Metal and the frame is never shown.
+     * Frames are shown when they are ready instead. */
+    for (const uint8_t *c = *(const uint8_t *const *)((const uint8_t *)info + 8); c; c = *(const uint8_t *const *)(c + 8)) {
+        uint32_t st; memcpy(&st, c, 4);
+        if (st != 1000092000u) continue;                                   /* VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE */
+        uint32_t cnt; memcpy(&cnt, c + 16, 4);
+        uint8_t *times; memcpy(&times, c + 24, 8);
+        for (uint32_t i = 0; times && i < cnt; i++) {
+            uint64_t want; memcpy(&want, times + i * 16 + 8, 8);
+            static atomic_int said; if (want && atomic_fetch_add(&said, 1) < 6) tl_log_line("vulkan: present #%lu asked for time %llu ns (media clock now %.0f ns); shown at once", n, (unsigned long long)want, CACurrentMediaTime() * 1e9);
+            uint64_t zero = 0; memcpy(times + i * 16 + 8, &zero, 8);
+        }
+    }
     int r = real ? real(queue, info) : -3;
     { static atomic_int bad; if (r != VK_SUCCESS && atomic_fetch_add(&bad, 1) < 20) tl_log_line("vulkan: vkQueuePresentKHR #%lu -> %d", n, r); }
     { static int tr = -1; if (tr < 0) tr = getenv("TL_VK_TRACE") ? 1 : 0; if (tr && n <= 5) tl_log_line("vulkan: vkQueuePresentKHR #%lu -> %d", n, r); }
