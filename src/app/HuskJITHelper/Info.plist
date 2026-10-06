@@ -19,7 +19,7 @@
 	<key>CFBundleShortVersionString</key>
 	<string>0.7.0</string>
 	<key>CFBundleVersion</key>
-	<string>14</string>
+	<string>15</string>
 	<!-- A classic app extension, started by its own bundle identifier
 	     (JITBuiltIn.swift), as LiveContainer starts its LiveProcess. Nothing
 	     here names Husk's bundle identifier, so an install a sideloader has

@@ -438,6 +438,7 @@ int main(int argc, char **argv)
                          .angle_egl = getenv("TL_ANGLE_EGL") ? getenv("TL_ANGLE_EGL") : egl, .angle_gles = getenv("TL_ANGLE_GLES") ? getenv("TL_ANGLE_GLES") : gles,
                          .frame_dir = frames, .frame_every = getenv("TL_FRAMES") ? atoi(getenv("TL_FRAMES")) : -6 };
     g_frame_dir = frames;
+    if (getenv("TL_STRESS_ENV")) for (int i = 0; i < 400; i++) { char k[32], v[8]; snprintf(k, sizeof(k), "HUSK_STRESS_%d", i); snprintf(v, sizeof(v), "%d", i); setenv(k, v, 1); }   /* reallocates the process environment, as the app's own setenv calls do */
     if (getenv("TL_EXTRA_APKS")) { char ex[2000]; snprintf(ex, sizeof(ex), "%s", getenv("TL_EXTRA_APKS")); for (char *p = strtok(ex, ":"); p; p = strtok(NULL, ":")) if (!tl_sdl_add_package(p)) fprintf(stderr, "cannot add %s\n", p); }
     if (getenv("TL_AUDIO")) tl_audio_install();
     if (getenv("TL_PAD")) tl_pad_connect(0, "Xbox Wireless Controller");
