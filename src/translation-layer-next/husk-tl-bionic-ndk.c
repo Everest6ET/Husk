@@ -344,13 +344,148 @@ static int b_AAsset_isAllocated(tl_asset *a) { return a->owned != NULL; }
 
 /* ---------------------------------------------------------------- windows */
 
-/* The input queue a NativeActivity's glue attaches to its looper. Nothing arrives through it here: touches and controllers are delivered by other means. */
-static void b_AInputQueue_attachLooper(void *q, void *looper, int ident, void *cb, void *data) { (void)q; (void)looper; (void)ident; (void)cb; (void)data; }
-static void b_AInputQueue_detachLooper(void *q) { (void)q; }
-static int32_t b_AInputQueue_hasEvents(void *q) { (void)q; return 0; }
-static int32_t b_AInputQueue_getEvent(void *q, void **ev) { (void)q; if (ev) *ev = NULL; return -1; }
+/*
+ * The input queue a NativeActivity's glue attaches to its looper (Unreal Engine's does). Events are the NDK's opaque AInputEvent: here a small record the accessors
+ * below read. A touch from the host is queued and a byte written to a pipe the looper watches, which is how the real queue wakes the thread that owns it.
+ */
+typedef struct tl_ievent {
+    int type;                                   /* AINPUT_EVENT_TYPE_KEY 1, _MOTION 2 */
+    int source, device, action, meta, flags, keycode, button_state, nptr;
+    int pid[10]; float px[10], py[10];
+    float axis[48]; bool has_axes;                /* a joystick event: every axis by Android's axis number */
+    int64_t time;
+    struct tl_ievent *next;
+} tl_ievent;
+static struct {
+    int rd, wr, ident;
+    bool ready, attached;
+    pthread_mutex_t mu;
+    tl_ievent *head, *tail;
+    int nptr, pid[10]; float px[10], py[10];    /* the fingers down now, to say who else is touching when one changes */
+} IQ = { .rd = -1, .wr = -1, .mu = PTHREAD_MUTEX_INITIALIZER };
+
+static void iq_init(void)
+{
+    if (IQ.ready) return;
+    int fds[2];
+    if (pipe(fds) != 0) return;
+    fcntl(fds[0], F_SETFL, O_NONBLOCK); fcntl(fds[1], F_SETFL, O_NONBLOCK);
+    IQ.rd = fds[0]; IQ.wr = fds[1]; IQ.ready = true;
+}
+static void iq_push(tl_ievent *e)
+{
+    pthread_mutex_lock(&IQ.mu);
+    if (IQ.tail) IQ.tail->next = e; else IQ.head = e;
+    IQ.tail = e;
+    pthread_mutex_unlock(&IQ.mu);
+    char c = 1; (void)!write(IQ.wr, &c, 1);
+}
+/* A touch in surface pixels: phase 0 down, 1 move, 2 up, 3 cancel -- the same words the other engines are given. Safe from any thread. */
+void tl_inq_touch(int phase, int id, float x, float y)
+{
+    iq_init();
+    if (!IQ.ready || !IQ.attached) return;
+    pthread_mutex_lock(&IQ.mu);
+    int idx = -1;
+    for (int i = 0; i < IQ.nptr; i++) if (IQ.pid[i] == id) idx = i;
+    int action;
+    if (phase == 0) {
+        if (idx < 0 && IQ.nptr < 10) { idx = IQ.nptr++; IQ.pid[idx] = id; }
+        if (idx < 0) { pthread_mutex_unlock(&IQ.mu); return; }
+        IQ.px[idx] = x; IQ.py[idx] = y;
+        action = IQ.nptr == 1 ? 0 /* DOWN */ : (5 /* POINTER_DOWN */ | (idx << 8));
+    } else if (idx < 0) { pthread_mutex_unlock(&IQ.mu); return; }
+    else if (phase == 1) { IQ.px[idx] = x; IQ.py[idx] = y; action = 2; }
+    else if (phase == 2) { IQ.px[idx] = x; IQ.py[idx] = y; action = IQ.nptr == 1 ? 1 /* UP */ : (6 /* POINTER_UP */ | (idx << 8)); }
+    else action = 3;
+    tl_ievent *e = calloc(1, sizeof(*e));
+    e->type = 2; e->source = 0x1002 /* touchscreen */; e->device = 1; e->action = action; e->nptr = IQ.nptr;
+    for (int i = 0; i < IQ.nptr; i++) { e->pid[i] = IQ.pid[i]; e->px[i] = IQ.px[i]; e->py[i] = IQ.py[i]; }
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); e->time = (int64_t)ts.tv_sec * 1000000000ll + ts.tv_nsec;
+    if (phase == 2 || phase == 3) {                       /* the finger leaves the list after the event that says so */
+        if (phase == 3) IQ.nptr = 0;
+        else { for (int i = idx; i + 1 < IQ.nptr; i++) { IQ.pid[i] = IQ.pid[i + 1]; IQ.px[i] = IQ.px[i + 1]; IQ.py[i] = IQ.py[i + 1]; } IQ.nptr--; }
+    }
+    pthread_mutex_unlock(&IQ.mu);
+    iq_push(e);
+}
+
+/* A controller button (action 0 down, 1 up, an Android key code) and the state of its sticks, triggers and hat (axes by Android axis number), from any thread. */
+void tl_inq_key(int device, int source, int action, int keycode)
+{
+    iq_init();
+    if (!IQ.ready || !IQ.attached) return;
+    tl_ievent *e = calloc(1, sizeof(*e));
+    e->type = 1; e->source = source; e->device = device; e->action = action; e->keycode = keycode;
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); e->time = (int64_t)ts.tv_sec * 1000000000ll + ts.tv_nsec;
+    iq_push(e);
+}
+void tl_inq_axes(int device, const float *axes48)
+{
+    iq_init();
+    if (!IQ.ready || !IQ.attached) return;
+    tl_ievent *e = calloc(1, sizeof(*e));
+    e->type = 2; e->source = 0x01000010 /* joystick */; e->device = device; e->action = 2 /* MOVE */; e->nptr = 1; e->has_axes = true;
+    memcpy(e->axis, axes48, sizeof(e->axis));
+    e->px[0] = e->axis[0]; e->py[0] = e->axis[1];
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); e->time = (int64_t)ts.tv_sec * 1000000000ll + ts.tv_nsec;
+    iq_push(e);
+}
+
+static void b_AInputQueue_attachLooper(void *q, void *looper, int ident, void *cb, void *data)
+{
+    (void)q;
+    iq_init();
+    if (!IQ.ready || !looper) return;
+    IQ.ident = ident; IQ.attached = true;
+    b_ALooper_addFd(looper, IQ.rd, ident, ALOOPER_EVENT_INPUT, cb, data);
+}
+static void b_AInputQueue_detachLooper(void *q) { (void)q; IQ.attached = false; if (t_looper && IQ.ready) b_ALooper_removeFd(t_looper, IQ.rd); }
+static int32_t b_AInputQueue_hasEvents(void *q) { (void)q; return IQ.head != NULL; }
+static int32_t b_AInputQueue_getEvent(void *q, void **ev)
+{
+    (void)q;
+    pthread_mutex_lock(&IQ.mu);
+    tl_ievent *e = IQ.head;
+    if (e) { IQ.head = e->next; if (!IQ.head) IQ.tail = NULL; }
+    pthread_mutex_unlock(&IQ.mu);
+    if (ev) *ev = e;
+    if (e && IQ.ready) { char c; (void)!read(IQ.rd, &c, 1); }
+    return e ? 0 : -1;
+}
 static int32_t b_AInputQueue_preDispatchEvent(void *q, void *ev) { (void)q; (void)ev; return 0; }
-static void b_AInputQueue_finishEvent(void *q, void *ev, int handled) { (void)q; (void)ev; (void)handled; }
+static void b_AInputQueue_finishEvent(void *q, void *ev, int handled) { (void)q; (void)handled; free(ev); }
+
+static int32_t b_AInputEvent_getType(const tl_ievent *e) { return e->type; }
+static int32_t b_AInputEvent_getSource(const tl_ievent *e) { return e->source; }
+static int32_t b_AInputEvent_getDeviceId(const tl_ievent *e) { return e->device; }
+static int32_t b_AMotionEvent_getAction(const tl_ievent *e) { return e->action; }
+static int32_t b_AMotionEvent_getFlags(const tl_ievent *e) { return e->flags; }
+static int32_t b_AMotionEvent_getMetaState(const tl_ievent *e) { return e->meta; }
+static int32_t b_AMotionEvent_getButtonState(const tl_ievent *e) { return e->button_state; }
+static int32_t b_AMotionEvent_getEdgeFlags(const tl_ievent *e) { (void)e; return 0; }
+static int64_t b_AMotionEvent_getEventTime(const tl_ievent *e) { return e->time; }
+static int64_t b_AMotionEvent_getDownTime(const tl_ievent *e) { return e->time; }
+static size_t b_AMotionEvent_getPointerCount(const tl_ievent *e) { return (size_t)e->nptr; }
+static int32_t b_AMotionEvent_getPointerId(const tl_ievent *e, size_t i) { return i < (size_t)e->nptr ? e->pid[i] : 0; }
+static float b_AMotionEvent_getX(const tl_ievent *e, size_t i) { return i < (size_t)e->nptr ? e->px[i] : 0.0f; }
+static float b_AMotionEvent_getY(const tl_ievent *e, size_t i) { return i < (size_t)e->nptr ? e->py[i] : 0.0f; }
+static float b_AMotionEvent_getPressure(const tl_ievent *e, size_t i) { (void)e; (void)i; return 1.0f; }
+static float b_AMotionEvent_getSize(const tl_ievent *e, size_t i) { (void)e; (void)i; return 0.1f; }
+static size_t b_AMotionEvent_getHistorySize(const tl_ievent *e) { (void)e; return 0; }
+static float b_AMotionEvent_getAxisValue(const tl_ievent *e, int32_t axis, size_t i)
+{
+    if (e->has_axes && axis >= 0 && axis < 48) return e->axis[axis];
+    if (axis == 0) return b_AMotionEvent_getX(e, i);
+    if (axis == 1) return b_AMotionEvent_getY(e, i);
+    return 0.0f;
+}
+static int32_t b_AKeyEvent_getAction(const tl_ievent *e) { return e->action; }
+static int32_t b_AKeyEvent_getKeyCode(const tl_ievent *e) { return e->keycode; }
+static int32_t b_AKeyEvent_getFlags(const tl_ievent *e) { return e->flags; }
+static int32_t b_AKeyEvent_getMetaState(const tl_ievent *e) { return e->meta; }
+static int32_t b_AKeyEvent_getRepeatCount(const tl_ievent *e) { (void)e; return 0; }
+static int32_t b_AKeyEvent_getScanCode(const tl_ievent *e) { (void)e; return 0; }
 static void b_ANativeActivity_noop(void *a) { (void)a; }
 static void b_ANativeActivity_flags(void *a, uint32_t add, uint32_t remove) { (void)a; (void)add; (void)remove; }
 static void b_ANativeActivity_input(void *a, uint32_t flags) { (void)a; (void)flags; }
@@ -473,6 +608,15 @@ const tl_bionic_entry tl_tab_ndk[] = {
     TL_WRAP("AInputQueue_attachLooper", b_AInputQueue_attachLooper), TL_WRAP("AInputQueue_detachLooper", b_AInputQueue_detachLooper),
     TL_WRAP("AInputQueue_hasEvents", b_AInputQueue_hasEvents), TL_WRAP("AInputQueue_getEvent", b_AInputQueue_getEvent),
     TL_WRAP("AInputQueue_preDispatchEvent", b_AInputQueue_preDispatchEvent), TL_WRAP("AInputQueue_finishEvent", b_AInputQueue_finishEvent),
+    TL_WRAP("AInputEvent_getType", b_AInputEvent_getType), TL_WRAP("AInputEvent_getSource", b_AInputEvent_getSource), TL_WRAP("AInputEvent_getDeviceId", b_AInputEvent_getDeviceId),
+    TL_WRAP("AMotionEvent_getAction", b_AMotionEvent_getAction), TL_WRAP("AMotionEvent_getFlags", b_AMotionEvent_getFlags), TL_WRAP("AMotionEvent_getMetaState", b_AMotionEvent_getMetaState),
+    TL_WRAP("AMotionEvent_getButtonState", b_AMotionEvent_getButtonState), TL_WRAP("AMotionEvent_getEdgeFlags", b_AMotionEvent_getEdgeFlags),
+    TL_WRAP("AMotionEvent_getEventTime", b_AMotionEvent_getEventTime), TL_WRAP("AMotionEvent_getDownTime", b_AMotionEvent_getDownTime),
+    TL_WRAP("AMotionEvent_getPointerCount", b_AMotionEvent_getPointerCount), TL_WRAP("AMotionEvent_getPointerId", b_AMotionEvent_getPointerId),
+    TL_WRAP("AMotionEvent_getX", b_AMotionEvent_getX), TL_WRAP("AMotionEvent_getY", b_AMotionEvent_getY), TL_WRAP("AMotionEvent_getPressure", b_AMotionEvent_getPressure),
+    TL_WRAP("AMotionEvent_getSize", b_AMotionEvent_getSize), TL_WRAP("AMotionEvent_getHistorySize", b_AMotionEvent_getHistorySize), TL_WRAP("AMotionEvent_getAxisValue", b_AMotionEvent_getAxisValue),
+    TL_WRAP("AKeyEvent_getAction", b_AKeyEvent_getAction), TL_WRAP("AKeyEvent_getKeyCode", b_AKeyEvent_getKeyCode), TL_WRAP("AKeyEvent_getFlags", b_AKeyEvent_getFlags),
+    TL_WRAP("AKeyEvent_getMetaState", b_AKeyEvent_getMetaState), TL_WRAP("AKeyEvent_getRepeatCount", b_AKeyEvent_getRepeatCount), TL_WRAP("AKeyEvent_getScanCode", b_AKeyEvent_getScanCode),
     TL_WRAP("ANativeActivity_finish", b_ANativeActivity_noop), TL_WRAP("ANativeActivity_setWindowFormat", b_ANativeActivity_input), TL_WRAP("ANativeActivity_setWindowFlags", b_ANativeActivity_flags),
     TL_WRAP("ANativeActivity_showSoftInput", b_ANativeActivity_input), TL_WRAP("ANativeActivity_hideSoftInput", b_ANativeActivity_input),
     /* sensors */

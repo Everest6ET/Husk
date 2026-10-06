@@ -11,6 +11,7 @@ enum TLNativeEngine {
     case cocos     // Geometry Dash and other cocos2d-x games: landscape, driven by a GL thread of our own
     case minecraft // Minecraft and other GameActivity games: landscape, multi-touch, the game runs its own threads
     case sdl       // Beach Buggy Racing 2 and other SDL3 games: landscape, multi-touch, the game runs its own threads
+    case ue4       // Minecraft Dungeons and other Unreal Engine 4 games: landscape, touch and controllers, Vulkan on MoltenVK
 }
 
 /// A Unity game's screen: one CAMetalLayer that the game's own GL (ANGLE over Metal) presents into.
@@ -138,7 +139,7 @@ final class TLUnityUIView: UIView, UIKeyInput {
             try? session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
             try? session.setActive(true)
         }
-        HuskLog.log("tl", "native: launching \(apk) at \(width)x\(height) (\(engine == .cocos ? "cocos2d-x" : engine == .minecraft ? "gameactivity" : engine == .sdl ? "sdl" : "unity"))")
+        HuskLog.log("tl", "native: launching \(apk) at \(width)x\(height) (\(engine == .cocos ? "cocos2d-x" : engine == .minecraft ? "gameactivity" : engine == .sdl ? "sdl" : engine == .ue4 ? "ue4" : "unity"))")
         let started: Bool
         switch engine {
         case .sdl:
@@ -150,6 +151,10 @@ final class TLUnityUIView: UIView, UIKeyInput {
                 husk_sdl_set_safe_insets(Int32(inset.left * k), Int32(inset.top * k), Int32(inset.right * k), Int32(inset.bottom * k))
             }
             started = husk_sdl_launch(apk, dataDir, layerPtr, Int32(width), Int32(height), angle, ca)
+        case .ue4:
+            // Unreal draws with Vulkan, which on this device is MoltenVK, a framework of the app's own.
+            if let fw = Bundle.main.privateFrameworksPath { husk_ue4_set_vulkan(fw + "/MoltenVK.framework/MoltenVK") }
+            started = husk_ue4_launch(apk, dataDir, layerPtr, Int32(width), Int32(height), angle, ca)
         case .cocos: started = husk_cocos_launch(apk, dataDir, layerPtr, Int32(width), Int32(height), angle, ca)
         case .minecraft: started = husk_gameactivity_launch(apk, dataDir, layerPtr, Int32(width), Int32(height), angle, ca)
         case .unity: started = husk_unity_launch(apk, dataDir, layerPtr, Int32(width), Int32(height), angle, ca)
@@ -479,13 +484,14 @@ struct TLCocosAttemptView: View {
         switch app.report?.nativeEngine {
         case .minecraft: return .minecraft
         case .sdl: return .sdl
+        case .ue4: return .ue4
         default: return .cocos
         }
     }
 
     private var dataDir: String {
         TranslationLayer.root.appendingPathComponent(app.id, isDirectory: true)
-            .appendingPathComponent(engine == .minecraft ? "minecraft-data" : engine == .sdl ? "sdl-data" : "cocos-data", isDirectory: true).path
+            .appendingPathComponent(engine == .minecraft ? "minecraft-data" : engine == .sdl ? "sdl-data" : engine == .ue4 ? "ue4-data" : "cocos-data", isDirectory: true).path
     }
 
     /// Another game is already loaded in this session, and an engine cannot be loaded twice.

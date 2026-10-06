@@ -13,6 +13,8 @@
 #include "husk-tl-bionic.h"
 #include "husk-tl-dexindex.h"
 #include "husk-tl-egl.h"
+#include "husk-tl-gamepad.h"
+#include "husk-tl-vulkan.h"
 #include "husk-tl-jni.h"
 #include "husk-tl-internal.h"
 #include "husk-tl-ld.h"
@@ -136,6 +138,23 @@ static bool patch_return(tl_lib *lib, const char *symbol, unsigned value)
 /* The OBB the engine looks for: <package>.obb in the OBB directory, named main.<version>.<package>.obb. */
 #define OBB_VERSION 42
 
+/* Controllers reach the engine as the NDK's own gamepad events: buttons as key events (source GAMEPAD), sticks and triggers as joystick motion events. */
+void tl_inq_key(int device, int source, int action, int keycode);
+void tl_inq_axes(int device, const float *axes48);
+static void na_pad_key(jobj *ev, int device, int action, int keycode, int64_t down_ms, int64_t event_ms)
+{
+    (void)down_ms; (void)event_ms;
+    tl_inq_key(device, 0x00000401, action, keycode);
+    tl_jni_unref(ev);
+}
+static void na_pad_motion(jobj *ev, int device, int source, int64_t down_ms, int64_t event_ms)
+{
+    (void)source; (void)down_ms; (void)event_ms;
+    float a[48];
+    if (tl_input_event_axes(ev, a)) tl_inq_axes(device, a);
+    tl_jni_unref(ev);
+}
+
 bool tl_na_start(const tl_ga_config *cfg)
 {
     N.cfg = *cfg;
@@ -180,11 +199,16 @@ bool tl_na_start(const tl_ga_config *cfg)
         tl_lib *ue = tl_ld_find_lib("libUE4.so");
         if (ue) { patch_return(ue, "_ZN12FAndroidMisc15ShouldUseVulkanEv", 0); patch_return(ue, "_ZN12FAndroidMisc22ShouldUseDesktopVulkanEv", 0); }
     }
-    if (getenv("TL_UE4_FORCE_VULKAN")) {            /* a game whose project defaults to OpenGL ES (bDetectVulkanByDefault off): ask for Vulkan anyway */
+    /* ANGLE over Metal speaks OpenGL ES 3.0 and the engine's ES 3.1 shaders will not compile on it, so when MoltenVK is there the engine is asked for Vulkan -- also for a project
+     * that defaults to OpenGL ES (bDetectVulkanByDefault off), which Minecraft Dungeons is. TL_UE4_NO_VULKAN opts out; TL_UE4_FORCE_VULKAN forces it even with no MoltenVK. */
+    if ((getenv("TL_UE4_FORCE_VULKAN") || (tl_vk_available() && !getenv("TL_UE4_NO_VULKAN")))) {
         tl_lib *ue = tl_ld_find_lib("libUE4.so");
         if (ue) { patch_return(ue, "_ZN12FAndroidMisc15ShouldUseVulkanEv", 1); patch_return(ue, "_ZN12FAndroidMisc17IsVulkanAvailableEv", 1); }
     }
     tl_log_line("ue4: libraries loaded");
+    setenv("TL_PAD_DPAD", "keys", 0);          /* the D-pad as DPAD_* keys, which the engine maps like a stick's arrows */
+    static const tl_pad_sink sink = { na_pad_key, na_pad_motion };
+    tl_pad_set_sink(&sink);
     N.started = true;
     return true;
 }
@@ -277,5 +301,6 @@ bool tl_na_run(void)
 unsigned long tl_vk_frames_presented(void);
 unsigned long tl_na_frames(void) { return tl_egl_frames_presented() + tl_vk_frames_presented(); }
 
-void tl_na_touch(int phase, int id, float x, float y) { (void)phase; (void)id; (void)x; (void)y; }
+void tl_inq_touch(int phase, int id, float x, float y);
+void tl_na_touch(int phase, int id, float x, float y) { tl_inq_touch(phase, id, x, y); }
 void tl_na_set_paused(bool paused) { (void)paused; }

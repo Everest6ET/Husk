@@ -17,14 +17,9 @@
 	<key>CFBundlePackageType</key>
 	<string>XPC!</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.7.0</string>
+	<string>0.7.1</string>
 	<key>CFBundleVersion</key>
-	<string>18</string>
-	<!-- A classic app extension, started by its own bundle identifier
-	     (JITBuiltIn.swift), as LiveContainer starts its LiveProcess. Nothing
-	     here names Husk's bundle identifier, so an install a sideloader has
-	     renamed still finds it. The extension point only has to exist and take
-	     a principal class; FALSEPREDICATE keeps it out of every share sheet. -->
+	<string>19</string>
 	<key>NSExtension</key>
 	<dict>
 		<key>NSExtensionAttributes</key>
@@ -32,14 +27,14 @@
 			<key>NSExtensionActivationRule</key>
 			<string>FALSEPREDICATE</string>
 		</dict>
-		<key>NSExtensionPointIdentifier</key>
-		<string>com.apple.ar.viewer</string>
-		<key>NSExtensionPrincipalClass</key>
-		<string>HuskJITHelperHandler</string>
 		<key>NSExtensionContextClass</key>
 		<string>NSExtensionContext</string>
 		<key>NSExtensionContextHostClass</key>
 		<string>NSExtensionContext</string>
+		<key>NSExtensionPointIdentifier</key>
+		<string>com.apple.ar.viewer</string>
+		<key>NSExtensionPrincipalClass</key>
+		<string>HuskJITHelperHandler</string>
 	</dict>
 	<key>XPCService</key>
 	<dict>

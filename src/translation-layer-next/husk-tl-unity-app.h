@@ -40,6 +40,13 @@ bool husk_gameactivity_launch(const char *apk, const char *data_dir, void *metal
  */
 bool husk_sdl_launch(const char *apk, const char *data_dir, void *metal_layer, int width, int height,
                      const char *angle_dylib, const char *ca_bundle);
+/*
+ * The same for a game built on Unreal Engine 4 (Minecraft Dungeons): landscape, sound, touch and controllers. Its renderer is Vulkan, on MoltenVK: give the path
+ * of libMoltenVK.dylib with husk_ue4_set_vulkan first. Its data is an OBB the APK carries inside itself, mapped in place.
+ */
+bool husk_ue4_launch(const char *apk, const char *data_dir, void *metal_layer, int width, int height,
+                     const char *angle_dylib, const char *ca_bundle);
+void husk_ue4_set_vulkan(const char *dylib);
 /* Another APK of the app about to be launched (a split, an asset pack). Before the launch call; at most three. */
 void husk_native_add_package(const char *apk);
 /* The screen's safe-area insets in pixels, for a game that keeps its controls out of a notch (SDL games ask). Before the launch call, or any time. */

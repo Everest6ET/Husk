@@ -20,6 +20,7 @@
 #include <string.h>
 #include <sys/ucontext.h>
 #include <time.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "husk-tl-gameactivity.h"
@@ -404,8 +405,9 @@ int main(int argc, char **argv)
 
     tl_ld_set_verbosity(getenv("TL_VERBOSE") ? atoi(getenv("TL_VERBOSE")) : 1);
     tl_jni_set_trace(getenv("TL_JNI_TRACE") ? atoi(getenv("TL_JNI_TRACE")) : 1);
-    char tmp[] = "/tmp/husk-ue-XXXXXX";
-    mkdtemp(tmp);
+    char tmp[300] = "/tmp/husk-ue-XXXXXX";
+    if (getenv("TL_DATA")) { snprintf(tmp, sizeof(tmp), "%s", getenv("TL_DATA")); mkdir(tmp, 0755); }     /* a data directory that outlives the run: saves, first-run choices */
+    else mkdtemp(tmp);
     const char *cef = "/Users/davi/Library/Application Support/Steam/Steam.AppBundle/Steam/Contents/MacOS/Frameworks/Chromium Embedded Framework.framework/Versions/A/Libraries";
     char egl[600], gles[600]; snprintf(egl, sizeof(egl), "%s/libEGL.dylib", cef); snprintf(gles, sizeof(gles), "%s/libGLESv2.dylib", cef);
     char frames[] = "/tmp/husk-ueframes-XXXXXX"; mkdtemp(frames);
