@@ -8,6 +8,7 @@
 #include <ctype.h>
 #include <crt_externs.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <fnmatch.h>
 #include <getopt.h>
 #include <locale.h>
@@ -30,6 +31,9 @@
 
 const char *tl_path_resolve(const char *path, char *buf, size_t n);   /* husk-tl-bionic-io.c */
 int tl_synth_open(const char *path);
+int tl_atomic_open(const char *real, int dflags, unsigned mode);
+void tl_atomic_closed(int fd);
+void tl_atomic_abandon(int fd);
 
 /* --------------------------------------------------------------- the stdio */
 
@@ -197,8 +201,15 @@ static void *b_fopen(const char *path, const char *mode)
     char buf[1024];
     int sfd = tl_synth_open(path);
     if (sfd >= 0) return fdopen(sfd, mode[0] == 'r' ? "r" : "r");
+    const char *real = tl_path_resolve(path, buf, sizeof(buf));
     TL_ERRNO_BEGIN();
-    FILE *f = fopen(tl_path_resolve(path, buf, sizeof(buf)), mode);
+    FILE *f = NULL;
+    /* "w" and "w+" rewrite a file: done crash-safe, as open(O_TRUNC) is (tl_atomic_open). */
+    if (mode[0] == 'w') {
+        int fd = tl_atomic_open(real, (strchr(mode, '+') ? O_RDWR : O_WRONLY) | O_CREAT | O_TRUNC, 0666);
+        if (fd >= 0 && !(f = fdopen(fd, mode))) { close(fd); tl_atomic_abandon(fd); }
+    }
+    if (!f) f = fopen(real, mode);
     TL_ERRNO_END();
     return f;
 }
@@ -212,7 +223,7 @@ static void *b_freopen(const char *path, const char *mode, void *stream)
     return r;
 }
 static void *b_fdopen(int fd, const char *mode) { TL_ERRNO_BEGIN(); FILE *f = fdopen(fd, mode); TL_ERRNO_END(); return f; }
-static int b_fclose(void *f) { TL_ERRNO_BEGIN(); int r = fclose(map_stream(f)); TL_ERRNO_END(); return r; }
+static int b_fclose(void *f) { FILE *h = map_stream(f); int fd = fileno(h); TL_ERRNO_BEGIN(); int r = fclose(h); tl_atomic_closed(fd); TL_ERRNO_END(); return r; }
 static char *b_fgets(char *s, int n, void *f) { TL_ERRNO_BEGIN(); char *r = fgets(s, n, map_stream(f)); TL_ERRNO_END(); return r; }
 static size_t b_fread(void *p, size_t sz, size_t n, void *f) { TL_ERRNO_BEGIN(); size_t r = fread(p, sz, n, map_stream(f)); TL_ERRNO_END(); return r; }
 static size_t b_fwrite(const void *p, size_t sz, size_t n, void *f)

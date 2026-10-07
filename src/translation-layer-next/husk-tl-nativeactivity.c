@@ -2,6 +2,7 @@
 #define _DARWIN_C_SOURCE
 #include "husk-tl-nativeactivity.h"
 
+#include <dirent.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -185,6 +186,31 @@ static bool start_generic(void)
     return true;
 }
 
+/*
+ * An Unreal save that is empty: what a game ended while rewriting it leaves behind (before Husk made rewrites crash-safe). A real
+ * one never is -- it starts with a GVAS header -- and Minecraft Dungeons waits forever on its title screen for an empty
+ * GlobalSave.sav it cannot read. Taken away, the game makes a new one, and the other saves (its characters) stay.
+ */
+static void drop_empty_saves(const char *dir, int depth)
+{
+    DIR *d = opendir(dir);
+    if (!d) return;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (e->d_name[0] == '.') continue;
+        char p[1024];
+        snprintf(p, sizeof(p), "%s/%s", dir, e->d_name);
+        struct stat st;
+        if (lstat(p, &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) { if (depth < 10) drop_empty_saves(p, depth + 1); continue; }
+        size_t n = strlen(e->d_name);
+        if (S_ISREG(st.st_mode) && st.st_size == 0 && n > 4 && !strcmp(e->d_name + n - 4, ".sav") && strstr(dir, "/SaveGames")) {
+            if (unlink(p) == 0) tl_log_line("ue4: removed an empty save, %s (left by a save cut off part-way)", p);
+        }
+    }
+    closedir(d);
+}
+
 bool tl_na_start(const tl_ga_config *cfg)
 {
     N.cfg = *cfg;
@@ -223,6 +249,7 @@ bool tl_na_start(const tl_ga_config *cfg)
         return start_generic();
     }
     tl_ue4_hle_install(cfg->package_name, cfg->apk_path, cfg->data_dir, N.ext_dir);
+    drop_empty_saves(N.data, 0);
 
     N.activity = tl_jni_new_object(tl_jni_class(CLS));
     tl_hle_set_activity(N.activity);

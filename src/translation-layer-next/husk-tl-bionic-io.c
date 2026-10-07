@@ -46,7 +46,27 @@
  * to learn about the device are synthesised into unlinked temporary files.
  */
 static char g_data_dir[512];
-void tl_set_data_dir(const char *dir) { snprintf(g_data_dir, sizeof(g_data_dir), "%s", dir ? dir : ""); }
+/* New files a game never finished, because Husk was ended while it wrote them (tl_atomic_open): the old files beside them are whole. */
+static void drop_unfinished(const char *dir, int depth)
+{
+    DIR *d = opendir(dir);
+    if (!d) return;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (e->d_name[0] == '.' && (!e->d_name[1] || (e->d_name[1] == '.' && !e->d_name[2]))) continue;
+        char p[1100];
+        snprintf(p, sizeof(p), "%s/%s", dir, e->d_name);
+        size_t n = strlen(e->d_name);
+        if (e->d_type == DT_DIR) { if (depth < 12) drop_unfinished(p, depth + 1); }
+        else if (n > 9 && !strcmp(e->d_name + n - 9, ".husk-new") && unlink(p) == 0) tl_log_line("file: dropped %s, a save never finished", p);
+    }
+    closedir(d);
+}
+void tl_set_data_dir(const char *dir)
+{
+    snprintf(g_data_dir, sizeof(g_data_dir), "%s", dir ? dir : "");
+    if (g_data_dir[0]) drop_unfinished(g_data_dir, 0);
+}
 const char *tl_data_dir(void) { return g_data_dir[0] ? g_data_dir : "/tmp"; }
 
 /* A file holding `content`, already unlinked. Where it can be made depends on the host: iOS gives an app no /tmp. */
@@ -183,6 +203,69 @@ static int oflags_from_darwin(int d)
     return f;
 }
 
+/* --------------------------------------------------------- crash-safe saves */
+
+/*
+ * A game rewrites a save by opening it with O_TRUNC and writing it again, so for a moment the file is empty. iOS ends an app
+ * whenever it likes (swiped away, out of memory, a crash in another thread), and an app ended in that moment keeps an empty
+ * save. Minecraft Dungeons then waits forever on its title screen for an empty GlobalSave.sav it cannot read. So a file that
+ * already has contents and lives in the game's own data is not truncated: the game writes a new file beside it, which takes
+ * the old one's name when the game closes it. Ended halfway, the old save is still there, whole.
+ */
+static char *g_atomic[4096];                 /* fd -> the path the new file becomes on close */
+static pthread_mutex_t g_atomic_lock = PTHREAD_MUTEX_INITIALIZER;
+
+int tl_atomic_open(const char *real, int dflags, unsigned mode)
+{
+    if (!(dflags & O_TRUNC) || (dflags & O_ACCMODE) == O_RDONLY || (dflags & (O_APPEND | O_EXCL))) return -2;
+    const char *data = tl_data_dir();
+    size_t dn = strlen(data);
+    if (strncmp(real, data, dn) || real[dn] != '/') return -2;
+    struct stat st;
+    if (stat(real, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size == 0) return -2;
+    char tmp[1100];
+    if (snprintf(tmp, sizeof(tmp), "%s.husk-new", real) >= (int)sizeof(tmp)) return -2;
+    (void)mode;
+    int fd = open(tmp, (dflags & ~O_EXCL) | O_CREAT | O_TRUNC, st.st_mode & 0777);
+    if (fd < 0) return -2;                   /* the plain way, then */
+    if (fd >= 4096) { close(fd); unlink(tmp); return -2; }
+    pthread_mutex_lock(&g_atomic_lock);
+    free(g_atomic[fd]);
+    g_atomic[fd] = strdup(real);
+    pthread_mutex_unlock(&g_atomic_lock);
+    return fd;
+}
+
+/* A new file that will not be finished (it could not be opened as a stream): drop it, and the old one stays as it was. */
+void tl_atomic_abandon(int fd)
+{
+    if (fd < 0 || fd >= 4096) return;
+    pthread_mutex_lock(&g_atomic_lock);
+    char *real = g_atomic[fd];
+    g_atomic[fd] = NULL;
+    pthread_mutex_unlock(&g_atomic_lock);
+    if (!real) return;
+    char tmp[1100];
+    snprintf(tmp, sizeof(tmp), "%s.husk-new", real);
+    unlink(tmp);
+    free(real);
+}
+
+/* After fd was closed: give a new file the name of the one it replaces. */
+void tl_atomic_closed(int fd)
+{
+    if (fd < 0 || fd >= 4096) return;
+    pthread_mutex_lock(&g_atomic_lock);
+    char *real = g_atomic[fd];
+    g_atomic[fd] = NULL;
+    pthread_mutex_unlock(&g_atomic_lock);
+    if (!real) return;
+    char tmp[1100];
+    snprintf(tmp, sizeof(tmp), "%s.husk-new", real);
+    if (rename(tmp, real) != 0) tl_log_line("file: could not put the new %s in place (%s)", real, strerror(errno));
+    free(real);
+}
+
 static int b_open(const char *path, int flags, unsigned mode)
 {
     char buf[1024], content[8192];
@@ -204,7 +287,8 @@ static int b_open(const char *path, int flags, unsigned mode)
         return fd;
     }
     TL_ERRNO_BEGIN();
-    int fd = open(real, oflags_to_darwin(flags), mode);
+    int fd = tl_atomic_open(real, oflags_to_darwin(flags), mode);
+    if (fd == -2) fd = open(real, oflags_to_darwin(flags), mode);
     int e = errno;
     TL_ERRNO_END();
     { static int tr = -1; if (tr < 0) tr = getenv("TL_FILE_TRACE") ? atoi(getenv("TL_FILE_TRACE")) : 0; if (tr) tl_log_line("file: open(%s, %#x) -> %d%s", path, flags, fd, fd < 0 ? (e == ENOENT ? " ENOENT" : " error") : ""); }
@@ -212,7 +296,7 @@ static int b_open(const char *path, int flags, unsigned mode)
 }
 static int b___open_2(const char *path, int flags) { return b_open(path, flags, 0); }
 static bool net_trace_fd(int fd);
-static int b_close(int fd) { if (vfd_is(fd)) g_vfd[fd].on = false; bool sock = net_trace_fd(fd); TL_ERRNO_BEGIN(); int r = close(fd); TL_ERRNO_END(); if (sock) tl_log_line("net: close(fd %d)", fd); return r; }
+static int b_close(int fd) { if (vfd_is(fd)) g_vfd[fd].on = false; bool sock = net_trace_fd(fd); TL_ERRNO_BEGIN(); int r = close(fd); tl_atomic_closed(fd); TL_ERRNO_END(); if (sock) tl_log_line("net: close(fd %d)", fd); return r; }
 static bool net_trace_fd(int fd)
 {
     static int on = -1;
@@ -284,7 +368,7 @@ static long b_lseek(int fd, long off, int whence)
     TL_ERRNO_BEGIN(); long r = lseek(fd, off, whence); TL_ERRNO_END(); return r;
 }
 static int b_dup(int fd) { TL_ERRNO_BEGIN(); int r = dup(fd); TL_ERRNO_END(); return r; }
-static int b_dup2(int a, int b) { TL_ERRNO_BEGIN(); int r = dup2(a, b); TL_ERRNO_END(); return r; }
+static int b_dup2(int a, int b) { TL_ERRNO_BEGIN(); int r = dup2(a, b); if (r >= 0 && a != b) tl_atomic_closed(b); TL_ERRNO_END(); return r; }
 static int b_pipe(int fds[2]) { TL_ERRNO_BEGIN(); int r = pipe(fds); TL_ERRNO_END(); return r; }
 static int b_fsync(int fd) { TL_ERRNO_BEGIN(); int r = fsync(fd); TL_ERRNO_END(); return r; }
 static int b_ftruncate(int fd, long n) { TL_ERRNO_BEGIN(); int r = ftruncate(fd, n); TL_ERRNO_END(); return r; }
@@ -932,7 +1016,7 @@ static long linux_syscall_impl(long a0, long a1, long a2, long a3, long a4, long
         int fd = b_open((const char *)a1, (int)a2, (unsigned)a3);
         return fd < 0 ? -*tl_guest_errno_ptr() : fd;
     }
-    case 57: { int r = close((int)a0); return r < 0 ? -tl_errno_to_guest(errno) : r; }
+    case 57: { int r = close((int)a0); if (r == 0) tl_atomic_closed((int)a0); return r < 0 ? -tl_errno_to_guest(errno) : r; }
     case 63: { long r = read((int)a0, (void *)a1, (size_t)a2); return r < 0 ? -tl_errno_to_guest(errno) : r; }
     case 64: { long r = write((int)a0, (const void *)a1, (size_t)a2); return r < 0 ? -tl_errno_to_guest(errno) : r; }
     case 113: { int r = clock_gettime(clock_to_darwin((int)a0), (struct timespec *)a1); return r < 0 ? -tl_errno_to_guest(errno) : 0; }
