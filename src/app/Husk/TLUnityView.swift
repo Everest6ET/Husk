@@ -393,116 +393,6 @@ final class TLUnityModel: ObservableObject {
     }
 }
 
-/// The Unity game the way the other runner shows a game: a status header, the screen taking whatever the log
-/// leaves, and a log underneath that opens and closes. Presented full screen, not as a sheet, so a swipe in the
-/// game is the game's.
-struct TLUnityAttemptView: View {
-    let app: TLApp
-    @Environment(\.dismiss) private var dismiss
-    @StateObject private var model = TLUnityModel()
-    @AppStorage("husk.tl.unity.showLog") private var showLogSetting = false
-    @AppStorage(TranslationLayer.devInfoKey) private var devInfo = false
-    /// The log is detail: without developer info it stays shut and its bar is not shown.
-    private var showLog: Bool { get { showLogSetting && devInfo } nonmutating set { showLogSetting = newValue } }
-
-    private var dataDir: String {
-        TranslationLayer.root.appendingPathComponent(app.id, isDirectory: true)
-            .appendingPathComponent("unity-data", isDirectory: true).path
-    }
-
-    var body: some View {
-        NavigationStack {
-            VStack(spacing: 0) {
-                HStack {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(model.statusText)
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(model.statusColor)
-                        Text(model.subStatusText)
-                            .font(.system(size: 12))
-                            .foregroundStyle(Theme.textDim)
-                    }
-                    Spacer()
-                }
-                .padding()
-                .background(Theme.surface)
-
-                Divider()
-
-                if let apk = app.apks.first {
-                    TLUnityScreen(apk: apk, dataDir: dataDir)
-                        .frame(maxWidth: .infinity, maxHeight: showLog ? 380 : .infinity)
-                        .background(Color.black)
-                    Divider()
-                }
-
-                if devInfo {
-                HStack(spacing: 10) {
-                    Button {
-                        withAnimation(.snappy(duration: 0.25)) { showLog.toggle() }
-                    } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: showLog ? "chevron.down" : "chevron.right")
-                                .font(.system(size: 11, weight: .bold))
-                                .frame(width: 12)
-                            Text("ATTEMPT LOG")
-                                .font(.technical(11, weight: .bold))
-                        }
-                        .foregroundStyle(Theme.textDim)
-                    }
-                    .buttonStyle(.plain)
-                    Spacer()
-                    if showLog {
-                        Button { UIPasteboard.general.string = model.logText } label: {
-                            Label("Copy", systemImage: "doc.on.doc").font(.system(size: 12))
-                        }
-                    } else {
-                        Text("tap to show")
-                            .font(.system(size: 11))
-                            .foregroundStyle(Theme.textDim.opacity(0.7))
-                    }
-                }
-                .padding(.horizontal)
-                .padding(.vertical, 8)
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    if !showLog { withAnimation(.snappy(duration: 0.25)) { showLog = true } }
-                }
-
-                }
-
-                if showLog {
-                    ScrollViewReader { proxy in
-                        ScrollView {
-                            Text(model.logText.isEmpty ? "Starting…" : model.logText)
-                                .font(.technical(11))
-                                .foregroundStyle(Theme.text)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(12)
-                                .textSelection(.enabled)
-                                .id("bottom")
-                        }
-                        .background(Theme.bg)
-                        .onChange(of: model.logText) { _ in proxy.scrollTo("bottom", anchor: .bottom) }
-                    }
-                    .transition(.opacity)
-                }
-            }
-            .background(Theme.bg.ignoresSafeArea())
-            .navigationTitle(app.label)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } }
-            }
-        }
-        // Swipes near the edges are the game's: keep the system from taking them for itself.
-        .defersSystemGestures(on: .all)
-        .onAppear { model.start() }
-        .onDisappear { model.stop() }
-    }
-}
-
-
 /// A cocos2d-x game's screen (Geometry Dash). These are landscape games: the app turns to landscape while this is up and
 /// back afterwards, the game takes the whole screen, and a thin bar above it carries what the other runners show -- the
 /// status, the frames per second and the time a frame takes -- and, with developer info on, the log beside the game.
@@ -542,13 +432,14 @@ struct TLCocosAttemptView: View {
         case .ue4: return .ue4
         case .gta: return .gta
         case .nativeactivity: return .nativeactivity
-        default: return .cocos
+        case .cocos: return .cocos
+        default: return .unity
         }
     }
 
     private var dataDir: String {
         TranslationLayer.root.appendingPathComponent(app.id, isDirectory: true)
-            .appendingPathComponent(engine == .minecraft ? "minecraft-data" : engine == .sdl ? "sdl-data" : engine == .ue4 ? "ue4-data" : engine == .gta ? "gta-data" : engine == .nativeactivity ? "na-data" : "cocos-data", isDirectory: true).path
+            .appendingPathComponent(engine == .unity ? "unity-data" : engine == .minecraft ? "minecraft-data" : engine == .sdl ? "sdl-data" : engine == .ue4 ? "ue4-data" : engine == .gta ? "gta-data" : engine == .nativeactivity ? "na-data" : "cocos-data", isDirectory: true).path
     }
 
     /// Which way up: what the game's settings say, and otherwise what its manifest asks. Some SDL games are portrait; every other
@@ -558,7 +449,7 @@ struct TLCocosAttemptView: View {
         case .landscape: return false
         case .portrait: return true
         case .auto:
-            guard engine == .sdl || engine == .nativeactivity, let apk = app.apks.first else { return false }
+            guard engine == .sdl || engine == .nativeactivity || engine == .unity, let apk = app.apks.first else { return false }
             return husk_sdl_apk_is_portrait(apk) != 0
         }
     }

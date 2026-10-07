@@ -24,6 +24,7 @@
 #include "husk-tl-unity.h"
 #include "husk-tl-gamepad.h"
 #include "husk-tl-xmem.h"
+#include "husk-tl-audio.h"
 
 static void dump_pushes(void);
 
@@ -377,6 +378,7 @@ int main(int argc, char **argv)
                             .angle_egl = getenv("TL_ANGLE_EGL") ? getenv("TL_ANGLE_EGL") : egl, .angle_gles = getenv("TL_ANGLE_GLES") ? getenv("TL_ANGLE_GLES") : gles,
                             .frame_dir = frames, .frame_every = getenv("TL_CTL") ? -6 : 30 };
     g_frame_dir = frames;
+    tl_audio_install();   /* as the app does: the game's sound goes to the speakers (TL_AUDIO_MUTE=1 for a silent run) */
     if (!tl_unity_start(&cfg)) { fprintf(stderr, "unity: start failed\n"); return 1; }
     if (getenv("TL_PROBES")) install_probes();
     if (getenv("TL_ICALL_PROBES")) install_icall_probes();

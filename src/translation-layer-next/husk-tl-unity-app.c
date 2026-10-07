@@ -291,6 +291,7 @@ static void *launch_thread(void *arg)
             .metal_layer = A.layer, .angle_egl = A.angle, .angle_gles = NULL, .frame_dir = NULL, .frame_every = 0,
         };
         tl_log_line("unity: starting %s as %s, %dx%d", A.apk, A.package, A.width, A.height);
+        tl_audio_install();
         ok = tl_unity_start(&cfg) && tl_unity_run();
     }
     if (!ok) {
@@ -434,7 +435,8 @@ void husk_unity_set_paused(bool paused)
     else if (A.engine == ENGINE_UE4) { tl_na_set_paused(paused); tl_audio_set_paused(paused); }
     else if (A.engine == ENGINE_SDL) { tl_sdl_set_paused(paused); tl_audio_set_paused(paused); }
     else if (A.engine == ENGINE_GAMEACTIVITY) { tl_ga_set_paused(paused); tl_audio_set_paused(paused); }
-    else if (A.engine == ENGINE_COCOS) { tl_cocos_set_paused(paused); tl_audio_set_paused(paused); } else tl_unity_set_paused(paused);
+    else if (A.engine == ENGINE_COCOS) { tl_cocos_set_paused(paused); tl_audio_set_paused(paused); }
+    else { tl_unity_set_paused(paused); tl_audio_set_paused(paused); }
 }
 
 /* ------------------------------------------------------------- package name */

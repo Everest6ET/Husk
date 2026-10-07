@@ -698,10 +698,9 @@ struct TLAttemptView: View {
 
     @ViewBuilder
     private var content: some View {
-        if app.report?.nativeEngine == .cocos || app.report?.nativeEngine == .minecraft || app.report?.nativeEngine == .sdl || app.report?.nativeEngine == .ue4 || app.report?.nativeEngine == .gta || app.report?.nativeEngine == .nativeactivity {
+        // Every game the native runtime drives -- Unity included -- gets the same full-screen game screen.
+        if app.report?.runsOnNativeRuntime == true {
             TLCocosAttemptView(app: app)
-        } else if app.report?.runsOnNativeRuntime == true {
-            TLUnityAttemptView(app: app)
         } else {
             TLClassicAttemptView(app: app)
         }

@@ -95,10 +95,25 @@ static void host_write(const int16_t *samples, int frames, int channels, int rat
     pthread_mutex_unlock(&A.mu);
 }
 
-/* TL_AUDIO_MUTE: pace like a device but make no sound (for test runs on a Mac). */
+/* TL_AUDIO_MUTE: pace like a device but make no sound (for test runs on a Mac). TL_AUDIO_STATS=1 also logs, about once a second,
+ * how loud the game's output was, so a silent run still shows whether the game is making sound. */
 static void muted_write(const int16_t *samples, int frames, int channels, int rate)
 {
-    (void)samples; (void)channels;
+    static int stats = -1, seen, peak;
+    static long loud, total;
+    if (stats < 0) stats = getenv("TL_AUDIO_STATS") != NULL;
+    if (stats) {
+        for (int i = 0; i < frames * channels; i++) {
+            int v = samples[i] < 0 ? -samples[i] : samples[i];
+            if (v > peak) peak = v;
+            if (v > 64) loud++;
+        }
+        total += frames * channels;
+        if ((seen += frames) >= rate) {
+            tl_log_line("audio: %d Hz x %d, peak %d, %.0f%% of samples audible", rate, channels, peak, 100.0 * loud / (total ? total : 1));
+            seen = 0; peak = 0; loud = 0; total = 0;
+        }
+    }
     sleep_for(frames, rate);
 }
 
