@@ -780,9 +780,21 @@ static void *fmodex_main(void *arg)
     tl_log_line("fmod: FMODAudioDevice playing, %d Hz stereo, %d frames a block (info 2..5: %d %d %d %d)", rate, frames,
                 info(env, g_fmodex.self, 2), info(env, g_fmodex.self, 3), info(env, g_fmodex.self, 4), info(env, g_fmodex.self, 5));
     bool said = false;
+    /* TL_FMOD_PROBE=1: fill the block with a marker first and log how much of it FMOD wrote -- its real block layout. */
+    int probe = getenv("TL_FMOD_PROBE") ? 40 : 0;
     while (g_fmodex.running) {
+        if (probe) for (int i = 0; i < frames * 2; i++) block[i] = 0x5A5A;
         int r = process(env, g_fmodex.self, buffer);
+        if (probe && r == 0) {
+            int last = -1, untouched = 0;
+            for (int i = 0; i < frames * 2; i++) { if (block[i] != 0x5A5A) last = i; else untouched++; }
+            tl_log_line("fmod probe: wrote up to sample %d of %d, %d untouched; first samples %d %d %d %d %d %d", last + 1, frames * 2, untouched,
+                        block[0], block[1], block[2], block[3], block[4], block[5]);
+            probe--;
+        }
         if (r != 0 && !said) { tl_log_line("fmod: fmodProcess -> %d (not FMOD_OK); waiting", r); said = true; }
+        { static FILE *dump; static int tried; if (!tried) { tried = 1; if (getenv("TL_FMOD_DUMP")) dump = fopen(getenv("TL_FMOD_DUMP"), "wb"); }
+          if (dump && r == 0) fwrite(block, sizeof(int16_t), (size_t)frames * 2, dump); }
         if (r == 0 && tl_cocos_audio_hook) tl_cocos_audio_hook(block, frames, 2, rate);
         else usleep(2000);
     }

@@ -154,8 +154,9 @@ final class TLUnityUIView: UIView, UIKeyInput {
             HuskLog.log("tl", "unity: already started; resuming")
             return
         }
-        if engine != .unity {
-            // The game plays through the silent switch, like the guest's own audio, and mixes with other audio.
+        // The game plays through the silent switch, like the guest's own audio, and mixes with other audio. Unity games too:
+        // they used to be left out, from before they had sound, and played through a session that was never set up.
+        do {
             let session = AVAudioSession.sharedInstance()
             try? session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
             try? session.setActive(true)
