@@ -12,6 +12,34 @@ Android app launcher for iOS.
 
 Drop in an APK, tap it, and the Android app opens full-screen.
 
+## Screenshots
+
+### Games on the Translation Layer
+
+These run straight on the iPhone through Husk's translation layer: the game's
+own Android code, with no Android system booted underneath it.
+
+<table>
+  <tr>
+    <td align="center"><img src="Screenshots/IMG_1576.jpeg" alt="GTA San Andreas: CJ riding a BMX through Ganton" width="100%"><br><sub><b>GTA: San Andreas</b> — riding through Ganton</sub></td>
+    <td align="center"><img src="Screenshots/IMG_1572.jpeg" alt="Minecraft Dungeons: the opening cutscene over a burning castle bridge" width="100%"><br><sub><b>Minecraft Dungeons</b> — the opening cutscene</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="Screenshots/IMG_1582.jpeg" alt="Beach Buggy Racing 2: leading a race in first place" width="100%"><br><sub><b>Beach Buggy Racing 2</b> — leading a race</sub></td>
+    <td align="center"><img src="Screenshots/IMG_1580.jpeg" alt="Geometry Dash: flying the ship through a lava level" width="100%"><br><sub><b>Geometry Dash</b> — ship section of a level</sub></td>
+  </tr>
+</table>
+
+### The app
+
+<table>
+  <tr>
+    <td align="center" width="33%"><img src="Screenshots/IMG_1573.png" alt="The Library tab on the Translation Layer side, with a grid of games" width="100%"><br><sub><b>Library</b> — your games, with Translation Layer and Emulation a swipe apart</sub></td>
+    <td align="center" width="33%"><img src="Screenshots/IMG_1575.png" alt="Per-game settings for GTA: SA" width="100%"><br><sub><b>Per-game settings</b> — orientation, resolution, a clean screenshot mode and the on-screen controller</sub></td>
+    <td align="center" width="33%"><img src="Screenshots/IMG_1574.png" alt="The Settings tab" width="100%"><br><sub><b>Settings</b> — JIT, Discover, performance and appearance</sub></td>
+  </tr>
+</table>
+
 ## JIT
 
 Husk needs JIT, which on iOS takes an attached debugger. Use StikDebug, or
