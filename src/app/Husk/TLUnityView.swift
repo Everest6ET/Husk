@@ -45,7 +45,10 @@ final class TLUnityUIView: UIView, UIKeyInput {
     private let stats = UILabel()
     private var statsTimer: Timer?
 
-    init(apk: String, extraApks: [String] = [], dataDir: String, engine: TLNativeEngine, portrait: Bool = false) {
+    /// Called when three fingers tap at once: the way back to the interface while it is hidden.
+    var onThreeFingerTap: (() -> Void)?
+
+    init(apk: String, extraApks: [String] = [], dataDir: String, engine: TLNativeEngine, portrait: Bool = false, scale: CGFloat = 2) {
         self.apk = apk
         self.portrait = portrait
         self.dataDir = dataDir
@@ -54,15 +57,21 @@ final class TLUnityUIView: UIView, UIKeyInput {
         super.init(frame: .zero)
         backgroundColor = .black
         isMultipleTouchEnabled = true
-        // Two pixels per point: sharp enough, and a third of the pixels a 3x phone would ask the game
-        // for -- a 3D game is limited by fill rate, and ANGLE's translation costs on top.
-        contentScaleFactor = 2
+        // Two pixels per point unless the game's settings say otherwise: sharp enough, and a third of the pixels a 3x phone would
+        // ask the game for -- a 3D game is limited by fill rate, and ANGLE's translation costs on top.
+        contentScaleFactor = scale
         if let metal = layer as? CAMetalLayer {
             metal.pixelFormat = .bgra8Unorm
             metal.framebufferOnly = true
-            metal.contentsScale = 2
+            metal.contentsScale = scale
             metal.isOpaque = true
         }
+        let threeFingers = UITapGestureRecognizer(target: self, action: #selector(threeFingerTapped))
+        threeFingers.numberOfTouchesRequired = 3
+        threeFingers.cancelsTouchesInView = false
+        threeFingers.delaysTouchesBegan = false
+        threeFingers.delaysTouchesEnded = false
+        addGestureRecognizer(threeFingers)
 
         stats.font = .monospacedSystemFont(ofSize: 10, weight: .medium)
         stats.textColor = .white
@@ -88,6 +97,8 @@ final class TLUnityUIView: UIView, UIKeyInput {
             if self?.window != nil { husk_unity_set_paused(false) }
         }
     }
+
+    @objc private func threeFingerTapped() { onThreeFingerTap?() }
 
     deinit { statsTimer?.invalidate(); NotificationCenter.default.removeObserver(self) }
 
@@ -307,19 +318,22 @@ struct TLUnityScreen: UIViewRepresentable {
     let dataDir: String
     var engine: TLNativeEngine = .unity
     var portrait = false
+    var scale: CGFloat = 2
     var onStats: ((String) -> Void)? = nil
+    var onThreeFingerTap: (() -> Void)? = nil
     /// One view per game for the life of the process. The engine's GPU surface belongs to this view's layer and an
     /// engine cannot be started twice, so coming back to the game must show the same layer, not a new one.
     private static var shared: [String: TLUnityUIView] = [:]
 
     func makeUIView(context: Context) -> TLUnityUIView {
-        if let view = Self.shared[apk] { view.onStats = onStats; return view }
-        let view = TLUnityUIView(apk: apk, extraApks: extraApks, dataDir: dataDir, engine: engine, portrait: portrait)
+        if let view = Self.shared[apk] { view.onStats = onStats; view.onThreeFingerTap = onThreeFingerTap; return view }
+        let view = TLUnityUIView(apk: apk, extraApks: extraApks, dataDir: dataDir, engine: engine, portrait: portrait, scale: scale)
         view.onStats = onStats
+        view.onThreeFingerTap = onThreeFingerTap
         Self.shared[apk] = view
         return view
     }
-    func updateUIView(_ view: TLUnityUIView, context: Context) { view.onStats = onStats }
+    func updateUIView(_ view: TLUnityUIView, context: Context) { view.onStats = onStats; view.onThreeFingerTap = onThreeFingerTap }
 }
 
 /// Polls the runtime for the status line and its log, ten times a second at most.
@@ -501,8 +515,24 @@ struct TLCocosAttemptView: View {
     @State private var stats = "starting"
     @ObservedObject private var pads = HuskGamepads.shared
     @StateObject private var virtualPad = VirtualPad()
-    @AppStorage("husk.tl.virtualPad") private var showVirtualPad = true
+    /// This game's own settings (TLAppSettings), read once as the screen opens.
+    @State private var settings: TLAppSettings
+    /// Nothing over the picture. Starts as the game's "Hide the interface" setting says, and three fingers tapped together flip it.
+    @State private var uiHidden: Bool
+    /// The line saying how to get the interface back, shown for a few seconds after it goes.
+    @State private var hint = false
+    /// Whether the game was laid out to fill the whole screen: with "Hide the interface" on, the bar is not a strip above the game
+    /// but a layer over it that comes and goes. The game's surface is sized once at launch, so this cannot change while it runs.
+    private let cleanLayout: Bool
     private var showLog: Bool { get { showLogSetting && devInfo } nonmutating set { showLogSetting = newValue } }
+
+    init(app: TLApp) {
+        self.app = app
+        let loaded = TLAppSettings.load(app.id)
+        _settings = State(initialValue: loaded)
+        _uiHidden = State(initialValue: loaded.cleanView)
+        cleanLayout = loaded.cleanView
+    }
 
     /// Geometry Dash and the like are cocos2d-x; Minecraft is built on GameActivity. Both are landscape.
     private var engine: TLNativeEngine {
@@ -521,10 +551,22 @@ struct TLCocosAttemptView: View {
             .appendingPathComponent(engine == .minecraft ? "minecraft-data" : engine == .sdl ? "sdl-data" : engine == .ue4 ? "ue4-data" : engine == .gta ? "gta-data" : engine == .nativeactivity ? "na-data" : "cocos-data", isDirectory: true).path
     }
 
-    /// Some SDL games are portrait (the manifest says so); every other native game is landscape.
+    /// Which way up: what the game's settings say, and otherwise what its manifest asks. Some SDL games are portrait; every other
+    /// native game is landscape.
     private var portrait: Bool {
-        guard engine == .sdl || engine == .nativeactivity, let apk = app.apks.first else { return false }
-        return husk_sdl_apk_is_portrait(apk) != 0
+        switch settings.orientation {
+        case .landscape: return false
+        case .portrait: return true
+        case .auto:
+            guard engine == .sdl || engine == .nativeactivity, let apk = app.apks.first else { return false }
+            return husk_sdl_apk_is_portrait(apk) != 0
+        }
+    }
+
+    /// Whether an on-screen controller may be offered: not when the game's settings say never, not while a real one is connected, and
+    /// without "Always" only for Unreal, whose menus answer nothing else.
+    private var padOffered: Bool {
+        settings.pad != .never && pads.names.isEmpty && (settings.pad == .always || engine == .ue4)
     }
 
     /// Another game is already loaded in this session, and an engine cannot be loaded twice.
@@ -533,11 +575,24 @@ struct TLCocosAttemptView: View {
         return (loaded as NSString).lastPathComponent
     }
 
+    private func toggleInterface() {
+        withAnimation(.easeInOut(duration: 0.15)) { uiHidden.toggle() }
+        if uiHidden { showHint() }
+    }
+
+    private func showHint() {
+        hint = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { withAnimation(.easeOut(duration: 0.4)) { hint = false } }
+    }
+
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
             VStack(spacing: 0) {
-                bar
+                if !cleanLayout {
+                    // Hidden, the strip stays (the game below it must not change size) but shows nothing.
+                    bar.opacity(uiHidden ? 0 : 1).allowsHitTesting(!uiHidden)
+                }
                 if let other = blockedBy {
                     VStack(spacing: 8) {
                         Text("Another game is already loaded")
@@ -549,26 +604,55 @@ struct TLCocosAttemptView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if let apk = app.apks.first {
                     HStack(spacing: 0) {
-                        TLUnityScreen(apk: apk, extraApks: Array(app.apks.dropFirst()), dataDir: dataDir, engine: engine, portrait: portrait, onStats: { stats = $0 })
+                        TLUnityScreen(apk: apk, extraApks: Array(app.apks.dropFirst()), dataDir: dataDir, engine: engine, portrait: portrait,
+                                      scale: settings.resolution.scale, onStats: { stats = $0 }, onThreeFingerTap: { toggleInterface() })
                             .background(Color.black)
-                        if showLog { logPanel.frame(width: 320) }
+                        if showLog, !uiHidden { logPanel.frame(width: 320) }
                     }
                     .overlay {
-                        // Unreal's menus answer only a controller: with none paired, one on the glass.
-                        if engine == .ue4, showVirtualPad, pads.names.isEmpty, model.state == Int32(HUSK_UNITY_RUNNING) {
-                            VirtualPadView(pad: virtualPad)
+                        // A game whose menus answer only a controller: with none paired, one on the glass. Kept in place and
+                        // connected while the interface is hidden, so the game does not see a controller come and go.
+                        if padOffered, settings.padShown, model.state == Int32(HUSK_UNITY_RUNNING) {
+                            VirtualPadView(pad: virtualPad, opacity: settings.padOpacity, haptics: settings.haptics)
+                                .opacity(uiHidden ? 0 : 1)
+                                .allowsHitTesting(!uiHidden)
                         }
                     }
-                    .ignoresSafeArea(.container, edges: [.horizontal, .bottom])
+                    .ignoresSafeArea(.container, edges: cleanLayout ? .all : [.horizontal, .bottom])
                 }
+            }
+            if cleanLayout, !uiHidden {
+                VStack(spacing: 0) { bar; Spacer() }
+            }
+            if hint {
+                VStack {
+                    Spacer()
+                    Text("Tap with three fingers to show the interface")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 14).padding(.vertical, 8)
+                        .background(.black.opacity(0.65), in: Capsule())
+                        .padding(.bottom, 26)
+                }
+                .allowsHitTesting(false)
+                .transition(.opacity)
             }
         }
         .statusBarHidden(true)
         .persistentSystemOverlays(.hidden)
         // Swipes near the edges are the game's.
         .defersSystemGestures(on: .all)
-        .onAppear { HuskOrientation.set(portrait ? .portrait : .landscape); model.start() }
-        .onDisappear { model.stop(); HuskOrientation.set(HuskOrientation.standard) }
+        .onAppear {
+            HuskOrientation.set(portrait ? .portrait : .landscape)
+            UIApplication.shared.isIdleTimerDisabled = settings.keepAwake
+            if cleanLayout { showHint() }
+            model.start()
+        }
+        .onDisappear {
+            model.stop()
+            UIApplication.shared.isIdleTimerDisabled = false
+            HuskOrientation.set(HuskOrientation.standard)
+        }
     }
 
     private var bar: some View {
@@ -585,13 +669,13 @@ struct TLCocosAttemptView: View {
                 Label(pads.names.count == 1 ? pads.names[0] : "\(pads.names.count) controllers", systemImage: "gamecontroller.fill")
                     .font(.system(size: 11, weight: .medium)).foregroundStyle(.white.opacity(0.7)).lineLimit(1)
             }
-            if engine == .ue4, pads.names.isEmpty {
-                Button { showVirtualPad.toggle() } label: {
-                    Label(showVirtualPad ? "Hide pad" : "Pad", systemImage: "gamecontroller").font(.system(size: 12, weight: .semibold))
+            if padOffered {
+                Button { settings.padShown.toggle(); settings.save(app.id) } label: {
+                    Label(settings.padShown ? "Hide pad" : "Pad", systemImage: "gamecontroller").font(.system(size: 12, weight: .semibold))
                 }
                 .tint(.white)
             }
-            if model.state == Int32(HUSK_UNITY_RUNNING) {
+            if settings.showStats, model.state == Int32(HUSK_UNITY_RUNNING) {
                 Text(stats).font(.technical(11)).foregroundStyle(.white.opacity(0.7)).lineLimit(1)
             }
             if devInfo {
@@ -600,6 +684,10 @@ struct TLCocosAttemptView: View {
                 }
                 .tint(.white)
             }
+            Button { toggleInterface() } label: {
+                Label("Hide", systemImage: "eye.slash").font(.system(size: 12, weight: .semibold))
+            }
+            .tint(.white)
         }
         .padding(.horizontal, 14)
         .frame(height: 30)

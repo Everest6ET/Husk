@@ -57,12 +57,20 @@ final class VirtualPad: ObservableObject {
 /// drawing come from the same layout so they cannot drift apart. A touch that lands on no control falls through to the game.
 struct VirtualPadView: UIViewRepresentable {
     let pad: VirtualPad
+    var opacity: Double = 1
+    var haptics = true
 
     func makeUIView(context: Context) -> PadView {
         pad.connect()
-        return PadView(pad: pad)
+        let view = PadView(pad: pad)
+        view.alpha = opacity
+        view.hapticsEnabled = haptics
+        return view
     }
-    func updateUIView(_ view: PadView, context: Context) {}
+    func updateUIView(_ view: PadView, context: Context) {
+        view.alpha = opacity
+        view.hapticsEnabled = haptics
+    }
     static func dismantleUIView(_ view: PadView, coordinator: ()) { view.pad.disconnect() }
 }
 
@@ -95,6 +103,7 @@ final class PadView: UIView {
     private var fingers: [UITouch: Finger] = [:]
     private var shown = VirtualPad.State()
     private let haptic = UIImpactFeedbackGenerator(style: .light)
+    var hapticsEnabled = true
 
     init(pad: VirtualPad) {
         self.pad = pad
@@ -269,7 +278,7 @@ final class PadView: UIView {
                 if left { s.lx = Float(f.vector.x); s.ly = Float(-f.vector.y) } else { s.rx = Float(f.vector.x); s.ry = Float(-f.vector.y) }
             }
         }
-        if s.buttons & ~shown.buttons != 0 || (s.lt > shown.lt) || (s.rt > shown.rt) { haptic.impactOccurred() }
+        if hapticsEnabled, s.buttons & ~shown.buttons != 0 || (s.lt > shown.lt) || (s.rt > shown.rt) { haptic.impactOccurred() }
         shown = s
         pad.send(s)
         setNeedsDisplay()
