@@ -104,6 +104,7 @@
 		E165A4CCFD518F67D08A4696 /* husk-tl-bionic-ndk.c in Sources */ = {isa = PBXBuildFile; fileRef = FF5A120A4E0B3EE166D789C4 /* husk-tl-bionic-ndk.c */; };
 		E1F5B2BE674BB476433BFCEF /* husk-tl-cocos-text.c in Sources */ = {isa = PBXBuildFile; fileRef = 9217F354B8587F75369229F8 /* husk-tl-cocos-text.c */; };
 		E2C01F517E73992A29E22EC2 /* husk-jit.js in Resources */ = {isa = PBXBuildFile; fileRef = B74F9AA42414905593B347BA /* husk-jit.js */; };
+		E51DC6B5300ED6D4C45758A5 /* IncomingFiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6B56E33761AC40E5BEA6BE9 /* IncomingFiles.swift */; };
 		E6975EAFAE86144999E8B267 /* husk-tl-cocos.c in Sources */ = {isa = PBXBuildFile; fileRef = 6B7990E89ED6098029981E38 /* husk-tl-cocos.c */; };
 		E7095C2C706335203227319A /* JITPairing.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF6C1917FEC08090833D9CF0 /* JITPairing.swift */; };
 		E8E067635E072083A772DADE /* HuskJITHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C1FC868194AB42F653D94F9 /* HuskJITHelper.swift */; };
@@ -289,6 +290,7 @@
 		E37298010F80517A3057579E /* BundleUnpacker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BundleUnpacker.swift; sourceTree = "<group>"; };
 		E3A701AA76E485A6CE15F106 /* icon-cleardark.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "icon-cleardark.png"; sourceTree = "<group>"; };
 		E4D1C81CB49D39A7D865A0DA /* husk-tl-probe.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "husk-tl-probe.c"; sourceTree = "<group>"; };
+		E6B56E33761AC40E5BEA6BE9 /* IncomingFiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IncomingFiles.swift; sourceTree = "<group>"; };
 		E7F3F73724FABE806D994905 /* husk-tl-prefs.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "husk-tl-prefs.h"; sourceTree = "<group>"; };
 		E8B800E5E712B4EFFB9F5D59 /* husk-tl-bionic.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "husk-tl-bionic.c"; sourceTree = "<group>"; };
 		EA7240C2BD49C9F0CF7CB3DF /* icon-dark.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "icon-dark.png"; sourceTree = "<group>"; };
@@ -361,6 +363,7 @@
 				4B259C39CD9CC4D2A8A3D8E8 /* HuskMetalPresenter.swift */,
 				D91C1E7D6301EBCE06FEE0FE /* HuskMetalView.swift */,
 				7FFF8E257AE872A53A4E3066 /* HuskRPPairing.h */,
+				E6B56E33761AC40E5BEA6BE9 /* IncomingFiles.swift */,
 				FD559A37CF59C3290F29FA43 /* Info.plist */,
 				5664FE015975D16E7500F3C7 /* JITBootstrap.swift */,
 				43C233A62FB57030C0818489 /* JITBuiltIn.swift */,
@@ -741,6 +744,7 @@
 				090A2A3F43CE69EA3C079EB0 /* HuskLog.swift in Sources */,
 				59514CBA483F71A738A3B444 /* HuskMetalPresenter.swift in Sources */,
 				F6880CA30640F688356229CF /* HuskMetalView.swift in Sources */,
+				E51DC6B5300ED6D4C45758A5 /* IncomingFiles.swift in Sources */,
 				507309F42DC8965C816DC580 /* JITBootstrap.swift in Sources */,
 				C1A4C57DAA6BFD79AAE5FD88 /* JITBuiltIn.swift in Sources */,
 				FA5016C04E0EFC5FD0CF32F9 /* JITCard.swift in Sources */,

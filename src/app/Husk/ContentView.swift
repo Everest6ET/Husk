@@ -28,6 +28,7 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage(Theme.Appearance.key) private var appearance = Theme.Appearance.system
     @ObservedObject private var theme = AppTheme.shared
+    @ObservedObject private var incoming = IncomingFiles.shared
 
     var body: some View {
         ZStack {
@@ -110,6 +111,16 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showLogs) { LogView() }
         .sheet(isPresented: $router.showFiles) { FilesTab() }
+        // An APK shared to Husk: where does it go?
+        .sheet(isPresented: Binding(get: { !incoming.waiting.isEmpty },
+                                    set: { if !$0 { incoming.discard() } })) {
+            IncomingChooser()
+                .presentationDetents([.medium])
+                .presentationDragIndicator(.visible)
+        }
+        // APKs meant for Android wait until it can take them.
+        .onChange(of: host.isReady) { _ in incoming.installForAndroidIfReady() }
+        .onChange(of: host.busy) { _ in incoming.installForAndroidIfReady() }
         .sheet(isPresented: $jit.showSetup) { JITSetupFlow() }
         // The built-in helper attaches while Husk stays in the foreground, so
         // there is no relaunch to trigger the region claim below; this is it.

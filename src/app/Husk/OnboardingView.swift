@@ -31,7 +31,7 @@ struct OnboardingView: View {
     let onDone: () -> Void
 
     @State private var page = 0
-    @State private var autoStart = true
+    @State private var autoStart = false
     @State private var landscape = UserDefaults.standard.bool(forKey: "husk.landscapeGuest")
     @State private var sound = UserDefaults.standard.bool(forKey: "husk.sound")
     @State private var autoSave =

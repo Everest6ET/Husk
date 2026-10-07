@@ -44,6 +44,15 @@ struct HuskApp: App {
         // absent kills the process outright rather than returning an error.
         JITBootstrap.installTrapGuard()
 
+        // Android no longer starts by itself unless someone turns that on: once, for everyone who had it from the old default.
+        let d = UserDefaults.standard
+        if !d.bool(forKey: "husk.autoStart.offByDefault") {
+            d.set(false, forKey: "husk.autoStart")
+            d.set(true, forKey: "husk.autoStart.offByDefault")
+        }
+        // Copies of shared APKs that were never placed.
+        IncomingFiles.clearLeftovers()
+
         // Game controllers, for the games the native runtime runs.
         Task { @MainActor in HuskGamepads.shared.start() }
     }
@@ -51,6 +60,8 @@ struct HuskApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
+                // An APK shared to Husk, or opened in it from Files.
+                .onOpenURL { IncomingFiles.shared.receive($0) }
         }
     }
 }
