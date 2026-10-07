@@ -52,7 +52,7 @@
 		</dict>
 	</array>
 	<key>CFBundleVersion</key>
-	<string>31</string>
+	<string>32</string>
 	<key>LSApplicationQueriesSchemes</key>
 	<array>
 		<string>stikjit</string>
@@ -90,18 +90,20 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<key>UIViewControllerBasedStatusBarAppearance</key>
+	<false/>
 	<key>UTImportedTypeDeclarations</key>
 	<array>
 		<dict>
-			<key>UTTypeIdentifier</key>
-			<string>com.android.package-archive</string>
-			<key>UTTypeDescription</key>
-			<string>Android App</string>
 			<key>UTTypeConformsTo</key>
 			<array>
 				<string>public.data</string>
 				<string>public.archive</string>
 			</array>
+			<key>UTTypeDescription</key>
+			<string>Android App</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.android.package-archive</string>
 			<key>UTTypeTagSpecification</key>
 			<dict>
 				<key>public.filename-extension</key>
@@ -115,15 +117,15 @@
 			</dict>
 		</dict>
 		<dict>
-			<key>UTTypeIdentifier</key>
-			<string>app.husk.xapk</string>
-			<key>UTTypeDescription</key>
-			<string>Android App Bundle (XAPK)</string>
 			<key>UTTypeConformsTo</key>
 			<array>
 				<string>public.data</string>
 				<string>public.archive</string>
 			</array>
+			<key>UTTypeDescription</key>
+			<string>Android App Bundle (XAPK)</string>
+			<key>UTTypeIdentifier</key>
+			<string>app.husk.xapk</string>
 			<key>UTTypeTagSpecification</key>
 			<dict>
 				<key>public.filename-extension</key>
@@ -133,15 +135,15 @@
 			</dict>
 		</dict>
 		<dict>
-			<key>UTTypeIdentifier</key>
-			<string>app.husk.apkm</string>
-			<key>UTTypeDescription</key>
-			<string>Android App Bundle (APKM)</string>
 			<key>UTTypeConformsTo</key>
 			<array>
 				<string>public.data</string>
 				<string>public.archive</string>
 			</array>
+			<key>UTTypeDescription</key>
+			<string>Android App Bundle (APKM)</string>
+			<key>UTTypeIdentifier</key>
+			<string>app.husk.apkm</string>
 			<key>UTTypeTagSpecification</key>
 			<dict>
 				<key>public.filename-extension</key>
@@ -151,15 +153,15 @@
 			</dict>
 		</dict>
 		<dict>
-			<key>UTTypeIdentifier</key>
-			<string>app.husk.apks</string>
-			<key>UTTypeDescription</key>
-			<string>Android App Bundle (APKS)</string>
 			<key>UTTypeConformsTo</key>
 			<array>
 				<string>public.data</string>
 				<string>public.archive</string>
 			</array>
+			<key>UTTypeDescription</key>
+			<string>Android App Bundle (APKS)</string>
+			<key>UTTypeIdentifier</key>
+			<string>app.husk.apks</string>
 			<key>UTTypeTagSpecification</key>
 			<dict>
 				<key>public.filename-extension</key>
@@ -169,7 +171,5 @@
 			</dict>
 		</dict>
 	</array>
-	<key>UIViewControllerBasedStatusBarAppearance</key>
-	<false/>
 </dict>
 </plist>
