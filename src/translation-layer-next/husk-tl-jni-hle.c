@@ -779,12 +779,11 @@ static void *fmodex_main(void *arg)
     tl_jni_set_field(buffer, "capacity", "J", capacity);
     tl_log_line("fmod: FMODAudioDevice playing, %d Hz stereo, %d frames a block (info 2..5: %d %d %d %d)", rate, frames,
                 info(env, g_fmodex.self, 2), info(env, g_fmodex.self, 3), info(env, g_fmodex.self, 4), info(env, g_fmodex.self, 5));
-    long calls = 0, filled = 0;
+    bool said = false;
     while (g_fmodex.running) {
         int r = process(env, g_fmodex.self, buffer);
-        calls++;
-        if (calls <= 5 || (calls % 2000) == 0) tl_log_line("fmod: fmodProcess -> %d (%ld of %ld calls filled)", r, filled, calls);
-        if (r == 0 && tl_cocos_audio_hook) { filled++; tl_cocos_audio_hook(block, frames, 2, rate); }
+        if (r != 0 && !said) { tl_log_line("fmod: fmodProcess -> %d (not FMOD_OK); waiting", r); said = true; }
+        if (r == 0 && tl_cocos_audio_hook) tl_cocos_audio_hook(block, frames, 2, rate);
         else usleep(2000);
     }
     free(block);
