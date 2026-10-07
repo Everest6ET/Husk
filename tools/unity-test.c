@@ -356,7 +356,7 @@ static int print_lib(uintptr_t bias, const char *name, const void *phdr, unsigne
 
 int main(int argc, char **argv)
 {
-    if (argc < 2) { fprintf(stderr, "usage: %s <apk> [seconds]\n", argv[0]); return 2; }
+    if (argc < 2) { fprintf(stderr, "usage: %s <apk> [seconds] [width height]\n", argv[0]); return 2; }
     static uint8_t altstack[1 << 16];
     stack_t ss = { .ss_sp = altstack, .ss_size = sizeof(altstack) };
     sigaltstack(&ss, NULL);
@@ -374,7 +374,7 @@ int main(int argc, char **argv)
     char egl[600], gles[600]; snprintf(egl, sizeof(egl), "%s/libEGL.dylib", cef); snprintf(gles, sizeof(gles), "%s/libGLESv2.dylib", cef);
     char frames[] = "/tmp/husk-frames-XXXXXX"; mkdtemp(frames);
     fprintf(stderr, "frames: %s\n", frames);
-    tl_unity_config cfg = { .apk_path = argv[1], .data_dir = tmp, .package_name = getenv("TL_PACKAGE") ? getenv("TL_PACKAGE") : "com.kiloo.subwaysurf", .width = 540, .height = 1200,
+    tl_unity_config cfg = { .apk_path = argv[1], .data_dir = tmp, .package_name = getenv("TL_PACKAGE") ? getenv("TL_PACKAGE") : "com.kiloo.subwaysurf", .width = argc > 4 ? atoi(argv[3]) : 540, .height = argc > 4 ? atoi(argv[4]) : 1200,
                             .angle_egl = getenv("TL_ANGLE_EGL") ? getenv("TL_ANGLE_EGL") : egl, .angle_gles = getenv("TL_ANGLE_GLES") ? getenv("TL_ANGLE_GLES") : gles,
                             .frame_dir = frames, .frame_every = getenv("TL_CTL") ? -6 : 30 };
     g_frame_dir = frames;
