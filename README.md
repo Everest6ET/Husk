@@ -31,12 +31,12 @@ shown as the two sides of its Library:
 
 <table>
   <tr>
-    <td align="center"><img src="Screenshots/gta-san-andreas.jpeg" alt="GTA San Andreas: CJ riding a BMX through Ganton" width="100%"><br><sub><b>GTA: San Andreas</b> — riding through Ganton</sub></td>
-    <td align="center"><img src="Screenshots/minecraft-dungeons.jpeg" alt="Minecraft Dungeons: the opening cutscene over a burning castle bridge" width="100%"><br><sub><b>Minecraft Dungeons</b> — the opening cutscene</sub></td>
+    <td align="center"><img src="Screenshots/gta-san-andreas.jpeg" alt="GTA: San Andreas" width="100%"><br><sub><b>GTA: San Andreas</b></sub></td>
+    <td align="center"><img src="Screenshots/minecraft-dungeons.jpeg" alt="Minecraft Dungeons" width="100%"><br><sub><b>Minecraft Dungeons</b></sub></td>
   </tr>
   <tr>
-    <td align="center"><img src="Screenshots/beach-buggy-racing-2.jpeg" alt="Beach Buggy Racing 2: leading a race in first place" width="100%"><br><sub><b>Beach Buggy Racing 2</b> — leading a race</sub></td>
-    <td align="center"><img src="Screenshots/geometry-dash.jpeg" alt="Geometry Dash: flying the ship through a lava level" width="100%"><br><sub><b>Geometry Dash</b> — ship section of a level</sub></td>
+    <td align="center"><img src="Screenshots/beach-buggy-racing-2.jpeg" alt="Beach Buggy Racing 2" width="100%"><br><sub><b>Beach Buggy Racing 2</b></sub></td>
+    <td align="center"><img src="Screenshots/geometry-dash.jpeg" alt="Geometry Dash" width="100%"><br><sub><b>Geometry Dash</b></sub></td>
   </tr>
 </table>
 
@@ -44,9 +44,9 @@ shown as the two sides of its Library:
 
 <table>
   <tr>
-    <td align="center" width="33%"><img src="Screenshots/library.png" alt="The Library tab on the Translation Layer side, with a grid of games" width="100%"><br><sub><b>Library</b> — Translation Layer and Emulation, a swipe apart</sub></td>
-    <td align="center" width="33%"><img src="Screenshots/game-settings.png" alt="Per-game settings for GTA: SA" width="100%"><br><sub><b>Per-game settings</b> — orientation, resolution, a clean screenshot mode and the on-screen controller</sub></td>
-    <td align="center" width="33%"><img src="Screenshots/settings.png" alt="The Settings tab" width="100%"><br><sub><b>Settings</b> — JIT, Discover, performance and appearance</sub></td>
+    <td align="center" width="33%"><img src="Screenshots/library.png" alt="Library" width="100%"><br><sub><b>Library</b></sub></td>
+    <td align="center" width="33%"><img src="Screenshots/game-settings.png" alt="Game Settings" width="100%"><br><sub><b>Game Settings</b></sub></td>
+    <td align="center" width="33%"><img src="Screenshots/settings.png" alt="Settings" width="100%"><br><sub><b>Settings</b></sub></td>
   </tr>
 </table>
 
