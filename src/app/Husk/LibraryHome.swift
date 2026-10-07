@@ -21,8 +21,8 @@ enum LibrarySide: String, CaseIterable, Identifiable {
 /// The library: every app Husk can open, on two pages a swipe apart.
 ///
 /// Translation Layer holds the games that run straight on the iPhone; Emulation holds Android itself -- start it,
-/// watch it boot, open it -- and the apps installed inside it. A tap opens an app; its page and its settings are a
-/// long press away. One navigation stack serves both pages, so a page pushed from either comes back to the same place.
+/// watch it boot, open it -- and the apps installed inside it. A tap opens an app's page; playing or opening it, and
+/// its settings, are also a long press away. One navigation stack serves both pages, so a page pushed from either comes back to the same place.
 struct LibraryHome: View {
     let started: Bool
     let onOpenGuest: () -> Void
@@ -34,16 +34,18 @@ struct LibraryHome: View {
     @AppStorage("husk.library.side") private var side: LibrarySide = .translation
     /// A translation-layer game started from the grid.
     @State private var playing: TLApp?
+    /// What the search field holds: both sides are filtered by it.
+    @State private var query = ""
 
     var body: some View {
         NavigationStack(path: $router.library) {
             VStack(spacing: 0) {
                 header
                 TabView(selection: $side) {
-                    TranslationPage(playing: $playing, add: addGames)
+                    TranslationPage(playing: $playing, query: query, add: addGames)
                         .tag(LibrarySide.translation)
                     EmulationPage(started: started, onOpenGuest: onOpenGuest, onStartAndroid: onStartAndroid,
-                                  install: installApps)
+                                  query: query, install: installApps)
                         .tag(LibrarySide.emulation)
                 }
                 .tabViewStyle(.page(indexDisplayMode: .never))
@@ -94,6 +96,7 @@ struct LibraryHome: View {
                 .disabled(side == .translation && store.busy != nil)
                 .accessibilityLabel(side == .translation ? "Add a Game" : "Install an APK")
             }
+            SearchField(text: $query, prompt: side == .translation ? "Search games" : "Search apps")
             SideSwitcher(side: $side)
         }
         .padding(.horizontal, 20)
@@ -173,6 +176,63 @@ private struct HeaderButton: View {
     }
 }
 
+/// A search field as the system draws one, kept in the header so it filters whichever side is showing.
+private struct SearchField: View {
+    @Binding var text: String
+    let prompt: String
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(.secondary)
+                TextField(prompt, text: $text)
+                    .focused($focused)
+                    .submitLabel(.search)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                if !text.isEmpty {
+                    Button { text = "" } label: {
+                        Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Clear")
+                }
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 36)
+            .background(Color(uiColor: .tertiarySystemFill), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            if focused {
+                Button("Cancel") { text = ""; focused = false }
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: focused)
+    }
+}
+
+/// Nothing on this side matches the search.
+private struct NoResults: View {
+    let query: String
+    var body: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "magnifyingglass").font(.system(size: 28, weight: .light)).foregroundStyle(.secondary)
+            Text("No Results").font(.headline)
+            Text("Nothing here is called “\(query)”.").font(.subheadline).foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 48)
+    }
+}
+
+/// Whether a name matches what was searched for.
+private func matches(_ query: String, _ names: String...) -> Bool {
+    let q = query.trimmingCharacters(in: .whitespaces)
+    return q.isEmpty || names.contains { $0.localizedCaseInsensitiveContains(q) }
+}
+
 // MARK: - the grid
 
 /// The grid both pages lay their apps out on: as many columns as fit, with room around each icon.
@@ -236,6 +296,7 @@ private struct BusyStrip: View {
 
 private struct TranslationPage: View {
     @Binding var playing: TLApp?
+    let query: String
     let add: () -> Void
 
     @ObservedObject private var store = TranslationLayerStore.shared
@@ -248,23 +309,21 @@ private struct TranslationPage: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                if !jitOn {
-                    JITCard()
-                        .padding(.horizontal, 16).padding(.vertical, 8)
-                        .background(Color(uiColor: .secondarySystemBackground),
-                                    in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-                }
+                if !jitOn { JITCard(compact: true) }
                 if let busy = store.busy { BusyStrip(text: busy) }
 
+                let shown = store.apps.filter { matches(query, $0.label) }
                 if store.apps.isEmpty {
                     EmptyState(title: "No Games Yet",
                                message: "Add an APK or a bundle (.xapk, .apkm, .apks). Games here run straight on your "
                                       + "iPhone, without starting Android.",
                                systemImage: "gamecontroller",
                                actionTitle: "Add a Game", action: add)
+                } else if shown.isEmpty {
+                    NoResults(query: query)
                 } else {
                     LazyVGrid(columns: launcherColumns, spacing: 22) {
-                        ForEach(store.apps) { app in tile(app) }
+                        ForEach(shown) { app in tile(app) }
                     }
                 }
             }
@@ -289,7 +348,7 @@ private struct TranslationPage: View {
     private func tile(_ app: TLApp) -> some View {
         let runs = app.report?.runsOnNativeRuntime == true
         return Button {
-            if runs { playing = app } else { router.library.append(.game(app.id)) }
+            router.library.append(.game(app.id))
         } label: {
             LauncherTile(title: app.label, iconPath: app.iconPath, caption: runs ? nil : "May not run")
         }
@@ -312,6 +371,7 @@ private struct EmulationPage: View {
     let started: Bool
     let onOpenGuest: () -> Void
     let onStartAndroid: () -> Void
+    let query: String
     let install: () -> Void
 
     @ObservedObject private var host = AndroidHost.shared
@@ -326,12 +386,17 @@ private struct EmulationPage: View {
                 if let busy = host.busy { BusyStrip(text: busy) }
                 if jit.busy, !jit.showSetup { BusyStrip(text: jit.status ?? "Turning on JIT…") }
 
+                let shown = host.packages.filter { matches(query, $0.label, $0.name) }
                 if !host.packages.isEmpty {
                     Text("Apps")
                         .font(.title3.weight(.semibold))
                         .padding(.top, 4)
-                    LazyVGrid(columns: launcherColumns, spacing: 22) {
-                        ForEach(host.packages) { app in tile(app) }
+                    if shown.isEmpty {
+                        NoResults(query: query)
+                    } else {
+                        LazyVGrid(columns: launcherColumns, spacing: 22) {
+                            ForEach(shown) { app in tile(app) }
+                        }
                     }
                 } else if host.isReady {
                     EmptyState(title: "No Apps Yet",
@@ -351,7 +416,7 @@ private struct EmulationPage: View {
 
     private func tile(_ app: AndroidHost.Package) -> some View {
         Button {
-            if canOpen { host.launch(app.name) { onOpenGuest() } } else { router.library.append(.android(app)) }
+            router.library.append(.android(app))
         } label: {
             LauncherTile(title: app.label, iconPath: app.iconPath, dimmed: !host.isReady)
         }
