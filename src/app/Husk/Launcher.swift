@@ -49,6 +49,17 @@ enum LibraryItem: Identifiable, Hashable {
         }
     }
 
+    var packageName: String? {
+        switch self {
+        case .game(let g): return g.packageName
+        case .app(let p): return p.name
+        case .android: return nil
+        }
+    }
+
+    /// A gameplay picture, for apps that have been run on an iPhone (fetched from GitHub; see ShowcaseStore).
+    @MainActor var artworkPath: String? { ShowcaseStore.shared.pictures(for: packageName).first }
+
     var runsInAndroid: Bool {
         if case .app = self { return true }
         return false
@@ -78,6 +89,15 @@ enum LibraryItem: Identifiable, Hashable {
         let ago = date.timeIntervalSinceNow > -60 ? "just now" : rel.localizedString(for: date, relativeTo: Date())
         return (isGame ? "Played " : "Opened ") + ago
     }
+}
+
+/// Which side Home shows: games run on the iPhone itself, or Android and its apps.
+enum HomeMode: String, CaseIterable, Identifiable {
+    case translation, android
+    var id: String { rawValue }
+    var title: String { self == .translation ? "Translation Layer" : "Android" }
+    var detail: String { self == .translation ? "Games running directly on iPhone" : "Apps inside the emulated Android" }
+    var systemImage: String { self == .translation ? "bolt.fill" : "apps.iphone" }
 }
 
 /// Which items a library page shows.
@@ -124,20 +144,24 @@ struct HomeView: View {
     @ObservedObject private var host = AndroidHost.shared
     @ObservedObject private var jit = JITCoordinator.shared
     @ObservedObject private var incoming = IncomingFiles.shared
+    @AppStorage("husk.home.mode") private var mode: HomeMode = .translation
 
-    /// Everything, most recent first -- with Android itself among it once it has been opened from its page.
+    /// This side's items, most recent first. On the Android side Android itself leads until an app has been opened.
     private var all: [LibraryItem] {
-        let android: [LibraryItem] = LibraryItem.android.lastUsed == nil ? [] : [.android]
-        return Launcher.byRecent(Launcher.items(store: store, host: host) + android)
+        switch mode {
+        case .translation: return Launcher.byRecent(store.apps.map(LibraryItem.game))
+        case .android: return Launcher.byRecent(host.packages.map(LibraryItem.app)) + [.android]
+        }
     }
 
     var body: some View {
         NavigationStack(path: $router.home) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
-                    HStack {
+                    HStack(spacing: 10) {
                         Text("Husk")
                             .font(.system(size: 34, weight: .heavy, design: .rounded))
+                        ModeMenu(mode: $mode)
                         Spacer()
                         HeaderButton(systemImage: "plus") { router.addSomething() }
                             .accessibilityLabel("Add a Game or App")
@@ -152,7 +176,7 @@ struct HomeView: View {
                     if items.isEmpty {
                         WelcomeCard()
                     } else {
-                        let lead = items.first { $0.lastUsed != nil } ?? items.first { $0.isGame } ?? items[0]
+                        let lead = items.first { $0.lastUsed != nil } ?? (mode == .android ? .android : items[0])
                         HeroCard(item: lead)
 
                         let games = items.filter { $0.isGame && $0 != lead }
@@ -232,6 +256,34 @@ private struct WelcomeCard: View {
     }
 }
 
+/// The side Home shows, as a pull-down beside the title: the current one, and a tap away the other, each saying what it is.
+private struct ModeMenu: View {
+    @Binding var mode: HomeMode
+
+    var body: some View {
+        Menu {
+            Picker("Show", selection: $mode) {
+                ForEach(HomeMode.allCases) { m in
+                    Label { Text(m.title); Text(m.detail) } icon: { Image(systemName: m.systemImage) }
+                        .tag(m)
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Text(mode == .translation ? "Translated" : "Android")
+                    .font(.subheadline.weight(.semibold))
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 10, weight: .bold))
+            }
+            .foregroundStyle(Color.accentColor)
+            .padding(.horizontal, 10)
+            .frame(height: 28)
+            .background(Color.accentColor.opacity(0.14), in: Capsule())
+        }
+        .padding(.top, 4)
+    }
+}
+
 private struct ShelfHeader: View {
     let title: String
     let seeAll: () -> Void
@@ -266,6 +318,28 @@ struct IconBackdrop: View {
             }
         }
         .clipped()
+        // Scaled up, the icon reaches far past the card; clipping hides that but does not stop it taking touches, and a
+        // tap on one cover used to land on its neighbour's backdrop.
+        .allowsHitTesting(false)
+    }
+}
+
+/// What sits behind an item's name: its gameplay picture when Husk ships one, its blurred icon otherwise.
+struct ItemBackdrop: View {
+    let item: LibraryItem
+    var pixels: Int = 1200
+    var fallback: Color = Color(uiColor: .secondarySystemBackground)
+    @ObservedObject private var showcase = ShowcaseStore.shared
+
+    var body: some View {
+        Group {
+            if let art = item.artworkPath {
+                Color.clear.overlay { PictureView(path: art, pixels: pixels) }.clipped()
+            } else {
+                IconBackdrop(path: item.iconPath, fallback: item == .android ? AndroidMark.green.opacity(0.55) : fallback)
+            }
+        }
+        .allowsHitTesting(false)
     }
 }
 
@@ -277,7 +351,7 @@ private struct HeroCard: View {
     var body: some View {
         NavigationLink(value: item.route) {
             ZStack(alignment: .bottomLeading) {
-                IconBackdrop(path: item.iconPath, fallback: item == .android ? AndroidMark.green.opacity(0.6) : Color(uiColor: .secondarySystemBackground))
+                ItemBackdrop(item: item)
                 LinearGradient(colors: [.clear, .black.opacity(0.75)], startPoint: .top, endPoint: .bottom)
                 HStack(alignment: .bottom, spacing: 14) {
                     ItemIcon(item: item, size: 64)
@@ -316,13 +390,14 @@ private struct CoverTile: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             ZStack {
-                IconBackdrop(path: item.iconPath)
+                ItemBackdrop(item: item, pixels: 420)
                 LinearGradient(colors: [.clear, .black.opacity(0.35)], startPoint: .center, endPoint: .bottom)
                 ItemIcon(item: item, size: 58)
                     .shadow(color: .black.opacity(0.3), radius: 8, y: 3)
             }
             .frame(width: 104, height: 136)
             .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
             .overlay(alignment: .topTrailing) { if item.runsInAndroid { AndroidBadge().padding(7) } }
             Text(item.title)
                 .font(.caption.weight(.semibold))

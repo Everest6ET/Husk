@@ -13,8 +13,7 @@ private struct PageHero<Action: View>: View {
     var body: some View {
         VStack(spacing: 0) {
             ZStack(alignment: .bottomLeading) {
-                IconBackdrop(path: item.iconPath,
-                             fallback: item == .android ? AndroidMark.green.opacity(0.55) : Color(uiColor: .tertiarySystemFill))
+                ItemBackdrop(item: item, fallback: Color(uiColor: .tertiarySystemFill))
                 LinearGradient(colors: [.clear, .black.opacity(0.7)], startPoint: .top, endPoint: .bottom)
                 HStack(alignment: .bottom, spacing: 14) {
                     ItemIcon(item: item, size: 84)
@@ -89,6 +88,7 @@ private func fileBytes(_ paths: [String]) -> String {
 /// A translation-layer game: Play, its settings, what it is, and removing it.
 struct GamePage: View {
     let app: TLApp
+    @ObservedObject private var showcase = ShowcaseStore.shared
 
     @ObservedObject private var store = TranslationLayerStore.shared
     @ObservedObject private var jit = JITCoordinator.shared
@@ -124,6 +124,13 @@ struct GamePage: View {
                 }
             }
             .heroRow()
+
+            if !ShowcaseStore.shared.pictures(for: app.packageName).isEmpty {
+                Section("Screenshots") {
+                    ShowcaseGallery(package: app.packageName)
+                        .listRowInsets(EdgeInsets(top: 10, leading: 12, bottom: 10, trailing: 12))
+                }
+            }
 
             Section {
                 NavigationLink(value: LibraryRoute.gameSettings(app.id)) {
@@ -184,6 +191,7 @@ struct GamePage: View {
 /// An app installed in Android: Open (starting Android first when it is not running), what it is, and its files.
 struct AndroidAppPage: View {
     let app: AndroidHost.Package
+    @ObservedObject private var showcase = ShowcaseStore.shared
 
     @ObservedObject private var host = AndroidHost.shared
     @ObservedObject private var guest = GuestImage.shared
@@ -206,6 +214,13 @@ struct AndroidAppPage: View {
                 }
             }
             .heroRow()
+
+            if !ShowcaseStore.shared.pictures(for: app.name).isEmpty {
+                Section("Screenshots") {
+                    ShowcaseGallery(package: app.name)
+                        .listRowInsets(EdgeInsets(top: 10, leading: 12, bottom: 10, trailing: 12))
+                }
+            }
 
             Section("About") {
                 LabeledContent("Version", value: live.version ?? "—")

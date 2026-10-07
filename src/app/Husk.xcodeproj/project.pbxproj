@@ -60,6 +60,7 @@
 		61B170D2F117D85F651CD6E6 /* icon-cleardark.png in Resources */ = {isa = PBXBuildFile; fileRef = E3A701AA76E485A6CE15F106 /* icon-cleardark.png */; };
 		622DA3EB6E956A9ED06CF55C /* husk-tl-probe.c in Sources */ = {isa = PBXBuildFile; fileRef = E4D1C81CB49D39A7D865A0DA /* husk-tl-probe.c */; };
 		6A8A2290222C62C81EBF2E3E /* husk-tl-bionic-pthread.c in Sources */ = {isa = PBXBuildFile; fileRef = C2150DD286E82127CB5B7C8B /* husk-tl-bionic-pthread.c */; };
+		6F6142A042D5107E3F35FBB4 /* Showcase.swift in Sources */ = {isa = PBXBuildFile; fileRef = FBE40E8DB8AB8EBDF4EA539E /* Showcase.swift */; };
 		70AAC964808B173B7E8E395B /* husk-tl-va.c in Sources */ = {isa = PBXBuildFile; fileRef = 23EF05EC9B3D8A0E6E8FC720 /* husk-tl-va.c */; };
 		70AF7E999105691EB51B54FD /* JITSetup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 83275C7FEF2DEB950028D914 /* JITSetup.swift */; };
 		79606C9B3D5AF0CEADE3482D /* GuestImage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 771B4FD56CABC214FEED6DFE /* GuestImage.swift */; };
@@ -305,6 +306,7 @@
 		F54A47159D39CB8039E9E44E /* JITCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JITCard.swift; sourceTree = "<group>"; };
 		F7FE1E9438A6B743456806DF /* husk-tl-xmem.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "husk-tl-xmem.h"; sourceTree = "<group>"; };
 		FBD3B29AEC525999260507BD /* husk-tl-opensles.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "husk-tl-opensles.c"; sourceTree = "<group>"; };
+		FBE40E8DB8AB8EBDF4EA539E /* Showcase.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Showcase.swift; sourceTree = "<group>"; };
 		FCBE4C5BD3BC5033100C968E /* husk-tl-gtasa.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "husk-tl-gtasa.c"; sourceTree = "<group>"; };
 		FD559A37CF59C3290F29FA43 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		FD6B5A72980D1EC374BFC326 /* husk-tl-jni-assetstream.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "husk-tl-jni-assetstream.c"; sourceTree = "<group>"; };
@@ -380,6 +382,7 @@
 				2E91A601F16886103BC482AB /* QemuRunner.swift */,
 				AE14E4B61CC873501D7EAE6E /* SettingsTab.swift */,
 				A523DB1FEA5BC026771035C7 /* Shaders.metal */,
+				FBE40E8DB8AB8EBDF4EA539E /* Showcase.swift */,
 				5EB0AF32D5E40E753DDD85DA /* Theme.swift */,
 				5EBCB1A1B865B14C76096042 /* TLAppSettings.swift */,
 				66DDBC0AF7BE5742AA867515 /* TLScreenView.swift */,
@@ -761,6 +764,7 @@
 				5E4B0292717DAE8B0CAA99E4 /* QemuRunner.swift in Sources */,
 				211C2D134F11C23EE4485A2E /* SettingsTab.swift in Sources */,
 				1624D7BE5D25504F10E6D705 /* Shaders.metal in Sources */,
+				6F6142A042D5107E3F35FBB4 /* Showcase.swift in Sources */,
 				EBC8548011E6708CF09F8386 /* TLAppSettings.swift in Sources */,
 				945DD86A7A210B74B2C7FF17 /* TLScreenView.swift in Sources */,
 				0BB57A13C0D48446CB4FBCD5 /* TLUnityView.swift in Sources */,

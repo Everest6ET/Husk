@@ -29,6 +29,8 @@ struct ContentView: View {
     @AppStorage(Theme.Appearance.key) private var appearance = Theme.Appearance.system
     @ObservedObject private var theme = AppTheme.shared
     @ObservedObject private var incoming = IncomingFiles.shared
+    @ObservedObject private var showcase = ShowcaseStore.shared
+    @ObservedObject private var tlStore = TranslationLayerStore.shared
 
     var body: some View {
         ZStack {
@@ -113,6 +115,16 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showLogs) { LogView() }
         .sheet(isPresented: $router.showFiles) { FilesTab() }
+        // Pictures for the apps here: read the index on launch and whenever the set of apps changes.
+        .task(id: showcasePackages) { showcase.refresh(for: showcasePackages) }
+        .alert("Metadata Updated", isPresented: Binding(get: { showcase.shouldAsk && !showOnboarding },
+                                                         set: { if !$0 { showcase.asked() } })) {
+            Button("Download") { showcase.downloadUpdates() }
+            Button("Not Now", role: .cancel) { showcase.asked() }
+        } message: {
+            let n = showcase.updates.count
+            Text("Metadata for \(n) of your app\(n == 1 ? "" : "s") has been updated. Would you like to download the updates?")
+        }
         // An APK shared to Husk: where does it go?
         .sheet(isPresented: Binding(get: { !incoming.waiting.isEmpty },
                                     set: { if !$0 { incoming.discard() } })) {
@@ -157,6 +169,11 @@ struct ContentView: View {
             // foreground is the moment worth re-checking, not first launch.
             if phase == .active { evaluate() }
         }
+    }
+
+    /// Every package Husk holds, from both sides: what the picture index is read for.
+    private var showcasePackages: Set<String> {
+        Set(tlStore.apps.compactMap(\.packageName) + host.packages.map(\.name))
     }
 
     private func evaluate() {

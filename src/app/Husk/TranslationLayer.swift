@@ -126,6 +126,8 @@ struct TLApp: Identifiable {
     var report: TLReport?
     /// When it was last started from Husk.
     var lastPlayed: Date? = nil
+    /// Its Android package name, once read from the APK.
+    var packageName: String? = nil
 }
 
 // MARK: - Store
@@ -306,7 +308,9 @@ final class TranslationLayerStore: ObservableObject {
         return TLApp(id: dir.lastPathComponent,
                      label: label.isEmpty ? (first as NSString).lastPathComponent : label,
                      iconPath: fm.fileExists(atPath: icon) ? icon : nil,
-                     apks: apks, report: report, lastPlayed: played)
+                     apks: apks, report: report, lastPlayed: played,
+                     packageName: (try? String(contentsOf: dir.appendingPathComponent("package.txt"), encoding: .utf8))?
+                        .trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
     /// Copy, name, scan. Returns what went wrong, if anything did.
@@ -365,7 +369,7 @@ final class TranslationLayerStore: ObservableObject {
     /// the file directly.
     /// Which way of drawing icons an app's icon.png came from. A newer Husk that draws them better draws the apps it
     /// already holds again (icons only: the name may be the user's own).
-    nonisolated static let iconVersion = 2
+    nonisolated static let iconVersion = 3
 
     nonisolated private static func describe(_ apks: [String], into dir: URL, label wantLabel: Bool = true) {
         // The base APK carries the label and the icon; a config split's
@@ -386,6 +390,9 @@ final class TranslationLayerStore: ObservableObject {
             let info = ApkMetadata.read(manifest: manifest, resources: arsc)
             guard info.label != nil || info.iconEntry != nil else { continue }
 
+            if let package = ApkMetadata.packageName(manifest) {
+                try? package.write(to: dir.appendingPathComponent("package.txt"), atomically: true, encoding: .utf8)
+            }
             if wantLabel, let label = info.label {
                 try? label.write(to: dir.appendingPathComponent("label.txt"),
                                  atomically: true, encoding: .utf8)

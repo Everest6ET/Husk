@@ -1,0 +1,33 @@
+{
+  "format": 1,
+  "apps": {
+    "com.nintendosss.spice": [
+      {
+        "file": "com.nintendosss.spice_screenshot1.jpg",
+        "sha256": "dc6d1e4d86bb118d4f7ddfd6295463ad1997d0f54dc3d5fde57d5dd223700c8c",
+        "size": 415006
+      }
+    ],
+    "com.robtopx.geometryjump": [
+      {
+        "file": "com.robtopx.geometryjump_screenshot1.jpg",
+        "sha256": "fe3ad2ccc99c12c1978da9df7b779f13c5c03304d42ff19ba3270c41e89478fe",
+        "size": 252972
+      }
+    ],
+    "com.rockstargames.gtasa": [
+      {
+        "file": "com.rockstargames.gtasa_screenshot1.jpg",
+        "sha256": "67e93829a8424f4665d892ffc5b63098725e12fa43f914d79a491e240d6277a7",
+        "size": 311994
+      }
+    ],
+    "com.vectorunit.cobalt.googleplay": [
+      {
+        "file": "com.vectorunit.cobalt.googleplay_screenshot1.jpg",
+        "sha256": "bc3014a618d5af206315488c92270e44cdb1a14fbf0748cd8a3e8a9a84401be3",
+        "size": 264625
+      }
+    ]
+  }
+}

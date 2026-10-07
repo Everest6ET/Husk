@@ -54,6 +54,14 @@ enum ApkMetadata {
         return info
     }
 
+    /// The app's package name (`com.example.game`), from the manifest's root element.
+    static func packageName(_ manifest: Data) -> String? {
+        guard let root = elements(manifest).first(where: { $0.name == "manifest" }),
+              let value = root.attributes.first(where: { $0.name == "package" })?.value,
+              !value.isEmpty, value.count < 200 else { return nil }
+        return value
+    }
+
     /// A label that could plausibly be shown to someone. A mis-parse produces
     /// control characters or a hundred lines of XML, not a name.
     private static func clean(_ text: String?) -> String? {
