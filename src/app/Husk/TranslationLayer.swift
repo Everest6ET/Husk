@@ -124,6 +124,8 @@ struct TLApp: Identifiable {
     var iconPath: String?
     var apks: [String]
     var report: TLReport?
+    /// When it was last started from Husk.
+    var lastPlayed: Date? = nil
 }
 
 // MARK: - Store
@@ -205,6 +207,13 @@ final class TranslationLayerStore: ObservableObject {
                 self.reload()
             }
         }
+    }
+
+    /// Remember that a game was just started, for Home.
+    func markPlayed(_ app: TLApp) {
+        let dir = TranslationLayer.root.appendingPathComponent(app.id, isDirectory: true)
+        try? "\(Date().timeIntervalSince1970)".write(to: dir.appendingPathComponent("last-played.txt"), atomically: true, encoding: .utf8)
+        reloadQuietly()
     }
 
     /// Call the app something else. The name Android gave it is only where it started.
@@ -291,10 +300,13 @@ final class TranslationLayerStore: ObservableObject {
         let icon = dir.appendingPathComponent("icon.png").path
         let report = (try? Data(contentsOf: dir.appendingPathComponent("report.json")))
             .flatMap { try? JSONDecoder().decode(TLReport.self, from: $0) }
+        let played = (try? String(contentsOf: dir.appendingPathComponent("last-played.txt"), encoding: .utf8))
+            .flatMap { TimeInterval($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            .map { Date(timeIntervalSince1970: $0) }
         return TLApp(id: dir.lastPathComponent,
                      label: label.isEmpty ? (first as NSString).lastPathComponent : label,
                      iconPath: fm.fileExists(atPath: icon) ? icon : nil,
-                     apks: apks, report: report)
+                     apks: apks, report: report, lastPlayed: played)
     }
 
     /// Copy, name, scan. Returns what went wrong, if anything did.
@@ -896,6 +908,11 @@ struct TLAttemptView: View {
     let app: TLApp
 
     var body: some View {
+        content.onAppear { TranslationLayerStore.shared.markPlayed(app) }
+    }
+
+    @ViewBuilder
+    private var content: some View {
         if app.report?.nativeEngine == .cocos || app.report?.nativeEngine == .minecraft || app.report?.nativeEngine == .sdl || app.report?.nativeEngine == .ue4 || app.report?.nativeEngine == .gta || app.report?.nativeEngine == .nativeactivity {
             TLCocosAttemptView(app: app)
         } else if app.report?.runsOnNativeRuntime == true {

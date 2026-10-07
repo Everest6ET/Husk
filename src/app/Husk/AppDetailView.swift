@@ -1,32 +1,56 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import SwiftUI
 
-/// A page pushed onto the library: an Android app's, or a translation-layer game's page or its settings.
+/// A page pushed onto Home or the Library: a game's page, its settings or its technical details, an Android app's page,
+/// or Android's own.
 enum LibraryRoute: Hashable {
     case android(AndroidHost.Package)
     case game(String)
     case gameSettings(String)
+    case gameReport(String)
+    case androidSystem
 }
 
 /// Where the tabs and their stacks are steered from.
 ///
-/// One app can send you somewhere else -- an app's page offers to show its files -- and a stack cannot be pushed
-/// from outside itself without somewhere to keep the path. This is that somewhere.
+/// One page can send you somewhere else -- an app's page offers its files, Home's "See All" opens the Library -- and a stack
+/// cannot be pushed from outside itself without somewhere to keep the path. This is that somewhere. It also carries the two
+/// things only the root view can do: show Android's screen, and start Android.
 @MainActor final class Router: ObservableObject {
     static let shared = Router()
 
-    @Published var tab: HuskTab = .library
-    /// The pages pushed on top of the library.
+    @Published var tab: HuskTab = .home
+    @Published var home: [LibraryRoute] = []
     @Published var library: [LibraryRoute] = []
+    @Published var libraryFilter: LibraryFilter = .all
     /// Android's storage, as a sheet over whatever is showing.
     @Published var showFiles = false
     /// Directories pushed on top of the Files root.
     @Published var files: [String] = []
+    /// Android has been started in this run of Husk.
+    @Published var androidStarted = false
+    /// An Android app to open as soon as Android is up: asked for from its page while Android was off.
+    @Published var pendingAndroidLaunch: String?
+
+    /// Show Android's own screen. Set by the root view.
+    var openGuest: () -> Void = {}
+    /// Start Android, or turn JIT on first when it is off. Set by the root view.
+    var startAndroid: () -> Void = {}
 
     /// Show a directory of Android's storage, from anywhere.
     func openFiles(at path: String) {
         files = path == FilesTab.root ? [] : [path]
         showFiles = true
+    }
+
+    func showLibrary(_ filter: LibraryFilter) {
+        libraryFilter = filter
+        tab = .library
+    }
+
+    /// Pick APKs or bundles; Husk then asks where they go.
+    func addSomething() {
+        HuskFilePicker.present { urls in IncomingFiles.shared.receive(urls) }
     }
 }
 

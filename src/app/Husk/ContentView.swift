@@ -42,9 +42,11 @@ struct ContentView: View {
             // Android is then a matter of hiding what is over it, which is also
             // why it appears instantly rather than reloading.
             TabView(selection: $router.tab) {
-                LibraryHome(started: started && runner.isRunning,
-                            onOpenGuest: { showGuestScreen = true },
-                            onStartAndroid: startFromLibrary)
+                HomeView()
+                    .tabItem { Label("Home", systemImage: "house.fill") }
+                    .tag(HuskTab.home)
+
+                LibraryScreen()
                     .tabItem { Label("Library", systemImage: "square.grid.2x2.fill") }
                     .tag(HuskTab.library)
 
@@ -119,7 +121,14 @@ struct ContentView: View {
                 .presentationDragIndicator(.visible)
         }
         // APKs meant for Android wait until it can take them.
-        .onChange(of: host.isReady) { _ in incoming.installForAndroidIfReady() }
+        .onChange(of: host.isReady) { ready in
+            incoming.installForAndroidIfReady()
+            // An app asked for while Android was off: open it now.
+            if ready, let pkg = router.pendingAndroidLaunch {
+                router.pendingAndroidLaunch = nil
+                host.launch(pkg) { showGuestScreen = true }
+            }
+        }
         .onChange(of: host.busy) { _ in incoming.installForAndroidIfReady() }
         .sheet(isPresented: $jit.showSetup) { JITSetupFlow() }
         // The built-in helper attaches while Husk stays in the foreground, so
@@ -135,7 +144,11 @@ struct ContentView: View {
         } message: {
             Text(guest.update.detail)
         }
-        .onAppear { evaluate() }
+        .onAppear {
+            router.openGuest = { showGuestScreen = true }
+            router.startAndroid = { startFromLibrary() }
+            evaluate()
+        }
         // The two-parameter onChange is iOS 17; this single-parameter form is
         // deprecated there but still works, and is the only one that compiles
         // against the 16.4 deployment target.
@@ -230,6 +243,7 @@ struct ContentView: View {
                              + "QEMU map its own buffer")
         }
         started = true
+        router.androidStarted = true
         QemuRunner.shared.start()
         // Start probing the bridge now, not when the library happens to be
         // opened. isReady is only ever set here, and under the old screen-based

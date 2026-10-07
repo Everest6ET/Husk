@@ -90,8 +90,9 @@ enum HuskAppIcon: String, CaseIterable, Identifiable {
 }
 
 
-/// The two tabs: the library (games run on the translation layer, and Android's own apps) and settings.
+/// The three tabs: Home (what you used last), the Library (everything) and Settings.
 enum HuskTab: String, CaseIterable, Identifiable {
+    case home
     case library
     case settings
 

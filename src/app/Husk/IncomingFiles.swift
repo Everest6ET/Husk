@@ -31,31 +31,57 @@ final class IncomingFiles: ObservableObject {
 
     static let extensions: Set<String> = ["apk", "xapk", "apkm", "apks"]
 
+    /// Copies under way, said in one line while they last.
+    @Published private(set) var preparing: String?
+
     /// A URL iOS opened Husk with. Anything that is not an APK or a bundle of them is left alone (husk:// links are not files).
     func receive(_ url: URL) {
         guard url.isFileURL, Self.extensions.contains(url.pathExtension.lowercased()) else { return }
-        let scoped = url.startAccessingSecurityScopedResource()
-        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-        let dir = Self.folder.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        let copy = dir.appendingPathComponent(url.lastPathComponent)
-        do {
-            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            try FileManager.default.copyItem(at: url, to: copy)
-        } catch {
-            HuskLog.log("ui", "could not take in \(url.lastPathComponent): \(error.localizedDescription)")
-            return
+        take([url]) { copies in
+            self.gathering += copies
+            // The pieces of a split set arrive one after another: ask once they have all come.
+            self.gatherTask?.cancel()
+            self.gatherTask = Task {
+                try? await Task.sleep(nanoseconds: 600_000_000)
+                guard !Task.isCancelled else { return }
+                self.waiting += self.gathering
+                self.gathering = []
+            }
         }
-        // iOS's own copy (Documents/Inbox) is no use once Husk has one.
-        if url.path.contains("/Documents/Inbox/") { try? FileManager.default.removeItem(at: url) }
-        HuskLog.log("ui", "received \(url.lastPathComponent) from another app")
-        gathering.append(copy)
-        // The pieces of a split set arrive one after another: ask once they have all come.
-        gatherTask?.cancel()
-        gatherTask = Task {
-            try? await Task.sleep(nanoseconds: 600_000_000)
-            guard !Task.isCancelled else { return }
-            waiting += gathering
-            gathering = []
+    }
+
+    /// Files picked inside Husk: all at once, so they are one question.
+    func receive(_ urls: [URL]) {
+        let wanted = urls.filter { Self.extensions.contains($0.pathExtension.lowercased()) }
+        guard !wanted.isEmpty else { return }
+        take(wanted) { self.waiting += $0 }
+    }
+
+    /// Copy files to Husk's own folder, off the main thread -- a game can be gigabytes -- then hand back the copies.
+    private func take(_ urls: [URL], then: @escaping @MainActor ([URL]) -> Void) {
+        preparing = urls.count == 1 ? "Preparing \(urls[0].lastPathComponent)…" : "Preparing \(urls.count) files…"
+        Task.detached(priority: .userInitiated) {
+            var copies: [URL] = []
+            for url in urls {
+                let scoped = url.startAccessingSecurityScopedResource()
+                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                let dir = Self.folder.appendingPathComponent(UUID().uuidString, isDirectory: true)
+                let copy = dir.appendingPathComponent(url.lastPathComponent)
+                do {
+                    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                    try FileManager.default.copyItem(at: url, to: copy)
+                    copies.append(copy)
+                    // iOS's own copy (Documents/Inbox) is no use once Husk has one.
+                    if url.path.contains("/Documents/Inbox/") { try? FileManager.default.removeItem(at: url) }
+                    HuskLog.log("ui", "took in \(url.lastPathComponent)")
+                } catch {
+                    HuskLog.log("ui", "could not take in \(url.lastPathComponent): \(error.localizedDescription)")
+                }
+            }
+            await MainActor.run {
+                self.preparing = nil
+                if !copies.isEmpty { then(copies) }
+            }
         }
     }
 
@@ -66,8 +92,6 @@ final class IncomingFiles: ObservableObject {
         guard !urls.isEmpty else { return }
         // Moved, not copied: the copy here is Husk's own, and a game can be gigabytes.
         TranslationLayerStore.shared.add(urls, move: true)
-        Router.shared.tab = .library
-        UserDefaults.standard.set(LibrarySide.translation.rawValue, forKey: "husk.library.side")
     }
 
     /// Installed into Android -- now if it is up, otherwise as soon as it is.
@@ -76,8 +100,6 @@ final class IncomingFiles: ObservableObject {
         waiting = []
         guard !urls.isEmpty else { return }
         forAndroid += urls
-        Router.shared.tab = .library
-        UserDefaults.standard.set(LibrarySide.emulation.rawValue, forKey: "husk.library.side")
         installForAndroidIfReady()
     }
 
