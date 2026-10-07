@@ -177,6 +177,8 @@ struct ContentView: View {
     }
 
     private func evaluate() {
+        // Before anything else wants JIT: the setting that turns it on as Husk opens.
+        jit.enableAtLaunchIfAsked()
         try? guest.prepareFirmware()
         guest.refresh()
         HuskBridgeFS.shared.prepare()

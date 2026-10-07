@@ -397,6 +397,7 @@ struct JITSettings: View {
     @ObservedObject private var runner = QemuRunner.shared
     @ObservedObject private var jit = JITCoordinator.shared
     @State private var autoStart = Onboarding.autoStart
+    @AppStorage(JITCoordinator.autoEnableKey) private var autoJIT = false
     @State private var keepAttached = JITBootstrap.keepDebuggerAttached
 
     private var pairingLabel: String {
@@ -491,6 +492,16 @@ struct JITSettings: View {
                    + "which the kernel allows any debugged process. Either one is "
                    + "enough — which is available depends on the device and the iOS "
                    + "version, so Husk tests both rather than assuming.")
+            }
+
+            Section {
+                Toggle("Turn On JIT at Launch", isOn: $autoJIT)
+                    .disabled(!HuskBuiltInJIT.isAvailable)
+            } footer: {
+                Text(HuskBuiltInJIT.isAvailable
+                     ? "Each time Husk opens without JIT, it asks the built-in StikJIT to turn it on, so games are ready "
+                       + "without a tap. Needs StikJIT set up once (paired) first."
+                     : "Needs the built-in StikJIT, which is available on iOS 26 and later.")
             }
 
             Section {
