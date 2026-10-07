@@ -96,7 +96,7 @@ struct GamePage: View {
     @State private var playing = false
     @State private var confirmRemove = false
 
-    private var runs: Bool { app.report?.runsOnNativeRuntime == true }
+    private var runs: Bool { app.report?.canRun == true }
 
     /// Another game already loaded in this run of Husk: engines cannot be unloaded, so this one cannot start until Husk is
     /// closed and opened again.
@@ -120,7 +120,7 @@ struct GamePage: View {
                     Text("\(other) is running. A game cannot be closed once it has started, so close Husk completely "
                        + "(swipe it away) and open it again to play \(app.label).")
                 } else if !runs {
-                    Text("Husk does not recognise this game's engine, so it may not start.")
+                    Text("This APK has no 64-bit code Husk can run, so it will probably not start.")
                 }
             }
             .heroRow()
@@ -142,7 +142,7 @@ struct GamePage: View {
             }
 
             Section("About") {
-                LabeledContent("Engine", value: runs ? app.report!.nativeEngineName : "Unknown")
+                LabeledContent("Runs With", value: app.report?.runnerName ?? "Unknown")
                 LabeledContent("Last Played", value: app.lastPlayed.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "Never")
                 LabeledContent("Size", value: fileBytes(app.apks))
             }

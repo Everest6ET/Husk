@@ -534,7 +534,7 @@ struct LibraryScreen: View {
 
     private func caption(_ item: LibraryItem) -> String? {
         switch item {
-        case .game(let g): return g.report?.runsOnNativeRuntime == true ? nil : "May not run"
+        case .game(let g): return g.report?.canRun == true ? nil : "May not run"
         case .android:
             if AndroidHost.shared.isReady { return "Running" }
             return guest.state == .ready ? nil : "Not installed"
@@ -711,7 +711,7 @@ private struct LibraryRouteView: View {
         case .gameSettings(let id):
             if let app = store.apps.first(where: { $0.id == id }) { TLAppSettingsView(app: app) } else { GoneView() }
         case .gameReport(let id):
-            if let app = store.apps.first(where: { $0.id == id }) { TLAppReportView(app: app) } else { GoneView() }
+            if let app = store.apps.first(where: { $0.id == id }) { TLTechnicalView(app: app) } else { GoneView() }
         case .android(let pkg):
             AndroidAppPage(app: pkg)
         case .androidSystem:

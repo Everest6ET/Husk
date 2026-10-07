@@ -25,6 +25,7 @@
 		1A97D1F8D5FAFEB3145D4AE5 /* TranslationLayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4BD6ABD20471B2CACF60ABD4 /* TranslationLayer.swift */; };
 		1D576C7E088182B888F811BB /* LICENSES-rppairing-crates.txt in Resources */ = {isa = PBXBuildFile; fileRef = D0A9148DED6969D97D56406C /* LICENSES-rppairing-crates.txt */; };
 		202973AEE5786B84A31A57A5 /* husk-tl-jni.c in Sources */ = {isa = PBXBuildFile; fileRef = A22242B8E3E7067D6EB2AB95 /* husk-tl-jni.c */; };
+		206FBBD23AB53FE21214C71A /* TechnicalDetails.swift in Sources */ = {isa = PBXBuildFile; fileRef = 319324C01D99446B862A6278 /* TechnicalDetails.swift */; };
 		208720A5CFAFE8E89341843C /* ItemPages.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7087E37F05675CE3FD4EDEE2 /* ItemPages.swift */; };
 		211C2D134F11C23EE4485A2E /* SettingsTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE14E4B61CC873501D7EAE6E /* SettingsTab.swift */; };
 		2382523F24A95C0E58189C78 /* husk-tl-bionic-cxx.c in Sources */ = {isa = PBXBuildFile; fileRef = 44BAD09F39FA4184F97AB0D0 /* husk-tl-bionic-cxx.c */; };
@@ -192,6 +193,7 @@
 		2C3D6F74AFBE5CD222DE0553 /* ApkMetadata.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApkMetadata.swift; sourceTree = "<group>"; };
 		2E91A601F16886103BC482AB /* QemuRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QemuRunner.swift; sourceTree = "<group>"; };
 		2E95AED70FA457D447AE0DFF /* LICENSE-StikJIT-MPL-2.0.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "LICENSE-StikJIT-MPL-2.0.txt"; sourceTree = "<group>"; };
+		319324C01D99446B862A6278 /* TechnicalDetails.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TechnicalDetails.swift; sourceTree = "<group>"; };
 		336AB2FDC58A5C08D55FF8F9 /* icon-tintedlight.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "icon-tintedlight.png"; sourceTree = "<group>"; };
 		3517ADBC96090BF2A656BD8B /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		359A1AAA11C7A67E7C817076 /* husk-tl-blit.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "husk-tl-blit.h"; sourceTree = "<group>"; };
@@ -383,6 +385,7 @@
 				AE14E4B61CC873501D7EAE6E /* SettingsTab.swift */,
 				A523DB1FEA5BC026771035C7 /* Shaders.metal */,
 				FBE40E8DB8AB8EBDF4EA539E /* Showcase.swift */,
+				319324C01D99446B862A6278 /* TechnicalDetails.swift */,
 				5EB0AF32D5E40E753DDD85DA /* Theme.swift */,
 				5EBCB1A1B865B14C76096042 /* TLAppSettings.swift */,
 				66DDBC0AF7BE5742AA867515 /* TLScreenView.swift */,
@@ -768,6 +771,7 @@
 				EBC8548011E6708CF09F8386 /* TLAppSettings.swift in Sources */,
 				945DD86A7A210B74B2C7FF17 /* TLScreenView.swift in Sources */,
 				0BB57A13C0D48446CB4FBCD5 /* TLUnityView.swift in Sources */,
+				206FBBD23AB53FE21214C71A /* TechnicalDetails.swift in Sources */,
 				3743DAF4A88A08B2946A4066 /* Theme.swift in Sources */,
 				1A97D1F8D5FAFEB3145D4AE5 /* TranslationLayer.swift in Sources */,
 				D6E9F96BE6AF7C985488D030 /* VirtualPad.swift in Sources */,
