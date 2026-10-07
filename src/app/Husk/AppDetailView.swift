@@ -1,24 +1,32 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import SwiftUI
 
+/// A page pushed onto the library: an Android app's, or a translation-layer game's page or its settings.
+enum LibraryRoute: Hashable {
+    case android(AndroidHost.Package)
+    case game(String)
+    case gameSettings(String)
+}
+
 /// Where the tabs and their stacks are steered from.
 ///
-/// One app can send you to another tab — an app's page offers to show its files
-/// — and a tab that is also a navigation stack cannot be pushed from outside
-/// itself without somewhere to keep the path. This is that somewhere.
+/// One app can send you somewhere else -- an app's page offers to show its files -- and a stack cannot be pushed
+/// from outside itself without somewhere to keep the path. This is that somewhere.
 @MainActor final class Router: ObservableObject {
     static let shared = Router()
 
     @Published var tab: HuskTab = .library
-    /// The app pages pushed on top of the library.
-    @Published var library: [AndroidHost.Package] = []
+    /// The pages pushed on top of the library.
+    @Published var library: [LibraryRoute] = []
+    /// Android's storage, as a sheet over whatever is showing.
+    @Published var showFiles = false
     /// Directories pushed on top of the Files root.
     @Published var files: [String] = []
 
-    /// Show a directory in the Files tab, from anywhere.
+    /// Show a directory of Android's storage, from anywhere.
     func openFiles(at path: String) {
         files = path == FilesTab.root ? [] : [path]
-        tab = .files
+        showFiles = true
     }
 }
 

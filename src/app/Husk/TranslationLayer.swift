@@ -157,6 +157,19 @@ final class TranslationLayerStore: ObservableObject {
         rescanStale()
     }
 
+    /// The apps read again from disk, and nothing else started: after work that only changed what is on disk.
+    private func reloadQuietly() {
+        let dirs = (try? FileManager.default.contentsOfDirectory(
+            at: TranslationLayer.root, includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles])) ?? []
+        apps = dirs.compactMap(Self.load).sorted {
+            $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending
+        }
+    }
+
+    /// Icons are drawn again once per run of Husk at most: a newly added app already has the current kind.
+    private var iconsRefreshed = false
+
     nonisolated private static func scanStamp(_ id: String) -> Int {
         let url = TranslationLayer.root.appendingPathComponent(id, isDirectory: true).appendingPathComponent("scan-version.txt")
         return (try? String(contentsOf: url, encoding: .utf8)).flatMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) } ?? 0
@@ -165,6 +178,19 @@ final class TranslationLayerStore: ObservableObject {
     private func rescanStale() {
         guard !rescanning else { return }
         let stale = apps.filter { Self.scanStamp($0.id) != Self.scanVersion }
+        let icons = iconsRefreshed ? [] : apps
+        iconsRefreshed = true
+        if !icons.isEmpty { Task.detached(priority: .utility) {
+            var changed = false
+            for app in icons {
+                let before = app.iconPath.flatMap { try? FileManager.default.attributesOfItem(atPath: $0)[.modificationDate] as? Date }
+                Self.refreshIcon(app)
+                let path = TranslationLayer.root.appendingPathComponent(app.id).appendingPathComponent("icon.png").path
+                let after = try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate] as? Date
+                if before != after { changed = true }
+            }
+            if changed { await MainActor.run { self.reloadQuietly() } }
+        } }
         guard !stale.isEmpty else { return }
         rescanning = true
         HuskLog.log("tl", "reading \(stale.count) app(s) again with the newer scanner")
@@ -325,7 +351,11 @@ final class TranslationLayerStore: ObservableObject {
     /// The app's own name and icon, from its manifest and resource table --
     /// the same reading the library does for apps inside Android, done here on
     /// the file directly.
-    nonisolated private static func describe(_ apks: [String], into dir: URL) {
+    /// Which way of drawing icons an app's icon.png came from. A newer Husk that draws them better draws the apps it
+    /// already holds again (icons only: the name may be the user's own).
+    nonisolated static let iconVersion = 2
+
+    nonisolated private static func describe(_ apks: [String], into dir: URL, label wantLabel: Bool = true) {
         // The base APK carries the label and the icon; a config split's
         // manifest names neither. The base is usually called base.apk, and
         // otherwise usually the biggest.
@@ -344,31 +374,76 @@ final class TranslationLayerStore: ObservableObject {
             let info = ApkMetadata.read(manifest: manifest, resources: arsc)
             guard info.label != nil || info.iconEntry != nil else { continue }
 
-            if let label = info.label {
+            if wantLabel, let label = info.label {
                 try? label.write(to: dir.appendingPathComponent("label.txt"),
                                  atomically: true, encoding: .utf8)
             }
-            // An adaptive icon is an instruction, not a picture: follow it to
-            // the layer it draws in front.
-            var iconEntry = info.iconEntry
-            if let xml = iconEntry, xml.hasSuffix(".xml") {
-                iconEntry = nil
-                if let data = entry(apk, xml, limit: 4 << 20),
-                   let layer = ApkMetadata.adaptiveLayer(data),
-                   let bitmap = ApkMetadata.bitmap(for: layer, resources: arsc),
-                   !bitmap.hasSuffix(".xml") {
-                    iconEntry = bitmap
+            // Stored as PNG whatever it was, so the icon view needs no WebP.
+            var drawn = "?"
+            if let iconEntry = info.iconEntry {
+                if iconEntry.hasSuffix(".xml") {
+                    if let image = adaptiveIcon(apk, xml: iconEntry, resources: arsc), let png = image.pngData() {
+                        try? png.write(to: dir.appendingPathComponent("icon.png"))
+                        drawn = "\(iconEntry) (adaptive, composed)"
+                    }
+                } else if let data = entry(apk, iconEntry, limit: 16 << 20), let png = UIImage(data: data)?.pngData() {
+                    try? png.write(to: dir.appendingPathComponent("icon.png"))
+                    drawn = iconEntry
                 }
             }
-            // Stored as PNG whatever it was, so the icon view needs no WebP.
-            if let iconEntry, let data = entry(apk, iconEntry, limit: 16 << 20),
-               let png = UIImage(data: data)?.pngData() {
-                try? png.write(to: dir.appendingPathComponent("icon.png"))
-            }
+            try? "\(iconVersion)".write(to: dir.appendingPathComponent("icon-version.txt"), atomically: true, encoding: .utf8)
             HuskLog.log("tl", "\((apk as NSString).lastPathComponent): "
-                            + "label=\(info.label ?? "?") icon=\(iconEntry ?? "?")")
+                            + "label=\(info.label ?? "?") icon=\(drawn)")
             return
         }
+    }
+
+    /// An adaptive icon, drawn the way a launcher draws it: the background layer (a picture or a colour) under the
+    /// foreground, both on Android's 108-unit canvas, cut to the 72 units in the middle that a launcher shows. The
+    /// foreground alone -- what this used to keep -- is the app's mark floating on nothing.
+    nonisolated private static func adaptiveIcon(_ apk: String, xml: String, resources: Data) -> UIImage? {
+        guard let data = entry(apk, xml, limit: 4 << 20) else { return nil }
+        let layers = ApkMetadata.adaptiveLayers(data)
+        func picture(_ id: UInt32?) -> UIImage? {
+            guard let id, let path = ApkMetadata.bitmap(for: id, resources: resources), !path.hasSuffix(".xml"),
+                  let bytes = entry(apk, path, limit: 16 << 20) else { return nil }
+            return UIImage(data: bytes)
+        }
+        let fore = picture(layers.foreground)
+        let back = picture(layers.background)
+        var color = layers.backgroundColor
+        if color == nil, back == nil, let id = layers.background { color = ApkMetadata.color(for: id, resources: resources) }
+        guard fore != nil || back != nil else { return nil }
+
+        let side: CGFloat = 432                                       // 108 units at 4 px each
+        let visible = side * 72 / 108
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = back != nil || color.map { $0 >> 24 == 0xFF } == true
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: visible, height: visible), format: format)
+        return renderer.image { ctx in
+            let canvas = CGRect(x: -(side - visible) / 2, y: -(side - visible) / 2, width: side, height: side)
+            if let color {
+                UIColor(red: CGFloat((color >> 16) & 0xFF) / 255, green: CGFloat((color >> 8) & 0xFF) / 255,
+                        blue: CGFloat(color & 0xFF) / 255, alpha: CGFloat(color >> 24) / 255).setFill()
+                ctx.fill(CGRect(x: 0, y: 0, width: visible, height: visible))
+            } else if back == nil {
+                // A foreground with nothing said about what is behind it: the white a launcher would use.
+                UIColor.white.setFill()
+                ctx.fill(CGRect(x: 0, y: 0, width: visible, height: visible))
+            }
+            back?.draw(in: canvas)
+            fore?.draw(in: canvas)
+        }
+    }
+
+    /// Draw the icons of apps added by an older Husk again, the current way.
+    nonisolated static func refreshIcon(_ app: TLApp) {
+        let dir = TranslationLayer.root.appendingPathComponent(app.id, isDirectory: true)
+        let stamp = (try? String(contentsOf: dir.appendingPathComponent("icon-version.txt"), encoding: .utf8))
+            .flatMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) } ?? 0
+        guard stamp != iconVersion else { return }
+        describe(app.apks, into: dir, label: false)
     }
 
     nonisolated static func entry(_ apk: String, _ name: String, limit: Int) -> Data? {
@@ -392,103 +467,18 @@ final class TranslationLayerStore: ObservableObject {
 
 // MARK: - Settings
 
-struct TranslationLayerTab: View {
+/// What the phone answers about running Android's native code, and where the translation layer stands: for
+/// developers, from Settings when developer information is on.
+struct TLChecksView: View {
     @ObservedObject private var store = TranslationLayerStore.shared
-    @State private var importing = false
-    @AppStorage(TranslationLayer.devInfoKey) private var devInfo = false
-    /// Where a tap on a game goes: its page, or its settings.
-    private enum Destination: Hashable { case detail(String), settings(String) }
-    @State private var destination: Destination?
-    /// A game started from its tile's menu, without opening its page first.
-    @State private var playing: TLApp?
 
     var body: some View {
-        NavigationStack {
-            Form {
-                // Everything here needs JIT, and StikJIT -- built into Husk -- is the way to get it.
-                Section {
-                    JITCard()
-                }
-                .listRowInsets(EdgeInsets())
-                .listRowBackground(Color.clear)
-
-                appsSection
-                if devInfo {
-                    checksSection
-                    progressSection
-                }
-            }
-            .navigationTitle("Translation Layer")
-            .navigationBarTitleDisplayMode(.large)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { importing = true } label: { Label("Add App", systemImage: "plus") }
-                        .disabled(store.busy != nil)
-                }
-            }
-            .huskFilePicker(isPresented: $importing) { urls in
-                HuskLog.log("ui", "translation layer: adding \(urls.count) file(s): "
-                          + urls.map(\.lastPathComponent).joined(separator: ", "))
-                store.add(urls)
-            }
-            .navigationDestination(isPresented: Binding(get: { destination != nil }, set: { if !$0 { destination = nil } })) {
-                switch destination {
-                case .detail(let id)?: if let app = store.apps.first(where: { $0.id == id }) { TLAppReportView(app: app) }
-                case .settings(let id)?: if let app = store.apps.first(where: { $0.id == id }) { TLAppSettingsView(app: app) }
-                case nil: EmptyView()
-                }
-            }
-            // A native-runtime game is swiped, and a sheet takes a swipe down for itself: it goes full screen.
-            .fullScreenCover(item: $playing) { TLAttemptView(app: $0) }
-            .onAppear { store.adoptDroppedAPKs() }
-            .alert("Could not add the app", isPresented: Binding(
-                    get: { store.lastError != nil },
-                    set: { if !$0 { store.lastError = nil } })) {
-                Button("OK", role: .cancel) { store.lastError = nil }
-            } message: {
-                Text(store.lastError ?? "")
-            }
+        Form {
+            checksSection
+            progressSection
         }
-    }
-
-    private let columns = [GridItem(.adaptive(minimum: 104), spacing: 12)]
-
-    private var appsSection: some View {
-        Section {
-            // A grid, as the Library has for the apps inside Android. Each tile is a plain button in a custom style, so a row of
-            // them does not turn into one big tap target the way buttons in a list do.
-            LazyVGrid(columns: columns, spacing: 12) {
-                ForEach(store.apps) { app in
-                    Button { destination = .detail(app.id) } label: { TLAppTile(app: app) }
-                        .buttonStyle(CardButtonStyle())
-                        .contextMenu {
-                            if app.report?.runsOnNativeRuntime == true {
-                                Button { playing = app } label: { Label("Play", systemImage: "play.fill") }
-                            }
-                            Button { destination = .detail(app.id) } label: { Label("Details", systemImage: "info.circle") }
-                            Button { destination = .settings(app.id) } label: { Label("Settings", systemImage: "gearshape") }
-                        }
-                }
-                Button { importing = true } label: { TLAddTile() }
-                    .buttonStyle(CardButtonStyle())
-                    .disabled(store.busy != nil)
-            }
-            .padding(.vertical, 4)
-            .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
-            .listRowBackground(Color.clear)
-            if let busy = store.busy {
-                HStack(spacing: 10) {
-                    ProgressView()
-                    Text(busy).foregroundStyle(Theme.textDim)
-                }
-            }
-        } header: {
-            Text("Apps")
-        } footer: {
-            Text("Runs Android games straight on your iPhone, without starting Android. Add an APK, or a bundle "
-               + "(.xapk, .apkm, .apks) — or pick a base APK and its split pieces together. "
-               + "Husk keeps its own copy, apart from Android's.")
-        }
+        .huskForm()
+        .navigationTitle("Device Checks")
     }
 
     private var checksSection: some View {
@@ -569,57 +559,6 @@ struct TLPlainStatus {
     init(_ report: TLReport?) {
         if report?.runsOnNativeRuntime == true { title = "Ready to run"; tint = Theme.good }
         else { title = "May not run"; tint = Theme.textDim }
-    }
-}
-
-/// One game in the grid: its icon, its name, and whether it will run.
-private struct TLAppTile: View {
-    let app: TLApp
-    @AppStorage(TranslationLayer.devInfoKey) private var devInfo = false
-
-    var body: some View {
-        let verdict = TLVerdict(app.report)
-        let plain = TLPlainStatus(app.report)
-        VStack(spacing: 8) {
-            AppIcon(path: app.iconPath, size: 56)
-            Text(app.label)
-                .font(.footnote.weight(.semibold))
-                .foregroundStyle(.primary)
-                .lineLimit(2)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: .infinity, minHeight: 34, alignment: .top)
-            Text(devInfo ? verdict.title : plain.title)
-                .font(.caption2)
-                .foregroundStyle(devInfo ? verdict.tint : plain.tint)
-                .lineLimit(1)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(12)
-        .huskCard()
-    }
-}
-
-/// The last tile: add another.
-private struct TLAddTile: View {
-    var body: some View {
-        VStack(spacing: 8) {
-            Image(systemName: "plus")
-                .font(.system(size: 22, weight: .semibold))
-                .foregroundStyle(Theme.accent)
-                .frame(width: 56, height: 56)
-                .background(Theme.accentSoft, in: RoundedRectangle(cornerRadius: 56 * 0.225, style: .continuous))
-            Text("Add")
-                .font(.footnote.weight(.semibold))
-                .foregroundStyle(.primary)
-                .frame(maxWidth: .infinity, minHeight: 34, alignment: .top)
-            Text("APK or bundle")
-                .font(.caption2)
-                .foregroundStyle(Theme.textDim)
-                .lineLimit(1)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(12)
-        .huskCard()
     }
 }
 

@@ -752,6 +752,11 @@ struct AboutSettings: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
+                if devInfo {
+                    NavigationLink { TLChecksView() } label: {
+                        Label("Device Checks", systemImage: "stethoscope")
+                    }
+                }
                 Button { showLogs = true } label: {
                     Label("Open Console", systemImage: "terminal")
                 }

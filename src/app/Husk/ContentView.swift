@@ -41,28 +41,11 @@ struct ContentView: View {
             // Android is then a matter of hiding what is over it, which is also
             // why it appears instantly rather than reloading.
             TabView(selection: $router.tab) {
-                TranslationLayerTab()
-                    .tabItem { Label("Native", systemImage: "gamecontroller.fill") }
-                    .tag(HuskTab.translation)
-
-                // Only the tabs that are Android's wait for its download; the Native games and Settings never need it.
-                Group {
-                    if showSetup {
-                        SetupView(showLogs: $showLogs)
-                    } else {
-                        LibraryTab(onOpenGuest: { showGuestScreen = true },
-                                   onStartAndroid: startFromLibrary,
-                                   started: started && runner.isRunning)
-                    }
-                }
+                LibraryHome(started: started && runner.isRunning,
+                            onOpenGuest: { showGuestScreen = true },
+                            onStartAndroid: startFromLibrary)
                     .tabItem { Label("Library", systemImage: "square.grid.2x2.fill") }
                     .tag(HuskTab.library)
-
-                Group {
-                    if showSetup { SetupView(showLogs: $showLogs) } else { FilesTab() }
-                }
-                    .tabItem { Label("Files", systemImage: "folder.fill") }
-                    .tag(HuskTab.files)
 
                 SettingsTab()
                     .tabItem { Label("Settings", systemImage: "gearshape.fill") }
@@ -126,6 +109,7 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $showLogs) { LogView() }
+        .sheet(isPresented: $router.showFiles) { FilesTab() }
         .sheet(isPresented: $jit.showSetup) { JITSetupFlow() }
         // The built-in helper attaches while Husk stays in the foreground, so
         // there is no relaunch to trigger the region claim below; this is it.
@@ -185,20 +169,6 @@ struct ContentView: View {
         HuskLog.log("ui", "starting Android on launch")
         booting = true
         start()
-    }
-
-    /// Whether the start screen should be up at all.
-    ///
-    /// Only while there is no runtime to launch: once the guest image is on
-    /// disk the tab UI is the home screen. This used to also stay up whenever
-    /// no third-party packages were installed, which pinned anyone who had
-    /// only ever run Android full-screen to the two start cards on every
-    /// launch -- and with JIT off put a second copy of the JIT message over
-    /// the library's own. The library already says all of it: Start when it
-    /// can, "Husk needs JIT" when it cannot, install an APK when there is
-    /// nothing here.
-    private var showSetup: Bool {
-        !started && guest.state != .ready
     }
 
     /// Start the guest from the library, without leaving it.
@@ -426,182 +396,6 @@ struct GuestScreenView: View {
     }
 }
 
-/// The runtime download screen: what shows while there is no guest image on
-/// disk to launch -- missing, downloading, installing, or failed (see
-/// ContentView.showSetup for when that is).
-struct SetupView: View {
-    @ObservedObject private var guest = GuestImage.shared
-    @ObservedObject private var runner = QemuRunner.shared
-    @Environment(\.colorScheme) private var scheme
-    @Binding var showLogs: Bool
-
-    @State private var profile: QemuRunner.Profile = .phase1Android
-    @State private var showSettings = false
-
-    var body: some View {
-        ZStack {
-            Theme.backdrop
-            VStack(spacing: 20) {
-                // The icon the user is actually using, so the first screen and
-                // the home screen agree. This used to be a fixed copy of the
-                // default artwork, which quietly disagreed with both.
-                HuskMark(size: 92)
-                    .shadow(color: Theme.accent.opacity(0.3), radius: 24, y: 10)
-                // Letterspaced, as a wordmark rather than a heading: this is
-                // the only screen in the app that is allowed to be a title card.
-                Text("HUSK")
-                    .font(.system(size: 26, weight: .semibold))
-                    .tracking(10)
-                    .padding(.leading, 10)
-                Text("Android apps, on your iPhone")
-                    .font(.system(size: 13))
-                    .foregroundStyle(Theme.textDim)
-                    .padding(.top, -8)
-
-                content
-            }
-            .foregroundStyle(Theme.text)
-
-            // Settings, top right, out of the way of the one thing most people
-            // open this screen to press.
-            VStack {
-                HStack {
-                    Spacer()
-                    Button { showSettings = true } label: {
-                        Image(systemName: "gearshape")
-                            .font(.title2)
-                            .foregroundStyle(Theme.text.opacity(0.75))
-                            .padding(14)
-                    }
-                }
-                Spacer()
-            }
-        }
-        .sheet(isPresented: $showSettings) {
-            SettingsTab()
-        }
-    }
-
-    @ViewBuilder
-    private var content: some View {
-        if runner.isRunning {
-            // Android's first boot is slow under TCG and its one-time setup is
-            // slower still, so say what is happening rather than showing a black
-            // screen for minutes.
-            VStack(spacing: 12) {
-                // A determinate bar once the guest has said anything at all.
-                // Before that there is nothing to be determinate about, and a
-                // bar sitting at zero reads as stuck rather than starting.
-                if runner.bootProgress > 0 {
-                    ProgressView(value: Double(runner.bootProgress), total: 100)
-                        .progressViewStyle(.linear)
-                        .frame(maxWidth: 240)
-                } else {
-                    ProgressView()
-                }
-                Text(runner.setupMessage.map { "Android: \($0)" } ?? "Starting Android…")
-                    .font(.callout).foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center).padding(.horizontal, 36)
-                Text("First run downloads Android and can take several minutes.")
-                    .font(.caption2).foregroundStyle(.tertiary)
-                    .multilineTextAlignment(.center).padding(.horizontal, 40)
-            }
-        } else {
-            switch guest.state {
-            case .downloading(let p, let received, let total):
-                VStack(spacing: 10) {
-                    Text(guest.hasShippedSnapshot || GuestImage.shared.isFetchingSnapshot
-                         ? "Downloading pre-booted Android"
-                         : "Downloading Android runtime").font(.headline)
-                    ProgressView(value: p).padding(.horizontal, 50)
-                    Text("\(fmt(received)) of \(total > 0 ? fmt(total) : "…")")
-                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                    Button("Cancel") { guest.cancel() }.font(.footnote)
-                }
-            case .installing:
-                VStack(spacing: 10) { ProgressView(); Text("Installing…").font(.callout) }
-            case .failed(let message):
-                VStack(spacing: 10) {
-                    Text("Something went wrong").font(.headline).foregroundStyle(.red)
-                    Text(message).font(.caption).foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center).padding(.horizontal, 34)
-                    Button("Try again") { JITBootstrap.prewarm(); guest.download() }.buttonStyle(.borderedProminent)
-                }
-            case .missing:
-                VStack(spacing: 12) {
-                    Text("Husk needs its Android runtime — about 760 MB. Android itself is downloaded afterwards by the runtime.")
-                        .font(.callout).foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center).padding(.horizontal, 36)
-                    Button("Download Android runtime") {
-                        // Claim the JIT region before the download, not after:
-                        // it takes about a minute, and StikDebug will have let
-                        // go by the end of it.
-                        JITBootstrap.prewarm()
-                        guest.download()
-                    }
-                        .buttonStyle(.borderedProminent)
-                }
-            case .ready:
-                // Unreachable: SetupView is mounted only while there is no
-                // runtime to launch -- ContentView.showSetup is false the
-                // moment the image on disk is valid, and the tab UI takes over
-                // from there. The start cards and the JIT hand-off that used
-                // to live here are covered by the library. An empty arm keeps
-                // the switch exhaustive.
-                EmptyView()
-            }
-        }
-    }
-
-    private func fmt(_ bytes: Int64) -> String {
-        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
-    }
-}
-
-/// An app's icon, or the placeholder while it is being fetched.
-///
-/// Loaded from the file rather than held in memory: icons arrive one at a time
-/// over the guest bridge, and a list that redraws when each lands should not
-/// also be carrying every decoded bitmap around with it.
-struct AppIcon: View {
-    let path: String?
-    /// The side of the square it draws itself in.
-    ///
-    /// It used to pin itself to 40pt internally, so the 62pt tile and the 96pt
-    /// header both got a 40pt picture floating in the middle of a much bigger
-    /// box -- which is most of why the grid looked like a debug list. The size
-    /// belongs to whoever is placing it.
-    var size: CGFloat = 40
-
-    /// Proportional, so a large icon is not rounded like a small one. This is
-    /// close to the ratio iOS uses for a home screen icon.
-    private var corner: CGFloat { size * 0.225 }
-
-    var body: some View {
-        Group {
-            if let path, let image = UIImage(contentsOfFile: path) {
-                Image(uiImage: image)
-                    .resizable()
-                    .interpolation(.medium)
-                    .aspectRatio(contentMode: .fit)
-            } else {
-                // A placeholder that looks like an icon rather than a missing
-                // one: most of the grid can be placeholders for the first
-                // minute of a session, and a row of grey glyphs reads as broken.
-                ZStack {
-                    Theme.accentSoft
-                    Image(systemName: "app.dashed")
-                        .font(.system(size: size * 0.42, weight: .light))
-                        .foregroundStyle(Theme.accent.opacity(0.8))
-                }
-            }
-        }
-        .frame(width: size, height: size)
-        // Rounded like a launcher would draw it. Android icons are square
-        // PNGs; nothing else gives them an app-like shape.
-        .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
-    }
-}
 /// Live log tail with a share button. The share sheet is the practical way to get
 /// husk.log and the guest's serial console off the device.
 /// Settings, reached from the gear on the start screen.
