@@ -296,10 +296,19 @@ enum PlayAPI {
         public let formattedPrice: String
         public let isFree: Bool
 
+        public static func isValidPackageName(_ id: String) -> Bool {
+            id.range(of: "^[a-zA-Z][a-zA-Z0-9_]*(\\.[a-zA-Z][a-zA-Z0-9_]+)+$", options: .regularExpression) != nil
+        }
+
         public static func from(doc: ProtoMessage) -> PlayApp? {
-            guard let id = doc.string(1), !id.isEmpty else { return nil }
-            // Ignore non-app document types if possible, or accept if docid looks like a package name
-            let title = doc.string(5) ?? id
+            guard let id = doc.string(1), isValidPackageName(id) else { return nil }
+
+            let titleCandidate = doc.string(5) ?? id
+            // Reject entries where title is a URL, tag, or has non-printable/empty junk
+            if titleCandidate.hasPrefix("http://") || titleCandidate.hasPrefix("https://") || titleCandidate.hasPrefix("fbtag;") {
+                return nil
+            }
+            let title = titleCandidate
             let dev = doc.string(6) ?? ""
             let desc = doc.string(7) ?? ""
 
@@ -308,7 +317,7 @@ enum PlayAPI {
             var screenshots: [String] = []
             for img in doc.messages(10) {
                 let imgType = img.int(1) ?? 0
-                if let url = img.string(5) {
+                if let url = img.string(5), url.hasPrefix("http") {
                     if imgType == 4 && icon == nil {
                         icon = url
                     } else if imgType == 1 || imgType == 2 {
@@ -369,8 +378,8 @@ enum PlayAPI {
             var visited = Set<String>()
 
             func traverse(_ msg: ProtoMessage) {
-                // If this is a DocV2 (has docid = 1 and details.appDetails = 13.1 or offer = 8)
-                if let docid = msg.string(1), docid.contains("."), !visited.contains(docid) {
+                // If this is a DocV2
+                if let docid = msg.string(1), isValidPackageName(docid), !visited.contains(docid) {
                     if let app = PlayApp.from(doc: msg) {
                         visited.insert(docid)
                         apps.append(app)
@@ -448,22 +457,52 @@ enum PlayAPI {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
 
-        // 1. First, search directly via fdfe/search with ksm=1
+        // Helper to extract valid Android package names from any string / HTML
+        func extractPackageNames(from text: String) -> [String] {
+            var found: [String] = []
+            let patterns = [
+                "/store/apps/details\\?id=([a-zA-Z][a-zA-Z0-9_]*(?:\\.[a-zA-Z][a-zA-Z0-9_]+)+)",
+                "id=([a-zA-Z][a-zA-Z0-9_]*(?:\\.[a-zA-Z][a-zA-Z0-9_]+)+)",
+                "\\b([a-zA-Z][a-zA-Z0-9_]*(?:\\.[a-zA-Z][a-zA-Z0-9_]+)+)\\b"
+            ]
+            for pattern in patterns {
+                guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+                let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
+                for match in matches {
+                    let rangeIdx = match.numberOfRanges > 1 ? 1 : 0
+                    if let range = Range(match.range(at: rangeIdx), in: text) {
+                        let candidate = String(text[range])
+                        if PlayApp.isValidPackageName(candidate) && !found.contains(candidate) {
+                            found.append(candidate)
+                        }
+                    }
+                }
+            }
+            return found
+        }
+
+        var candidatePackages: [String] = []
+
+        // 1. If an exact package name was searched, prioritize it
+        if PlayApp.isValidPackageName(trimmed) {
+            candidatePackages.append(trimmed)
+        }
+
+        // 2. Direct fdfe/search call with ksm=1
         let q = [
             ("c", "3"),
             ("q", trimmed),
             ("ksm", "1")
         ]
-
-        var foundPackageNames: [String] = []
         if let payload = try? await fdfeCall("search", session: session, query: q) {
             let immediateApps = PlayApp.parseApps(from: payload)
-            if !immediateApps.isEmpty {
-                return immediateApps
+            for app in immediateApps {
+                if !candidatePackages.contains(app.id) {
+                    candidatePackages.append(app.id)
+                }
             }
 
-            // Follow searchList stream continuation token if returned in prefetch payload
-            // In Google Play proto: prefetch response payload listResponse -> cluster link
+            // Follow searchList stream continuation token if present
             for (_, vals) in payload.fields {
                 for val in vals {
                     if case .bytes(let d) = val {
@@ -472,8 +511,11 @@ enum PlayAPI {
                         if let range = text.range(of: pattern, options: .regularExpression) {
                             let streamPath = String(text[range])
                             if let streamPayload = try? await fdfeCall(streamPath, session: session) {
-                                let streamApps = PlayApp.parseApps(from: streamPayload)
-                                if !streamApps.isEmpty { return streamApps }
+                                for app in PlayApp.parseApps(from: streamPayload) {
+                                    if !candidatePackages.contains(app.id) {
+                                        candidatePackages.append(app.id)
+                                    }
+                                }
                             }
                         }
                     }
@@ -481,39 +523,88 @@ enum PlayAPI {
             }
         }
 
-        // 2. Query searchSuggest for matching queries or packages
-        let suggestQuery = [
-            ("q", trimmed),
-            ("sb", "5"),
-            ("sst", "2"),
-            ("sst", "3")
-        ]
-        if let suggestMsg = try? await fdfeCall("searchSuggest", session: session, query: suggestQuery) {
-            let suggestApps = PlayApp.parseApps(from: suggestMsg)
-            if !suggestApps.isEmpty {
-                return suggestApps
+        // 3. fdfe/searchSuggest call
+        if candidatePackages.count < 10 {
+            let suggestQuery = [
+                ("q", trimmed),
+                ("sb", "5"),
+                ("sst", "2"),
+                ("sst", "3")
+            ]
+            if let suggestMsg = try? await fdfeCall("searchSuggest", session: session, query: suggestQuery) {
+                for app in PlayApp.parseApps(from: suggestMsg) {
+                    if !candidatePackages.contains(app.id) {
+                        candidatePackages.append(app.id)
+                    }
+                }
             }
         }
 
-        // 3. If exact package name or featured match was searched, resolve details directly
-        if trimmed.contains(".") {
-            if let directApp = try? await details(packageName: trimmed, session: session) {
-                return [directApp]
+        // 4. Web search fallback: query Google Play's public search catalog to obtain top ranked package IDs
+        if candidatePackages.count < 10 {
+            var comps = URLComponents(string: "https://play.google.com/store/search")!
+            comps.queryItems = [
+                URLQueryItem(name: "q", value: trimmed),
+                URLQueryItem(name: "c", value: "apps"),
+                URLQueryItem(name: "hl", value: "en"),
+                URLQueryItem(name: "gl", value: PlayDevice.country)
+            ]
+            if let webURL = comps.url {
+                var webReq = URLRequest(url: webURL)
+                webReq.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
+                if let (data, resp) = try? await urlSession.data(for: webReq),
+                   (resp as? HTTPURLResponse)?.statusCode == 200,
+                   let html = String(data: data, encoding: .utf8) {
+                    for pkg in extractPackageNames(from: html) {
+                        if !candidatePackages.contains(pkg) {
+                            candidatePackages.append(pkg)
+                            if candidatePackages.count >= 20 { break }
+                        }
+                    }
+                }
             }
         }
 
-        // Filter featured apps by query substring as instant matching
-        let localMatches = featuredPackageNames.filter {
-            $0.localizedCaseInsensitiveContains(trimmed) ||
-            $0.replacingOccurrences(of: ".", with: " ").localizedCaseInsensitiveContains(trimmed)
-        }
-        var apps: [PlayApp] = []
-        for pkg in localMatches {
-            if let app = try? await details(packageName: pkg, session: session) {
-                apps.append(app)
+        // 5. Featured apps substring matching fallback
+        for pkg in featuredPackageNames {
+            if (pkg.localizedCaseInsensitiveContains(trimmed) ||
+                pkg.replacingOccurrences(of: ".", with: " ").localizedCaseInsensitiveContains(trimmed)) &&
+                !candidatePackages.contains(pkg) {
+                candidatePackages.append(pkg)
             }
         }
-        return apps
+
+        // If no candidate packages were identified, return empty
+        if candidatePackages.isEmpty {
+            return []
+        }
+
+        // Limit candidate list to top 20 to avoid excessive queries
+        let topCandidates = Array(candidatePackages.prefix(20))
+
+        // Resolve rich details concurrently for each package
+        var resolvedApps: [PlayApp] = []
+        await withTaskGroup(of: PlayApp?.self) { group in
+            for pkg in topCandidates {
+                group.addTask {
+                    try? await details(packageName: pkg, session: session)
+                }
+            }
+            for await app in group {
+                if let app, PlayApp.isValidPackageName(app.id) {
+                    resolvedApps.append(app)
+                }
+            }
+        }
+
+        // Sort resolved apps to preserve the candidate package ranking order
+        resolvedApps.sort { a, b in
+            let ia = topCandidates.firstIndex(of: a.id) ?? 999
+            let ib = topCandidates.firstIndex(of: b.id) ?? 999
+            return ia < ib
+        }
+
+        return resolvedApps
     }
 
     /// Get full details for a single app
