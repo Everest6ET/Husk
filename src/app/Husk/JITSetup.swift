@@ -169,7 +169,7 @@ final class JITCoordinator: ObservableObject {
     func enableAtLaunchIfAsked() {
         guard !autoTried, UserDefaults.standard.bool(forKey: Self.autoEnableKey) else { return }
         autoTried = true
-        guard !(JITBootstrap.isDebuggerAttached || JITBootstrap.debuggedFlag) else { return }
+        guard !JITBootstrap.ready else { return }
         guard HuskBuiltInJIT.isAvailable, hasPairing else {
             log("JIT at launch is on, but built-in StikJIT is not available or not paired; skipped")
             return
@@ -180,7 +180,7 @@ final class JITCoordinator: ObservableObject {
     }
 
     func enable() {
-        guard !JITBootstrap.isDebuggerAttached else { return }
+        guard !JITBootstrap.ready else { return }
         error = nil
         connectionProblem = nil
         switch resolvedMethod {

@@ -132,7 +132,7 @@ enum Launcher {
         }
     }
 
-    static var jitOn: Bool { JITBootstrap.isDebuggerAttached || JITBootstrap.debuggedFlag }
+    static var jitOn: Bool { JITBootstrap.ready }
 }
 
 // MARK: - Home

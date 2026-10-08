@@ -457,9 +457,6 @@ struct TLCocosAttemptView: View {
     @State private var uiHidden: Bool
     /// The line saying how to get the interface back, shown for a few seconds after it goes.
     @State private var hint = false
-    /// Whether the game was laid out to fill the whole screen: with "Hide the interface" on, the bar is not a strip above the game
-    /// but a layer over it that comes and goes. The game's surface is sized once at launch, so this cannot change while it runs.
-    private let cleanLayout: Bool
     private var showLog: Bool { get { showLogSetting && devInfo } nonmutating set { showLogSetting = newValue } }
 
     init(app: TLApp) {
@@ -467,7 +464,6 @@ struct TLCocosAttemptView: View {
         let loaded = TLAppSettings.load(app.id)
         _settings = State(initialValue: loaded)
         _uiHidden = State(initialValue: loaded.cleanView)
-        cleanLayout = loaded.cleanView
     }
 
     /// Geometry Dash and the like are cocos2d-x; Minecraft is built on GameActivity. Both are landscape.
@@ -526,11 +522,7 @@ struct TLCocosAttemptView: View {
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            VStack(spacing: 0) {
-                if !cleanLayout {
-                    // Hidden, the strip stays (the game below it must not change size) but shows nothing.
-                    bar.opacity(uiHidden ? 0 : 1).allowsHitTesting(!uiHidden)
-                }
+            Group {
                 if let other = blockedBy {
                     VStack(spacing: 8) {
                         Text("Another game is already loaded")
@@ -541,12 +533,11 @@ struct TLCocosAttemptView: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if let apk = app.apks.first {
-                    HStack(spacing: 0) {
-                        TLUnityScreen(apk: apk, extraApks: Array(app.apks.dropFirst()), dataDir: dataDir, engine: engine, portrait: portrait,
-                                      scale: settings.resolution.scale, onStats: { stats = $0 }, onThreeFingerTap: { toggleInterface() })
-                            .background(Color.black)
-                        if showLog, !uiHidden { logPanel.frame(width: 320) }
-                    }
+                    // The game always has the whole screen: it is told its size once, as it starts, so nothing may take space from it.
+                    // The bar and the log are drawn over it instead, and hiding them shows everything underneath.
+                    TLUnityScreen(apk: apk, extraApks: Array(app.apks.dropFirst()), dataDir: dataDir, engine: engine, portrait: portrait,
+                                  scale: settings.resolution.scale, onStats: { stats = $0 }, onThreeFingerTap: { toggleInterface() })
+                        .background(Color.black)
                     .overlay {
                         // A game whose menus answer only a controller: with none paired, one on the glass. Kept in place and
                         // connected while the interface is hidden, so the game does not see a controller come and go.
@@ -559,11 +550,22 @@ struct TLCocosAttemptView: View {
                                 .overlay(alignment: .center) { if editingPad { padEditor } }
                         }
                     }
-                    .ignoresSafeArea(.container, edges: cleanLayout ? .all : [.horizontal, .bottom])
+                    .ignoresSafeArea()
                 }
             }
-            if cleanLayout, !uiHidden {
-                VStack(spacing: 0) { bar; Spacer() }
+            if !uiHidden {
+                VStack(spacing: 0) {
+                    bar
+                    if showLog {
+                        HStack(spacing: 0) {
+                            Spacer(minLength: 0)
+                            logPanel.frame(width: 320)
+                        }
+                        .transition(.move(edge: .trailing).combined(with: .opacity))
+                    } else {
+                        Spacer(minLength: 0)
+                    }
+                }
             }
             if hint {
                 VStack {
@@ -586,7 +588,7 @@ struct TLCocosAttemptView: View {
         .onAppear {
             HuskOrientation.set(portrait ? .portrait : .landscape)
             UIApplication.shared.isIdleTimerDisabled = settings.keepAwake
-            if cleanLayout { showHint() }
+            if uiHidden { showHint() }
             CrashReport.gameStarted(app)
             padLayout = PadLayout.load(app.id)
             model.start()
@@ -709,6 +711,6 @@ struct TLCocosAttemptView: View {
                 .onChange(of: model.logText) { _ in proxy.scrollTo("bottom", anchor: .bottom) }
             }
         }
-        .background(Theme.bg)
+        .background(Theme.bg.opacity(0.85))
     }
 }

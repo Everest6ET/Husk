@@ -114,7 +114,7 @@ struct ContentView: View {
         .fullScreenCover(isPresented: $showOnboarding) {
             OnboardingView {
                 showOnboarding = false
-                if Onboarding.autoStart, JITBootstrap.isDebuggerAttached {
+                if Onboarding.autoStart, JITBootstrap.ready {
                     booting = true
                     start()
                 }
@@ -195,7 +195,7 @@ struct ContentView: View {
         }
         // The two-parameter onChange is iOS 17; this single-parameter form is
         // deprecated there but still works, and is the only one that compiles
-        // against the 16.4 deployment target.
+        // against the 16.0 deployment target.
         .onChange(of: scenePhase) { phase in
             // StikDebug relaunches Husk after attaching, so returning to the
             // foreground is the moment worth re-checking, not first launch.
@@ -220,8 +220,8 @@ struct ContentView: View {
         // network round trip, and nothing on this screen should wait for it.
         Task { await guest.checkForUpdates() }
 
-        if !JITBootstrap.isDebuggerAttached {
-            HuskLog.log("ui", "no debugger attached; waiting for StikDebug")
+        if !JITBootstrap.ready {
+            HuskLog.log("ui", "no JIT yet; waiting for a debugger")
             return
         }
 
@@ -252,7 +252,7 @@ struct ContentView: View {
     /// the action behind a button reads as a button that does nothing, so the
     /// JIT prompt is raised here instead.
     private func startFromLibrary() {
-        guard JITBootstrap.isDebuggerAttached else {
+        guard JITBootstrap.ready else {
             HuskLog.log("ui", "start asked for without JIT; enabling with \(jit.resolvedMethod.title)")
             jit.enable()
             return
@@ -262,8 +262,8 @@ struct ContentView: View {
 
     private func start() {
         guard !started else { return }
-        guard JITBootstrap.isDebuggerAttached else { return }
-        HuskLog.log("ui", "CS_DEBUGGED set; starting QEMU")
+        guard JITBootstrap.ready else { return }
+        HuskLog.log("ui", "JIT is available; starting QEMU")
         // Take the JIT region at the last moment before QEMU, as well as before
         // the download. Whichever comes first wins; the second call is a no-op.
         //

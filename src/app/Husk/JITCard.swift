@@ -11,7 +11,7 @@ struct JITCard: View {
     /// One line instead of a card: for the library, where it sits above the games rather than being the page.
     var compact = false
 
-    private var isOn: Bool { JITBootstrap.isDebuggerAttached || JITBootstrap.debuggedFlag }
+    private var isOn: Bool { JITBootstrap.ready }
 
     /// The way the card offers: StikJIT where Husk has it (iOS 26 and later), and otherwise whatever this device has -- TrollStore, a
     /// jailbreak -- since StikJIT cannot run on an iOS before 26.

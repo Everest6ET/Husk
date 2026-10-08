@@ -175,7 +175,7 @@ struct OnboardingView: View {
 
     /// What the JIT page says is already in place, if anything.
     private var jitState: String? {
-        if JITBootstrap.debuggedFlag { return "JIT is on." }
+        if JITBootstrap.ready { return "JIT is on." }
         if jit.method == .stikDebug { return "Husk will use StikDebug." }
         if jit.method == .trollStore { return "Husk will use TrollStore." }
         switch jit.pairingSource {
