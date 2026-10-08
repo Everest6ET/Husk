@@ -135,5 +135,9 @@ struct ProtoMessage {
         default: return nil
         }
     }
+    func float(_ field: Int) -> Float? {
+        guard case .fixed32(let v)? = fields[field]?.first else { return nil }
+        return Float(bitPattern: v)
+    }
     func has(_ field: Int) -> Bool { fields[field] != nil }
 }

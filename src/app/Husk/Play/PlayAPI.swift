@@ -51,8 +51,41 @@ enum PlayAPI {
             throw PlayError("Invalid dispenser URL: \(dispenserURL)")
         }
         var req = URLRequest(url: url)
+        req.httpMethod = "POST"
         req.setValue("com.aurora.store-4.6.1-70", forHTTPHeaderField: "User-Agent")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        let deviceProps: [String: String] = [
+            "Build.HARDWARE": PlayDevice.hardware,
+            "Build.RADIO": PlayDevice.radio,
+            "Build.FINGERPRINT": PlayDevice.fingerprint,
+            "Build.BRAND": PlayDevice.brand,
+            "Build.DEVICE": PlayDevice.device,
+            "Build.VERSION.SDK_INT": "\(PlayDevice.sdk)",
+            "Build.VERSION.RELEASE": PlayDevice.release,
+            "Build.MODEL": PlayDevice.model,
+            "Build.MANUFACTURER": PlayDevice.manufacturer,
+            "Build.PRODUCT": PlayDevice.product,
+            "Build.ID": PlayDevice.buildID,
+            "Build.BOOTLOADER": PlayDevice.bootloader,
+            "Platforms": PlayDevice.platforms.joined(separator: ","),
+            "Locales": PlayDevice.locale,
+            "Features": PlayDevice.features.joined(separator: ","),
+            "SharedLibraries": PlayDevice.sharedLibraries.joined(separator: ","),
+            "GL.Extensions": PlayDevice.glExtensions.joined(separator: ","),
+            "GL.Version": "\(PlayDevice.glEsVersion)",
+            "Screen.Density": "\(PlayDevice.screenDensity)",
+            "Screen.Width": "\(PlayDevice.screenWidth)",
+            "Screen.Height": "\(PlayDevice.screenHeight)",
+            "Client": "android-google",
+            "GSF.version": "\(PlayDevice.playServicesVersion)",
+            "Vending.version": "\(PlayDevice.vendingVersion)",
+            "Vending.versionString": PlayDevice.vendingVersionString,
+            "SimOperator": PlayDevice.simOperator,
+            "CellOperator": PlayDevice.cellOperator
+        ]
+
+        req.httpBody = try? JSONSerialization.data(withJSONObject: deviceProps)
 
         let (data, response) = try await urlSession.data(for: req)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else {
@@ -64,22 +97,26 @@ enum PlayAPI {
             let auth: String?
             let authToken: String?
             let gsfId: String?
+            let deviceConfigToken: String?
+            let deviceCheckInConsistencyToken: String?
         }
 
         let decoded = try JSONDecoder().decode(DispenserResponse.self, from: data)
-        guard let bearer = decoded.auth ?? decoded.authToken, !bearer.isEmpty else {
+        guard let bearer = decoded.authToken ?? decoded.auth, !bearer.isEmpty else {
             throw PlayError("Aurora token dispenser returned an empty auth token.")
         }
 
         let email = decoded.email ?? "anonymous@auroraoss.com"
         let gsf = decoded.gsfId ?? "38918a453d071993"
+        let consistency = decoded.deviceCheckInConsistencyToken ?? ""
+        let configTok = decoded.deviceConfigToken ?? ""
 
         return PlaySession(
             email: email,
             aasToken: "",
             gsfID: gsf,
-            consistencyToken: "",
-            deviceConfigToken: "",
+            consistencyToken: consistency,
+            deviceConfigToken: configTok,
             bearer: bearer,
             isAnonymous: true
         )
@@ -303,7 +340,9 @@ enum PlayAPI {
             // Aggregate rating: field 14 message 1 (stars / 5.0)
             var ratingVal = 0.0
             if let agg = doc.message(14) {
-                if let r = agg.string(1), let d = Double(r) {
+                if let f = agg.float(2) {
+                    ratingVal = Double(round(f * 10) / 10)
+                } else if let r = agg.string(1), let d = Double(r) {
                     ratingVal = d
                 }
             }
@@ -356,28 +395,123 @@ enum PlayAPI {
         }
     }
 
-    /// Search Google Play
-    static func search(query: String, session: PlaySession) async throws -> [PlayApp] {
-        let q = [
-            ("c", "3"), // category 3 = apps
-            ("q", query)
-        ]
-        let payload = try await fdfeCall("search", session: session, query: q)
-        return PlayApp.parseApps(from: payload)
-    }
+    /// Popular apps featured on the Store home screen
+    static let featuredPackageNames: [String] = [
+        "com.kiloo.subwaysurf",
+        "com.robtopx.geometryjumplite",
+        "com.supercell.clashofclans",
+        "com.mojang.minecraftpe",
+        "org.videolan.vlc",
+        "com.halfbrick.fruitninjafree",
+        "com.imangi.templerun2",
+        "com.vectorunit.cobalt.googleplay",
+        "com.ea.game.pvzfree_row",
+        "com.fingersoft.hillclimb",
+        "org.libretro.retroarch"
+    ]
 
     /// Browse top / featured apps
     static func browse(session: PlaySession) async throws -> [PlayApp] {
-        // Browse top chart / home
-        let q = [
-            ("c", "3")
-        ]
+        // Fetch details concurrently for the featured apps
+        var results: [PlayApp] = []
+        await withTaskGroup(of: PlayApp?.self) { group in
+            for pkg in featuredPackageNames {
+                group.addTask {
+                    try? await details(packageName: pkg, session: session)
+                }
+            }
+            for await app in group {
+                if let app {
+                    results.append(app)
+                }
+            }
+        }
+
+        if !results.isEmpty {
+            // Sort by popularity index matching the list order
+            results.sort { a, b in
+                let ia = featuredPackageNames.firstIndex(of: a.id) ?? 999
+                let ib = featuredPackageNames.firstIndex(of: b.id) ?? 999
+                return ia < ib
+            }
+            return results
+        }
+
+        // Fallback to native browse if individual details failed
+        let q = [("c", "3")]
         let payload = try await fdfeCall("browse", session: session, query: q)
-        var apps = PlayApp.parseApps(from: payload)
-        if apps.isEmpty {
-            // Fallback to a standard list query if browse payload structure differs
-            let listPayload = try await fdfeCall("list", session: session, query: [("c", "3"), ("cat", "GAME")])
-            apps = PlayApp.parseApps(from: listPayload)
+        return PlayApp.parseApps(from: payload)
+    }
+
+    /// Search Google Play
+    static func search(query: String, session: PlaySession) async throws -> [PlayApp] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+
+        // 1. First, search directly via fdfe/search with ksm=1
+        let q = [
+            ("c", "3"),
+            ("q", trimmed),
+            ("ksm", "1")
+        ]
+
+        var foundPackageNames: [String] = []
+        if let payload = try? await fdfeCall("search", session: session, query: q) {
+            let immediateApps = PlayApp.parseApps(from: payload)
+            if !immediateApps.isEmpty {
+                return immediateApps
+            }
+
+            // Follow searchList stream continuation token if returned in prefetch payload
+            // In Google Play proto: prefetch response payload listResponse -> cluster link
+            for (_, vals) in payload.fields {
+                for val in vals {
+                    if case .bytes(let d) = val {
+                        let text = String(decoding: d, as: UTF8.self)
+                        let pattern = "searchList\\?q=[^\"\\s&]+"
+                        if let range = text.range(of: pattern, options: .regularExpression) {
+                            let streamPath = String(text[range])
+                            if let streamPayload = try? await fdfeCall(streamPath, session: session) {
+                                let streamApps = PlayApp.parseApps(from: streamPayload)
+                                if !streamApps.isEmpty { return streamApps }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Query searchSuggest for matching queries or packages
+        let suggestQuery = [
+            ("q", trimmed),
+            ("sb", "5"),
+            ("sst", "2"),
+            ("sst", "3")
+        ]
+        if let suggestMsg = try? await fdfeCall("searchSuggest", session: session, query: suggestQuery) {
+            let suggestApps = PlayApp.parseApps(from: suggestMsg)
+            if !suggestApps.isEmpty {
+                return suggestApps
+            }
+        }
+
+        // 3. If exact package name or featured match was searched, resolve details directly
+        if trimmed.contains(".") {
+            if let directApp = try? await details(packageName: trimmed, session: session) {
+                return [directApp]
+            }
+        }
+
+        // Filter featured apps by query substring as instant matching
+        let localMatches = featuredPackageNames.filter {
+            $0.localizedCaseInsensitiveContains(trimmed) ||
+            $0.replacingOccurrences(of: ".", with: " ").localizedCaseInsensitiveContains(trimmed)
+        }
+        var apps: [PlayApp] = []
+        for pkg in localMatches {
+            if let app = try? await details(packageName: pkg, session: session) {
+                apps.append(app)
+            }
         }
         return apps
     }
@@ -388,10 +522,36 @@ enum PlayAPI {
             ("doc", packageName)
         ]
         let payload = try await fdfeCall("details", session: session, query: q)
+
         // Payload -> detailsResponse (field 2) -> docV2 (field 4)
-        if let doc = payload.message(2)?.message(4) {
-            return PlayApp.from(doc: doc)
+        let detResp = payload.message(2)
+        if let doc = detResp?.message(4), var app = PlayApp.from(doc: doc) {
+            // Extract latest versionCode from prefetch/cluster info (field 6.2.11.2) if not in appDetails
+            if app.versionCode <= 0 {
+                let f6 = detResp?.message(6)
+                let f2 = f6?.message(2)
+                let f11 = f2?.message(11)
+                if let vc = f11?.int(2), vc > 0 {
+                    app = PlayApp(
+                        id: app.id,
+                        title: app.title,
+                        developer: app.developer,
+                        summary: app.summary,
+                        iconURL: app.iconURL,
+                        screenshotURLs: app.screenshotURLs,
+                        versionCode: Int(vc),
+                        versionString: app.versionString,
+                        sizeBytes: app.sizeBytes,
+                        downloads: app.downloads,
+                        rating: app.rating,
+                        formattedPrice: app.formattedPrice,
+                        isFree: app.isFree
+                    )
+                }
+            }
+            return app
         }
+
         let apps = PlayApp.parseApps(from: payload)
         return apps.first(where: { $0.id == packageName }) ?? apps.first
     }
@@ -408,28 +568,43 @@ enum PlayAPI {
         public let downloadAuthCookie: (name: String, value: String)?
     }
 
-    /// "Purchase" (license) a free app so Google Play allows delivery.
-    static func purchase(packageName: String, versionCode: Int, session: PlaySession) async throws {
+    /// "Purchase" (license) a free app so Google Play allows delivery. Returns encoded delivery token if provided.
+    @discardableResult
+    static func purchase(packageName: String, versionCode: Int, session: PlaySession) async throws -> String? {
         let q = [
             ("doc", packageName),
             ("ot", "1"),
             ("vc", "\(versionCode)")
         ]
         // POST to fdfe/purchase
-        _ = try await fdfeCall("purchase", session: session, query: q, post: true)
+        let payload = try await fdfeCall("purchase", session: session, query: q, post: true)
+        // buyResponse is field 4, encodedDeliveryToken is field 55
+        let buyResponse = payload.message(4)
+        return buyResponse?.string(55)
     }
 
     /// Request delivery URL(s) for an app
-    static func delivery(packageName: String, versionCode: Int, session: PlaySession) async throws -> DeliveryData {
-        let q = [
+    static func delivery(packageName: String, versionCode: Int, deliveryToken: String? = nil, session: PlaySession) async throws -> DeliveryData {
+        var q = [
             ("doc", packageName),
             ("ot", "1"),
             ("vc", "\(versionCode)")
         ]
+        if let deliveryToken, !deliveryToken.isEmpty {
+            q.append(("dtok", deliveryToken))
+        }
         let payload = try await fdfeCall("delivery", session: session, query: q)
 
         // Delivery response: field 21 message 2 (AndroidAppDeliveryData)
-        guard let deliveryDataMsg = payload.message(21)?.message(2) else {
+        let delivResp = payload.message(21)
+        let status = delivResp?.int(1) ?? 1
+        if status == 2 {
+            throw PlayError("Google Play reported app is incompatible with this device profile (status 2).")
+        } else if status == 3 {
+            throw PlayError("App requires purchase or license before download.")
+        }
+
+        guard let deliveryDataMsg = delivResp?.message(2) else {
             throw PlayError("Google Play did not return download information.")
         }
 
@@ -469,15 +644,14 @@ enum PlayAPI {
         session: PlaySession,
         progress: (@MainActor (Double) -> Void)? = nil
     ) async throws -> [URL] {
-        // First try delivery; if not purchased, purchase first and retry delivery
-        var deliveryData: DeliveryData
+        // Purchase first to obtain delivery token, then request delivery
+        var dtok: String? = nil
         do {
-            deliveryData = try await delivery(packageName: packageName, versionCode: versionCode, session: session)
+            dtok = try await purchase(packageName: packageName, versionCode: versionCode, session: session)
         } catch {
-            // Attempt purchase
-            try await purchase(packageName: packageName, versionCode: versionCode, session: session)
-            deliveryData = try await delivery(packageName: packageName, versionCode: versionCode, session: session)
+            // Ignore if purchase fails or already owned
         }
+        let deliveryData = try await delivery(packageName: packageName, versionCode: versionCode, deliveryToken: dtok, session: session)
 
         var downloadsToMake: [(name: String, url: String, size: Int64)] = []
         if let base = deliveryData.downloadUrl {
