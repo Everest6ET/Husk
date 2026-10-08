@@ -32,6 +32,8 @@ struct ContentView: View {
     @ObservedObject private var showcase = ShowcaseStore.shared
     @ObservedObject private var tlStore = TranslationLayerStore.shared
     @ObservedObject private var crash = CrashReport.shared
+    @ObservedObject private var updates = AppUpdates.shared
+    @State private var showWhatsNew = false
 
     var body: some View {
         ZStack {
@@ -120,9 +122,27 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showLogs) { LogView() }
         // A game that ended Husk last time: say so, with its report.
-        .sheet(item: Binding(get: { showOnboarding ? nil : crash.pending }, set: { crash.pending = $0 })) { r in
+        .sheet(item: Binding(get: { showOnboarding ? nil : crash.pending }, set: { crash.pending = $0 }),
+               onDismiss: { if WhatsNew.due { showWhatsNew = true } }) { r in
             CrashReportSheet(report: r)
         }
+        // After an update: what it brought, once.
+        .fullScreenCover(isPresented: $showWhatsNew) {
+            WhatsNewSheet { WhatsNew.markSeen(); showWhatsNew = false }
+        }
+        // A newer Husk is on GitHub.
+        .alert("Husk \(updates.available?.version ?? "") Is Available", isPresented: Binding(
+                get: { updates.available != nil && !showOnboarding && !showWhatsNew && crash.pending == nil },
+                set: { if !$0 { updates.dismiss() } })) {
+            Button("View Release") {
+                if let page = updates.available?.page { UIApplication.shared.open(page) }
+                updates.dismiss()
+            }
+            Button("Not Now", role: .cancel) { updates.dismiss() }
+        } message: {
+            Text("You have \(AppUpdates.current). The new version's IPA is on its release page.")
+        }
+        .task { await updates.check() }
         .sheet(isPresented: $router.showFiles) { FilesTab() }
         // Pictures for the apps here: read the index on launch and whenever the set of apps changes.
         .task(id: showcasePackages) { showcase.refresh(for: showcasePackages) }
@@ -167,6 +187,7 @@ struct ContentView: View {
         }
         .onAppear {
             crash.checkPreviousRun()
+            if crash.pending == nil, WhatsNew.due { showWhatsNew = true }
             router.openGuest = { showGuestScreen = true }
             router.startAndroid = { startFromLibrary() }
             evaluate()

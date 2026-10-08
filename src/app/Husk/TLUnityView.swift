@@ -556,6 +556,13 @@ struct TLCocosAttemptView: View {
             CrashReport.gameStarted(app)
             model.start()
         }
+        // What happened, for the library: ten seconds of frames is a game that plays; a refusal is one that did not start.
+        .onChange(of: model.frames) { f in
+            if f > 600, model.state == Int32(HUSK_UNITY_RUNNING) { GameStatusStore.shared.record(app.id, .plays) }
+        }
+        .onChange(of: model.state) { st in
+            if st == Int32(HUSK_UNITY_FAILED) { GameStatusStore.shared.record(app.id, .failed) }
+        }
         .onDisappear {
             CrashReport.gameEnded()
             model.stop()

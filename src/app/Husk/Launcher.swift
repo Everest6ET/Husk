@@ -576,6 +576,13 @@ struct LauncherTile: View {
     var item: LibraryItem? = nil
     var caption: String? = nil
     var size: CGFloat = 64
+    @ObservedObject private var statuses = GameStatusStore.shared
+
+    /// How the game did last time it was played, when Husk has seen it played.
+    private var result: GameStatusStore.Result? {
+        guard case .game(let g)? = item else { return nil }
+        return statuses.status(g.id)?.result
+    }
 
     var body: some View {
         VStack(spacing: 7) {
@@ -585,6 +592,9 @@ struct LauncherTile: View {
             .shadow(color: .black.opacity(0.14), radius: 6, y: 3)
             .overlay(alignment: .bottom) {
                 if item?.runsInAndroid == true { AndroidBadge().offset(y: 6) }
+            }
+            .overlay(alignment: .topTrailing) {
+                if let result { GameStatusBadge(result: result).offset(x: 5, y: -5) }
             }
             VStack(spacing: 1) {
                 Text(title)

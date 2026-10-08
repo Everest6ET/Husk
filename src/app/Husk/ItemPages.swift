@@ -99,6 +99,7 @@ struct GamePage: View {
     @State private var savesBusy = false
     @State private var savesMessage: String?
     @State private var confirmRestore: URL?
+    @State private var confirmQuit = false
 
     private var runs: Bool { app.report?.canRun == true }
 
@@ -125,8 +126,8 @@ struct GamePage: View {
                        + "(or in Geometry Dash's settings, under Mods), then start Geometry Dash and use Geode's button on its "
                        + "main menu to get mods. This APK supplies a library Geode needs, so keep it.")
                 } else if let other = blockedBy {
-                    Text("\(other) is running. A game cannot be closed once it has started, so close Husk completely "
-                       + "(swipe it away) and open it again to play \(app.label).")
+                    Text("\(other) is still loaded, and a game cannot be unloaded once it has started. Close Husk with the "
+                       + "button above, then open it again to play \(app.label).")
                 } else if !runs {
                     Text("This APK has no 64-bit code Husk can run, so it will probably not start.")
                 }
@@ -166,6 +167,11 @@ struct GamePage: View {
 
             Section("About") {
                 LabeledContent("Runs With", value: app.report?.runnerName ?? "Unknown")
+                if let st = GameStatusStore.shared.status(app.id) {
+                    LabeledContent("Last Result") {
+                        Label(st.result.label, systemImage: st.result.symbol).foregroundStyle(st.result.color)
+                    }
+                }
                 LabeledContent("Last Played", value: app.lastPlayed.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "Never")
                 LabeledContent("Size", value: fileBytes(app.apks))
             }
@@ -188,6 +194,16 @@ struct GamePage: View {
             Button("Replace", role: .destructive) { if let url = confirmRestore { restore(url) } }
         } message: {
             Text("What \(app.label) has saved now is replaced by the backup. Back up first if you want to keep it.")
+        }
+        .confirmationDialog("Close Husk?", isPresented: $confirmQuit, titleVisibility: .visible) {
+            Button("Close Husk") {
+                // The game that is loaded is closed with Husk, which is the normal way out for it, not a crash.
+                CrashReport.gameEnded()
+                HuskLog.flushNow()
+                exit(0)
+            }
+        } message: {
+            Text("\(blockedBy ?? "The other game") is still loaded and only one game can run per session. Husk closes; open it again and \(app.label) is ready to play.")
         }
         .confirmationDialog("Remove \(app.label)?", isPresented: $confirmRemove, titleVisibility: .visible) {
             Button("Remove", role: .destructive) {
@@ -262,8 +278,7 @@ struct GamePage: View {
                 BigButton(title: "Add Geometry Dash First", systemImage: "plus", prominent: false) { }.disabled(true)
             }
         } else if blockedBy != nil {
-            BigButton(title: "Close Husk to Play", systemImage: "xmark.circle", prominent: false) { }
-                .disabled(true)
+            BigButton(title: "Close Husk to Play", systemImage: "xmark.circle", prominent: false) { confirmQuit = true }
         } else if !Launcher.jitOn {
             if jit.busy {
                 HStack(spacing: 10) { ProgressView(); Text(jit.status ?? "Turning on JIT…").foregroundStyle(.secondary) }

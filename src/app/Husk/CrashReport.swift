@@ -108,6 +108,11 @@ final class CrashReport: ObservableObject {
         pending = Report(game: info["label"] as? String ?? "A game", appID: info["id"] as? String ?? "",
                          cause: cause, when: time, excerpt: Array(Self.interesting(lines).suffix(14)))
         HuskLog.log("crash", "\(pending!.game) did not close normally last run: \(cause.title)")
+        switch cause {
+        case .signal: GameStatusStore.shared.record(pending!.appID, .crashed)
+        case .startFailed: GameStatusStore.shared.record(pending!.appID, .failed)
+        case .unknown: break
+        }
     }
 
     /// The lines of a log worth a glance: the runtime's and the crash handler's, not the JIT's housekeeping.
