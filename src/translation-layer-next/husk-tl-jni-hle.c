@@ -1080,6 +1080,7 @@ jobj *tl_hle_config(void) { return H.config; }
 extern void tl_loop_install(void);
 extern void tl_input_install(void);
 extern void tl_tls_install(void);
+extern void tl_gms_install(void);
 void tl_jni_hle_install(void)
 {
     for (size_t i = 0; i < sizeof(k_classes) / sizeof(k_classes[0]); i++) tl_jni_declare(k_classes[i].name, k_classes[i].super);
@@ -1089,6 +1090,7 @@ void tl_jni_hle_install(void)
     tl_input_install();
     tl_tls_install();
     tl_http_install();
+    tl_gms_install();
 
     H.activity = make("android/app/Activity");
     H.resources = make("android/content/res/Resources");

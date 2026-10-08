@@ -50,7 +50,7 @@ struct tl_jclass {
 static tl_jclass *g_classes[NBUCKETS];
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static int g_trace;
-static const tl_jhle *g_hle[16];
+static const tl_jhle *g_hle[32];
 static int g_nhle;
 
 void tl_jni_set_trace(int level) { g_trace = level; }
@@ -199,7 +199,7 @@ static void parse_sig(tl_jmeth *m)
 
 void tl_jni_register_hle(const tl_jhle *table)
 {
-    if (g_nhle < 16) g_hle[g_nhle++] = table;
+    if (g_nhle < 32) g_hle[g_nhle++] = table;
 }
 
 static tl_jhle_fn hle_find(const char *cls, const char *name, const char *sig)
