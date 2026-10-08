@@ -155,6 +155,7 @@ enum PlayAPI {
             ("add_account", "1"),
             ("Token", oauthToken),
             ("callerSig", callerSig),
+            ("droidguard_results", "null"),
         ]
         var req = URLRequest(url: authURL)
         req.httpMethod = "POST"
@@ -189,6 +190,7 @@ enum PlayAPI {
             ("check_email", "1"),
             ("system_partition", "1"),
             ("service", "oauth2:https://www.googleapis.com/auth/googleplay"),
+            ("droidguard_results", "null"),
         ]
         var req = URLRequest(url: authURL)
         req.httpMethod = "POST"
