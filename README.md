@@ -57,18 +57,28 @@ Games made with an engine Husk has a driver for:
 - Unity
 - Unreal Engine 4 (through Vulkan)
 - cocos2d-x
+- Godot 3 and 4 (GLES2, GLES3 and the Compatibility renderer)
 - SDL2 and SDL3, including LÖVE games
 - GameActivity (Minecraft) and NativeActivity
 - Rockstar's own engine (GTA: San Andreas)
 
+Games see Google Play services as installed and signed out, so the ones that
+check for it start normally; Play Games sign-in, cloud saves and purchases are
+not available. Geometry Dash can load [Geode](https://geode-sdk.org) mods.
+
 An APK needs 64-bit (`arm64-v8a`) native code. iPhones cannot run 32-bit ARM
 code, so an APK that only has 32-bit libraries cannot run here. APKs and
-split bundles (`.xapk`, `.apkm`, `.apks`) can both be added. Apps written only
+split bundles (`.xapk`, `.apkm`, `.apks`, or a Play download's separate split
+APKs and asset packs) can all be added. Apps written only
 in Java, with no native engine, are not supported on the translation layer;
 Emulation is the way to run those.
 
-One game runs per launch of Husk: to switch to another game, close Husk
-completely and open it again.
+One game runs per launch of Husk. To switch, press **Close Husk to Play** on
+the other game's page; when you open Husk again, that game starts by itself.
+
+A game's saves can be backed up to a `.zip` from its page and restored later,
+on the same iPhone or another. If a game crashes Husk, the next launch shows
+what happened, with a report you can share.
 
 ## Installing
 
@@ -111,6 +121,10 @@ It then builds the app and writes the IPA to `build/Husk.ipa`. The first run
 takes a couple of hours, and later runs reuse what is already built. After
 that, `./scripts/package_ipa.sh` rebuilds just the app and writes
 `~/Desktop/Husk.ipa`.
+
+`tools/regress/run.sh` plays a set of games on the Mac through the
+translation layer and checks each against a reference screenshot (see the
+top of `tools/regress/cases.txt` for what it needs).
 
 ## Licence
 

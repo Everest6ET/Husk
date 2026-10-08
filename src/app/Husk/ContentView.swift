@@ -187,6 +187,7 @@ struct ContentView: View {
         }
         .onAppear {
             crash.checkPreviousRun()
+            if crash.pending == nil { router.resumeSwitch() }
             if crash.pending == nil, WhatsNew.due { showWhatsNew = true }
             router.openGuest = { showGuestScreen = true }
             router.startAndroid = { startFromLibrary() }

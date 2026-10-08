@@ -32,6 +32,25 @@ enum LibraryRoute: Hashable {
     /// An Android app to open as soon as Android is up: asked for from its page while Android was off.
     @Published var pendingAndroidLaunch: String?
 
+    /// A game to start as soon as its page is up: the one Husk was closed to switch to (see `switchTo`).
+    @Published var autoPlay: String?
+
+    private static let switchKey = "husk.switchToGame"
+
+    /// Only one game can be loaded per run of Husk. Closing Husk to play another remembers which, and the next launch opens
+    /// its page and starts it, so switching is: close, open, playing.
+    func switchTo(_ appID: String) { UserDefaults.standard.set(appID, forKey: Self.switchKey) }
+
+    /// At launch: the game Husk was closed to switch to, opened and started.
+    func resumeSwitch() {
+        guard let id = UserDefaults.standard.string(forKey: Self.switchKey) else { return }
+        UserDefaults.standard.removeObject(forKey: Self.switchKey)
+        HuskLog.log("ui", "opening \(id), which Husk was closed to switch to")
+        tab = .library
+        library = [.game(id)]
+        autoPlay = id
+    }
+
     /// Show Android's own screen. Set by the root view.
     var openGuest: () -> Void = {}
     /// Start Android, or turn JIT on first when it is off. Set by the root view.

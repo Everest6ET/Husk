@@ -197,13 +197,15 @@ struct GamePage: View {
         }
         .confirmationDialog("Close Husk?", isPresented: $confirmQuit, titleVisibility: .visible) {
             Button("Close Husk") {
-                // The game that is loaded is closed with Husk, which is the normal way out for it, not a crash.
+                // The game that is loaded is closed with Husk, which is the normal way out for it, not a crash; and this
+                // one starts by itself when Husk is opened again.
+                Router.shared.switchTo(app.id)
                 CrashReport.gameEnded()
                 HuskLog.flushNow()
                 exit(0)
             }
         } message: {
-            Text("\(blockedBy ?? "The other game") is still loaded and only one game can run per session. Husk closes; open it again and \(app.label) is ready to play.")
+            Text("\(blockedBy ?? "The other game") is still loaded and only one game can run per session. Husk closes; open it again and \(app.label) starts by itself.")
         }
         .confirmationDialog("Remove \(app.label)?", isPresented: $confirmRemove, titleVisibility: .visible) {
             Button("Remove", role: .destructive) {
@@ -214,6 +216,12 @@ struct GamePage: View {
             Text("The game and everything it saved here are deleted from Husk.")
         }
         .id(jit.attachGeneration)
+        .onAppear {
+            // Kept until JIT is on: this page is rebuilt when it attaches (.id above), and plays then.
+            guard Router.shared.autoPlay == app.id, Launcher.jitOn, blockedBy == nil else { return }
+            Router.shared.autoPlay = nil
+            play()
+        }
     }
 
     /// Play: with Geode on, whatever it is missing (a newer release, its resources) is fetched first.

@@ -25,8 +25,16 @@ enum WhatsNew {
              detail: "When a game takes Husk down, the next launch says what happened and gives you a report to share."),
         Item(symbol: "checkmark.circle.fill", title: "Know what works",
              detail: "The library marks each game with how it did last time: it plays, it crashed, or it did not start."),
+        Item(symbol: "gamecontroller.fill", title: "Godot games",
+             detail: "Games made with Godot 3 and 4 now run in the Translation Layer."),
+        Item(symbol: "slider.horizontal.below.square.and.square.filled", title: "Your own controls",
+             detail: "Move, resize and hide the on-screen controller's buttons, for each game."),
+        Item(symbol: "keyboard.fill", title: "Typing in Minecraft",
+             detail: "Chat, sign and world-name fields bring up the keyboard."),
+        Item(symbol: "arrow.left.arrow.right", title: "Switching games",
+             detail: "Close Husk to play another game, and it starts by itself when Husk opens."),
         Item(symbol: "puzzlepiece.extension.fill", title: "Geode",
-             detail: "Mods for Geometry Dash, turned on from the game's settings."),
+             detail: "Mods for Geometry Dash, Geode 5 included, turned on from the game's settings."),
     ]
 
     private static let seenKey = "husk.whatsNew.seen"
