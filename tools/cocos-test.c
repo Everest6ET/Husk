@@ -394,6 +394,14 @@ static void ec_bisect2(void)
     }
 }
 
+static void *start_thread(void *arg)
+{
+    pthread_setname_np("husk-native-start");
+    if (!tl_cocos_start(arg) || !tl_cocos_run()) { fprintf(stderr, "cocos: start failed\n"); return NULL; }
+    if (getenv("TL_START_THREAD_KEEP")) for (;;) pause();     /* what the app does now */
+    return NULL;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) { fprintf(stderr, "usage: %s <apk> [seconds] [width height]\n", argv[0]); return 2; }
@@ -430,8 +438,18 @@ int main(int argc, char **argv)
         if (system(cmd)) fprintf(stderr, "geode: could not copy the resources\n");
     }
     if (getenv("TL_GEODE")) tl_geode_configure(getenv("TL_GEODE"), getenv("TL_GEODE_LAUNCHER"), cfg.data_dir, getenv("TL_GD_VERSION") ? atoi(getenv("TL_GD_VERSION")) : 40);
-    if (!tl_cocos_start(&cfg)) { fprintf(stderr, "cocos: start failed\n"); return 1; }
-    if (!tl_cocos_run()) { fprintf(stderr, "cocos: run failed\n"); return 1; }
+    /* TL_START_THREAD=1: start the game on a thread that ends once it has, as the app's launch thread did before it was kept
+     * (a Geode 5 crash: thread-local cleanup on that thread's exit). */
+    if (getenv("TL_START_THREAD")) {
+        static tl_cocos_config c2; c2 = cfg;
+        pthread_t st;
+        pthread_create(&st, NULL, start_thread, &c2);
+        if (getenv("TL_START_THREAD_KEEP")) pthread_detach(st);
+        else { pthread_join(st, NULL); fprintf(stderr, "cocos: the start thread has ended\n"); }
+    } else {
+        if (!tl_cocos_start(&cfg)) { fprintf(stderr, "cocos: start failed\n"); return 1; }
+        if (!tl_cocos_run()) { fprintf(stderr, "cocos: run failed\n"); return 1; }
+    }
     if (getenv("TL_SSL_PROBE")) install_ssl_probes();
     if (getenv("TL_CRYPTO_TEST")) crypto_selftest();
     if (getenv("TL_BN_TEST")) bn_selftest();

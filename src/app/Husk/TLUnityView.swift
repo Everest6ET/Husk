@@ -88,6 +88,9 @@ final class TLUnityUIView: UIView, UIKeyInput {
         } else if engine == .sdl {
             TLUnityUIView.cocosView = self
             TLUnityUIView.installSDLKeyboardHandler()
+        } else if engine == .minecraft {
+            TLUnityUIView.cocosView = self
+            TLUnityUIView.installGameActivityKeyboardHandler()
         }
         // The GPU is not the app's while it is in the background: stop drawing, and carry on when it returns.
         NotificationCenter.default.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: .main) { _ in
@@ -205,7 +208,7 @@ final class TLUnityUIView: UIView, UIKeyInput {
 
     /// A game asks for the keyboard when its text field is tapped. The keyboard belongs to this view; what it types goes
     /// to the game, and a strip above the keyboard shows the text, because in landscape the keyboard covers the game's field.
-    override var canBecomeFirstResponder: Bool { engine == .cocos || engine == .sdl }
+    override var canBecomeFirstResponder: Bool { engine == .cocos || engine == .sdl || engine == .minecraft }
     var hasText: Bool { true }
     var autocorrectionType: UITextAutocorrectionType = .no
     var autocapitalizationType: UITextAutocapitalizationType = .none
@@ -241,26 +244,30 @@ final class TLUnityUIView: UIView, UIKeyInput {
         bar.addSubview(done)
         return bar
     }()
-    override var inputAccessoryView: UIView? { engine == .cocos || engine == .sdl ? keyboardBar : nil }
+    override var inputAccessoryView: UIView? { engine == .cocos || engine == .sdl || engine == .minecraft ? keyboardBar : nil }
 
     func insertText(_ text: String) {
         if text == "\n" { finishTyping(); return }
         typed += text
         typedLabel.text = typed
-        if engine == .sdl { husk_sdl_commit_text(text) } else { husk_cocos_insert_text(text) }
+        if engine == .sdl { husk_sdl_commit_text(text) } else if engine == .minecraft { husk_ga_insert_text(text) } else { husk_cocos_insert_text(text) }
     }
 
     func deleteBackward() {
         if !typed.isEmpty { typed.removeLast() }
         typedLabel.text = typed
-        if engine == .sdl { husk_sdl_key(67, 1); husk_sdl_key(67, 0) } else { husk_cocos_delete_backward() }   // KEYCODE_DEL
+        if engine == .sdl { husk_sdl_key(67, 1); husk_sdl_key(67, 0) }   // KEYCODE_DEL
+        else if engine == .minecraft { husk_ga_delete_backward() }
+        else { husk_cocos_delete_backward() }
     }
 
     private func setTyped(_ text: String) { typed = text; typedLabel.text = text }
 
     /// Return, or the Done button: what Android's "done" action does -- the game gets a newline, and the keyboard goes.
     private func finishTyping() {
-        if engine == .sdl { husk_sdl_key(66, 1); husk_sdl_key(66, 0) } else { husk_cocos_insert_text("\n") }   // KEYCODE_ENTER
+        if engine == .sdl { husk_sdl_key(66, 1); husk_sdl_key(66, 0) }   // KEYCODE_ENTER
+        else if engine == .minecraft { husk_ga_editor_action() }        // the field's own action: send the chat, name the world
+        else { husk_cocos_insert_text("\n") }
         resignFirstResponder()
     }
 
@@ -281,6 +288,23 @@ final class TLUnityUIView: UIView, UIKeyInput {
                         let seed = text.map { String(cString: $0) } ?? ""
                         DispatchQueue.main.async { TLUnityUIView.cocosView?.setTyped(seed) }
                     }
+                    view.becomeFirstResponder()
+                } else {
+                    view.resignFirstResponder()
+                }
+            }
+        }
+    }
+
+    /// A GameActivity game's requests (Minecraft's text fields, through GameTextInput): 1 shows the keyboard, 2 hides it.
+    static func installGameActivityKeyboardHandler() {
+        husk_ga_set_keyboard_handler { action in
+            DispatchQueue.main.async {
+                guard let view = TLUnityUIView.cocosView else { return }
+                if action == 1 {
+                    var buf = [CChar](repeating: 0, count: 16384)
+                    husk_ga_text(&buf, UInt(buf.count))
+                    view.setTyped(String(cString: buf))
                     view.becomeFirstResponder()
                 } else {
                     view.resignFirstResponder()

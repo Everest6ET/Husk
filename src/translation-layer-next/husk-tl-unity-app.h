@@ -65,6 +65,12 @@ void husk_sdl_commit_text(const char *utf8);
 void husk_sdl_key(int keycode, int down);
 /* Soft keyboard for a cocos2d-x game. The handler is told (on the game's GL thread) 0 = toggle, 1 = show, 2 = hide. */
 void husk_cocos_set_keyboard_handler(void (*handler)(int action));
+/* Soft keyboard for a GameActivity game (Minecraft): 1 = show, 2 = hide; the field's text is kept on the C side. */
+void husk_ga_set_keyboard_handler(void (*handler)(int action));
+void husk_ga_insert_text(const char *utf8);
+void husk_ga_delete_backward(void);
+void husk_ga_editor_action(void);
+void husk_ga_text(char *out, unsigned long cap);
 void husk_cocos_insert_text(const char *utf8);
 void husk_cocos_delete_backward(void);
 void husk_cocos_key_down(int keycode);

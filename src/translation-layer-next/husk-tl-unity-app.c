@@ -307,7 +307,13 @@ static void *launch_thread(void *arg)
     atomic_store(&A.state, HUSK_UNITY_RUNNING);
     pthread_t hb;
     if (pthread_create(&hb, NULL, heartbeat_thread, NULL) == 0) pthread_detach(hb);
-    return NULL;
+    /*
+     * This thread loaded the game's libraries and ran their JNI_OnLoad, which on Android is the UI thread, and that thread
+     * never ends. Some code relies on it: Geode 5 takes this thread as the game's main thread and keeps thread-local state
+     * on it, and ending the thread ran that state's cleanup, which freed what was not its to free and took Husk down
+     * (Geometry Dash 2.2081, a SIGTRAP from libmalloc right after the sound started). So it stays, asleep.
+     */
+    for (;;) pause();
 }
 
 static bool launch(int engine, const char *apk, const char *data_dir, void *metal_layer, int width, int height,
@@ -404,6 +410,14 @@ void husk_cocos_insert_text(const char *utf8) { if (atomic_load(&A.state) == HUS
 void husk_cocos_delete_backward(void) { if (atomic_load(&A.state) == HUSK_UNITY_RUNNING && A.engine == ENGINE_COCOS) tl_cocos_delete_backward(); }
 void husk_cocos_key_down(int keycode) { if (atomic_load(&A.state) == HUSK_UNITY_RUNNING && A.engine == ENGINE_COCOS) tl_cocos_key_down(keycode); }
 void husk_cocos_request_text(void (*cb)(const char *utf8)) { if (atomic_load(&A.state) == HUSK_UNITY_RUNNING && A.engine == ENGINE_COCOS) tl_cocos_request_content_text(cb); }
+
+/* Minecraft and other GameActivity games: GameTextInput's field, typed into from the iPhone's keyboard. */
+void husk_ga_set_keyboard_handler(void (*handler)(int action)) { tl_ga_set_keyboard_handler(handler); }
+static bool ga_running(void) { return atomic_load(&A.state) == HUSK_UNITY_RUNNING && A.engine == ENGINE_GAMEACTIVITY; }
+void husk_ga_insert_text(const char *utf8) { if (ga_running()) tl_ga_insert_text(utf8); }
+void husk_ga_delete_backward(void) { if (ga_running()) tl_ga_delete_backward(); }
+void husk_ga_editor_action(void) { if (ga_running()) tl_ga_editor_action(); }
+void husk_ga_text(char *out, unsigned long cap) { if (cap) out[0] = 0; if (ga_running()) tl_ga_text_copy(out, cap); }
 
 const char *husk_native_loaded_apk(void) { return atomic_load(&A.state) == HUSK_UNITY_IDLE ? NULL : A.apk; }
 
