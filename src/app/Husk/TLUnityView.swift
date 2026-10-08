@@ -421,6 +421,10 @@ struct TLCocosAttemptView: View {
     @State private var stats = "starting"
     @ObservedObject private var pads = HuskGamepads.shared
     @StateObject private var virtualPad = VirtualPad()
+    /// Where the player has put the pad's controls in this game, and whether they are moving them now.
+    @State private var padLayout = PadLayout()
+    @State private var editingPad = false
+    @State private var padSelected: String?
     /// This game's own settings (TLAppSettings), read once as the screen opens.
     @State private var settings: TLAppSettings
     /// Nothing over the picture. Starts as the game's "Hide the interface" setting says, and three fingers tapped together flip it.
@@ -520,9 +524,12 @@ struct TLCocosAttemptView: View {
                         // A game whose menus answer only a controller: with none paired, one on the glass. Kept in place and
                         // connected while the interface is hidden, so the game does not see a controller come and go.
                         if padOffered, settings.padShown, model.state == Int32(HUSK_UNITY_RUNNING) {
-                            VirtualPadView(pad: virtualPad, opacity: settings.padOpacity, haptics: settings.haptics)
-                                .opacity(uiHidden ? 0 : 1)
-                                .allowsHitTesting(!uiHidden)
+                            VirtualPadView(pad: virtualPad, opacity: settings.padOpacity, haptics: settings.haptics,
+                                           layout: padLayout, editing: editingPad, selected: $padSelected,
+                                           onChange: { padLayout = $0; padLayout.save(app.id) })
+                                .opacity(uiHidden && !editingPad ? 0 : 1)
+                                .allowsHitTesting(!uiHidden || editingPad)
+                                .overlay(alignment: .center) { if editingPad { padEditor } }
                         }
                     }
                     .ignoresSafeArea(.container, edges: cleanLayout ? .all : [.horizontal, .bottom])
@@ -554,6 +561,7 @@ struct TLCocosAttemptView: View {
             UIApplication.shared.isIdleTimerDisabled = settings.keepAwake
             if cleanLayout { showHint() }
             CrashReport.gameStarted(app)
+            padLayout = PadLayout.load(app.id)
             model.start()
         }
         // What happened, for the library: ten seconds of frames is a game that plays; a refusal is one that did not start.
@@ -571,6 +579,40 @@ struct TLCocosAttemptView: View {
         }
     }
 
+    /// While the pad is being edited: what to do with the control picked, in a small panel in the middle of the screen.
+    private var padEditor: some View {
+        VStack(spacing: 10) {
+            if let id = padSelected {
+                Text(PadLayout.name(id)).font(.system(size: 14, weight: .semibold)).foregroundStyle(.white)
+                HStack(spacing: 10) {
+                    Image(systemName: "minus.magnifyingglass").foregroundStyle(.white.opacity(0.7))
+                    Slider(value: Binding(get: { Double(padLayout[id].scale) },
+                                          set: { padLayout[id].scale = CGFloat($0) }),
+                           in: 0.6...1.8, onEditingChanged: { if !$0 { padLayout.save(app.id) } })
+                        .frame(width: 180)
+                    Image(systemName: "plus.magnifyingglass").foregroundStyle(.white.opacity(0.7))
+                }
+                HStack(spacing: 10) {
+                    Button(padLayout[id].hidden ? "Show" : "Hide") { padLayout[id].hidden.toggle(); padLayout.save(app.id) }
+                    Button("Reset") { padLayout[id] = PadLayout.Adjust(); padLayout.save(app.id) }
+                }
+                .buttonStyle(.bordered).tint(.white)
+            } else {
+                Text("Drag a control to move it, or tap one to resize or hide it.")
+                    .font(.system(size: 13, weight: .medium)).foregroundStyle(.white)
+                    .multilineTextAlignment(.center).frame(maxWidth: 260)
+            }
+            HStack(spacing: 10) {
+                Button("Reset All", role: .destructive) { padLayout = PadLayout(); padSelected = nil; padLayout.save(app.id) }
+                Button("Done") { editingPad = false; padSelected = nil }.buttonStyle(.borderedProminent)
+            }
+            .buttonStyle(.bordered)
+        }
+        .padding(16)
+        .background(.black.opacity(0.75), in: RoundedRectangle(cornerRadius: 16))
+        .font(.system(size: 13, weight: .semibold))
+    }
+
     private var bar: some View {
         HStack(spacing: 12) {
             Button { dismiss() } label: {
@@ -586,10 +628,17 @@ struct TLCocosAttemptView: View {
                     .font(.system(size: 11, weight: .medium)).foregroundStyle(.white.opacity(0.7)).lineLimit(1)
             }
             if padOffered {
-                Button { settings.padShown.toggle(); settings.save(app.id) } label: {
+                Button { settings.padShown.toggle(); settings.save(app.id); if !settings.padShown { editingPad = false } } label: {
                     Label(settings.padShown ? "Hide pad" : "Pad", systemImage: "gamecontroller").font(.system(size: 12, weight: .semibold))
                 }
                 .tint(.white)
+                if settings.padShown {
+                    Button { padSelected = nil; editingPad.toggle() } label: {
+                        Label(editingPad ? "Done" : "Edit pad", systemImage: "slider.horizontal.below.square.and.square.filled")
+                            .font(.system(size: 12, weight: .semibold))
+                    }
+                    .tint(editingPad ? .yellow : .white)
+                }
             }
             if settings.showStats, model.state == Int32(HUSK_UNITY_RUNNING) {
                 Text(stats).font(.technical(11)).foregroundStyle(.white.opacity(0.7)).lineLimit(1)
