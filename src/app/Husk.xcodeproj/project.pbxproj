@@ -967,6 +967,7 @@
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-lz",
+					"-lresolv",
 					"-framework",
 					AudioToolbox,
 					"-framework",
@@ -1010,6 +1011,7 @@
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-lz",
+					"-lresolv",
 					"-framework",
 					AudioToolbox,
 					"-framework",

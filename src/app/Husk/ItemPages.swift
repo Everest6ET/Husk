@@ -216,6 +216,19 @@ struct GamePage: View {
         .id(jit.attachGeneration)
     }
 
+    /// Play: with Geode on, whatever it is missing (a newer release, its resources) is fetched first.
+    private func play() {
+        guard TLAppSettings.load(app.id).geode, case .ready = GeodeSupport.shared.current(app) else {
+            if TLAppSettings.load(app.id).geode {
+                Task { await GeodeSupport.shared.prepare(app); playing = true }
+            } else {
+                playing = true
+            }
+            return
+        }
+        playing = true
+    }
+
     /// This game's engine is loaded in this run of Husk, so its files may be open: no restoring under it.
     private var loadedNow: Bool {
         guard let loaded = husk_native_loaded_apk().map({ String(cString: $0) }) else { return false }
@@ -287,7 +300,7 @@ struct GamePage: View {
                 BigButton(title: "Turn On JIT to Play", systemImage: "bolt.fill", action: turnOnJIT)
             }
         } else {
-            BigButton(title: runs ? "Play" : "Try to Run", systemImage: "play.fill", prominent: runs) { playing = true }
+            BigButton(title: runs ? "Play" : "Try to Run", systemImage: "play.fill", prominent: runs) { play() }
         }
     }
 }

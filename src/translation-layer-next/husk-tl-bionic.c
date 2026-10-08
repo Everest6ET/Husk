@@ -171,8 +171,17 @@ static int bionic___system_property_read(const void *pi, char *name, char *value
     return (int)strlen(p->v);
 }
 
+int tl_dns_servers(char out[][64], int max);
+
 static int bionic___system_property_get(const char *name, char *value)
 {
+    /* net.dns1, net.dns2: the phone's DNS servers (see tl_dns_servers) */
+    if (name && value && !strncmp(name, "net.dns", 7) && name[7] >= '1' && name[7] <= '4' && !name[8]) {
+        char servers[4][64];
+        int n = tl_dns_servers(servers, 4), i = name[7] - '1';
+        snprintf(value, 92, "%s", i < n ? servers[i] : "");
+        return (int)strlen(value);
+    }
     const char *v = name ? tl_sysprop(name) : NULL;
     if (!value) return 0;
     if (!v) { value[0] = 0; return 0; }

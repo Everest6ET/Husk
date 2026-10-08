@@ -29,6 +29,8 @@ final class GeodeSupport: ObservableObject {
     nonisolated private static func releaseZip(_ appID: String) -> URL { folder(appID).appendingPathComponent("geode-android64.zip") }
     nonisolated private static func launcherAPK(_ appID: String) -> URL { folder(appID).appendingPathComponent("geode-launcher.apk") }
     nonisolated private static func versionFile(_ appID: String) -> URL { folder(appID).appendingPathComponent("version.txt") }
+    /// The loader's resources, a release file of their own since Geode 5 (husk-tl-geode.c looks for it beside the release).
+    nonisolated private static func resourcesZip(_ appID: String) -> URL { folder(appID).appendingPathComponent("geode-resources.zip") }
     /// Written once the downloaded launcher has been seen to carry the 64-bit C++ runtime (the 32-bit build does not).
     nonisolated private static func launcherChecked(_ appID: String) -> URL { folder(appID).appendingPathComponent("launcher-arm64.ok") }
 
@@ -68,6 +70,7 @@ final class GeodeSupport: ObservableObject {
         if let s = status[app.id] { return s }
         if let v = try? String(contentsOf: Self.versionFile(app.id), encoding: .utf8),
            FileManager.default.fileExists(atPath: Self.releaseZip(app.id).path),
+           FileManager.default.fileExists(atPath: Self.resourcesZip(app.id).path),
            Self.launcherOnDisk(app.id) != nil {
             return .ready(v.trimmingCharacters(in: .whitespacesAndNewlines))
         }
@@ -90,9 +93,21 @@ final class GeodeSupport: ObservableObject {
             // Geode's index: the newest Geode release for this game version.
             let (release, zipURL) = try await Self.latestRelease(versionCode: versionCode)
             let have = (try? String(contentsOf: Self.versionFile(app.id), encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
-            if have != release || !FileManager.default.fileExists(atPath: Self.releaseZip(app.id).path) {
+            let haveResources = FileManager.default.fileExists(atPath: Self.resourcesZip(app.id).path)
+            if have != release || !FileManager.default.fileExists(atPath: Self.releaseZip(app.id).path) || !haveResources {
                 status[app.id] = .working("Downloading Geode \(release)…")
                 try await Self.download(zipURL, to: Self.releaseZip(app.id))
+                // Its resources, from the release on GitHub. Geode 4 kept them inside the release zip and has no such file,
+                // so a missing one is not an error.
+                try? FileManager.default.removeItem(at: Self.resourcesZip(app.id))
+                let tag = release.hasPrefix("v") ? release : "v" + release
+                if let res = URL(string: "https://github.com/geode-sdk/geode/releases/download/\(tag)/resources.zip") {
+                    do { try await Self.download(res, to: Self.resourcesZip(app.id)) }
+                    catch { HuskLog.log("geode", "no separate resources for Geode \(release): \(error.localizedDescription)") }
+                }
+                if !FileManager.default.fileExists(atPath: Self.resourcesZip(app.id).path) {
+                    try Data().write(to: Self.resourcesZip(app.id))      // checked once: this release has none
+                }
                 try release.write(to: Self.versionFile(app.id), atomically: true, encoding: .utf8)
             }
 

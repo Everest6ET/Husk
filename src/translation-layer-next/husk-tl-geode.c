@@ -170,6 +170,27 @@ static bool unpack_release(const char *zip_path, char *so_out, size_t n)
     }
     tl_zip_close(&z);
     if (!have_so) tl_log_line("geode: %s has no Geode.android64.so", zip_path);
+
+    /* Since Geode 5 the loader's resources (its sprite sheets, fonts, sounds) are a release file of their own, resources.zip,
+     * which the app downloads beside the release as geode-resources.zip. Without them Geode stops on its loading screen at
+     * "Downloading Geode Resources" and tries GitHub itself. Its entries are flat: they go where the launcher puts them. */
+    char rzip[1100];
+    snprintf(rzip, sizeof(rzip), "%s", zip_path);
+    char *slash = strrchr(rzip, '/');
+    snprintf(slash ? slash + 1 : rzip, sizeof(rzip) - (size_t)(slash ? slash + 1 - rzip : 0), "geode-resources.zip");
+    struct stat rs;
+    if (stat(rzip, &rs) == 0 && tl_zip_open(&z, rzip, err, sizeof(err))) {
+        int n = 0;
+        for (size_t i = 0; i < z.count; i++) {
+            const tl_zip_entry *e = &z.entries[i];
+            size_t len = strlen(e->name);
+            if (!len || e->name[len - 1] == '/' || strchr(e->name, '/') || strstr(e->name, "..")) continue;
+            snprintf(dest, sizeof(dest), "%s/%s", res, e->name);
+            if (extract(&z, e, dest)) n++;
+        }
+        tl_zip_close(&z);
+        tl_log_line("geode: %d loader resource file(s) from %s", n, rzip);
+    }
     return have_so;
 }
 

@@ -86,6 +86,8 @@ targets:
         OTHER_LDFLAGS:
           - "$(inherited)"
           - "-lz"
+          # libresolv: the phone's DNS servers, for games that resolve names themselves (Geode's c-ares).
+          - "-lresolv"
           - "-framework"
           - "AudioToolbox"
           - "-framework"
