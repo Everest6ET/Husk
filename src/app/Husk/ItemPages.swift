@@ -116,7 +116,11 @@ struct GamePage: View {
             Section {
                 PageHero(item: .game(app), subtitle: subtitle) { primary }
             } footer: {
-                if let other = blockedBy {
+                if isGeodeLauncher {
+                    Text("This is Geode's Android launcher. On Husk, Geode runs inside Geometry Dash instead: turn it on here "
+                       + "(or in Geometry Dash's settings, under Mods), then start Geometry Dash and use Geode's button on its "
+                       + "main menu to get mods. This APK supplies a library Geode needs, so keep it.")
+                } else if let other = blockedBy {
                     Text("\(other) is running. A game cannot be closed once it has started, so close Husk completely "
                        + "(swipe it away) and open it again to play \(app.label).")
                 } else if !runs {
@@ -168,9 +172,26 @@ struct GamePage: View {
         .id(jit.attachGeneration)
     }
 
+    /// Geode's Android launcher, added as if it were a game: it is a whole Android app, which Husk does not run. On Husk Geode
+    /// is turned on from Geometry Dash's own settings, and this APK only lends it a library.
+    private var isGeodeLauncher: Bool { app.packageName == GeodeSupport.launcherPackage }
+    private var geometryDash: TLApp? { store.apps.first { $0.packageName == GeodeSupport.gamePackage } }
+
     @ViewBuilder
     private var primary: some View {
-        if blockedBy != nil {
+        if isGeodeLauncher {
+            if let gd = geometryDash {
+                BigButton(title: TLAppSettings.load(gd.id).geode ? "Geode Is On for Geometry Dash" : "Turn On Geode for Geometry Dash",
+                          systemImage: "puzzlepiece.extension.fill", prominent: !TLAppSettings.load(gd.id).geode) {
+                    var s = TLAppSettings.load(gd.id)
+                    s.geode = true
+                    s.save(gd.id)
+                    Task { await GeodeSupport.shared.prepare(gd) }
+                }
+            } else {
+                BigButton(title: "Add Geometry Dash First", systemImage: "plus", prominent: false) { }.disabled(true)
+            }
+        } else if blockedBy != nil {
             BigButton(title: "Close Husk to Play", systemImage: "xmark.circle", prominent: false) { }
                 .disabled(true)
         } else if !Launcher.jitOn {

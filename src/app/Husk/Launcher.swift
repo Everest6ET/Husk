@@ -534,7 +534,9 @@ struct LibraryScreen: View {
 
     private func caption(_ item: LibraryItem) -> String? {
         switch item {
-        case .game(let g): return g.report?.canRun == true ? nil : "May not run"
+        case .game(let g):
+            if g.packageName == GeodeSupport.launcherPackage { return "Geode" }
+            return g.report?.canRun == true ? nil : "May not run"
         case .android:
             if AndroidHost.shared.isReady { return "Running" }
             return guest.state == .ready ? nil : "Not installed"

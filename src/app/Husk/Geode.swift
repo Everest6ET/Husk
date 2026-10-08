@@ -12,6 +12,7 @@ import Foundation
 final class GeodeSupport: ObservableObject {
     static let shared = GeodeSupport()
     static let gamePackage = "com.robtopx.geometryjump"
+    static let launcherPackage = "com.geode.launcher"
 
     enum Status: Equatable {
         case idle
@@ -34,16 +35,32 @@ final class GeodeSupport: ObservableObject {
     nonisolated static func files(appDir: String) -> (zip: String, launcher: String)? {
         let id = (appDir as NSString).lastPathComponent
         guard TLAppSettings.load(id).geode else { return nil }
-        let zip = releaseZip(id).path, apk = launcherAPK(id).path
-        guard FileManager.default.fileExists(atPath: zip), FileManager.default.fileExists(atPath: apk) else { return nil }
+        let zip = releaseZip(id).path
+        guard FileManager.default.fileExists(atPath: zip), let apk = launcherOnDisk(id) else { return nil }
         return (zip, apk)
+    }
+
+    /// The launcher APK: the one downloaded for this game, or one added to the library as an app of its own.
+    nonisolated private static func launcherOnDisk(_ appID: String) -> String? {
+        let mine = launcherAPK(appID).path
+        if FileManager.default.fileExists(atPath: mine) { return mine }
+        let root = TranslationLayer.root
+        for dir in (try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? [] {
+            let pkg = (try? String(contentsOf: dir.appendingPathComponent("package.txt"), encoding: .utf8))?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard pkg == launcherPackage,
+                  let apk = (try? FileManager.default.contentsOfDirectory(atPath: dir.path))?.first(where: { $0.hasSuffix(".apk") })
+            else { continue }
+            return dir.appendingPathComponent(apk).path
+        }
+        return nil
     }
 
     func current(_ app: TLApp) -> Status {
         if let s = status[app.id] { return s }
         if let v = try? String(contentsOf: Self.versionFile(app.id), encoding: .utf8),
            FileManager.default.fileExists(atPath: Self.releaseZip(app.id).path),
-           FileManager.default.fileExists(atPath: Self.launcherAPK(app.id).path) {
+           Self.launcherOnDisk(app.id) != nil {
             return .ready(v.trimmingCharacters(in: .whitespacesAndNewlines))
         }
         return .idle
@@ -71,7 +88,7 @@ final class GeodeSupport: ObservableObject {
                 try release.write(to: Self.versionFile(app.id), atomically: true, encoding: .utf8)
             }
 
-            if !FileManager.default.fileExists(atPath: Self.launcherAPK(app.id).path) {
+            if Self.launcherOnDisk(app.id) == nil {
                 status[app.id] = .working("Downloading Geode's launcher…")
                 try await Self.download(try await Self.launcherURL(), to: Self.launcherAPK(app.id))
             }

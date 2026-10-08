@@ -23,6 +23,28 @@
         "size": 68615
       }
     ],
+    "com.geode.launcher": [
+      {
+        "file": "com.geode.launcher_screenshot1.jpg",
+        "sha256": "f82becb73adea98a6b83bb86ccaee7da9d1b319257e71ac90351acffe19d52d2",
+        "size": 168355
+      },
+      {
+        "file": "com.geode.launcher_screenshot2.jpg",
+        "sha256": "51b14a571f2be559c3d032f8db84d84b9206535ce04350a2f7641dcc39fbb5be",
+        "size": 223660
+      },
+      {
+        "file": "com.geode.launcher_screenshot3.jpg",
+        "sha256": "cbb9ed38ab6444ddfe7abfcc445b8f3d9824ee5b2df339cb1dc3ece13f77c537",
+        "size": 216184
+      },
+      {
+        "file": "com.geode.launcher_screenshot4.jpg",
+        "sha256": "c68316ba74b935bcd60423f66b204264962a5be0bf8bf2a193c87c38c2e65ce1",
+        "size": 207293
+      }
+    ],
     "com.kiloo.subwaysurf": [
       {
         "file": "com.kiloo.subwaysurf_screenshot1.jpg",
