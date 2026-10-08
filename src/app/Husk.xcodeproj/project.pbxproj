@@ -25,6 +25,7 @@
 		14F4718B87230D502748C4D3 /* StoreView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 685DEBAD91D2650A85E7BA19 /* StoreView.swift */; };
 		161096C4354197AC83569ECB /* HuskAppIcon.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5236C5746D2CDE06C5D438BB /* HuskAppIcon.swift */; };
 		1624D7BE5D25504F10E6D705 /* Shaders.metal in Sources */ = {isa = PBXBuildFile; fileRef = A523DB1FEA5BC026771035C7 /* Shaders.metal */; };
+		17D78A0F97F0C17E617136E3 /* libFilePickerFix.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = F44A2196AA5F6271BF893660 /* libFilePickerFix.dylib */; };
 		1A97D1F8D5FAFEB3145D4AE5 /* TranslationLayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4BD6ABD20471B2CACF60ABD4 /* TranslationLayer.swift */; };
 		1C5BD0A437A2119F8CAFF945 /* husk-tl-codewrite.c in Sources */ = {isa = PBXBuildFile; fileRef = 6492416C2454F2656C7DB40A /* husk-tl-codewrite.c */; };
 		1D576C7E088182B888F811BB /* LICENSES-rppairing-crates.txt in Resources */ = {isa = PBXBuildFile; fileRef = D0A9148DED6969D97D56406C /* LICENSES-rppairing-crates.txt */; };
@@ -84,6 +85,7 @@
 		81557CC939994CE6350E1C81 /* HuskKeyboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 392BE39CE162757FDA225452 /* HuskKeyboard.swift */; };
 		818D7D89195D77AA70E27DCF /* husk-tl-jni-hle.c in Sources */ = {isa = PBXBuildFile; fileRef = 54E1C79EFAAEBBC6992A36A6 /* husk-tl-jni-hle.c */; };
 		853E83FF7FF5B9A7FDE5E638 /* BootScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F40192B3EDAD27D2CBFFC2F /* BootScreen.swift */; };
+		8573CC8F200AA844B23AD4F9 /* libFilePickerFix.dylib in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = F44A2196AA5F6271BF893660 /* libFilePickerFix.dylib */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		8586F8338A93D7526FAEAD97 /* husk-tl-xmem.c in Sources */ = {isa = PBXBuildFile; fileRef = 42CBC0D7ACAB400BDDFD7F9E /* husk-tl-xmem.c */; };
 		8B5DED1C7C866D7140418522 /* HuskJITMessages.swift in Sources */ = {isa = PBXBuildFile; fileRef = 198FA3419B26F852A2B05ED9 /* HuskJITMessages.swift */; };
 		8C743346878007F8D22CEA0A /* AppSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = 15D08F1730303C74C1B7DE23 /* AppSource.swift */; };
@@ -164,6 +166,7 @@
 			dstSubfolderSpec = 10;
 			files = (
 				EC8B11F723C188F32B5D9DCA /* libqemu-aarch64-softmmu.dylib in Embed Frameworks */,
+				8573CC8F200AA844B23AD4F9 /* libFilePickerFix.dylib in Embed Frameworks */,
 				0B197878C829D66E77FD7E3F /* libANGLE-shared.dylib in Embed Frameworks */,
 				BC0702C5451118E673E70F6F /* MoltenVK.xcframework in Embed Frameworks */,
 			);
@@ -344,6 +347,7 @@
 		EF6C1917FEC08090833D9CF0 /* JITPairing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JITPairing.swift; sourceTree = "<group>"; };
 		F13D91C39BBC9C52E70E1520 /* husk-tl-dexindex.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "husk-tl-dexindex.h"; sourceTree = "<group>"; };
 		F337AAF2A6860FCB03810AA6 /* HuskGLView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HuskGLView.swift; sourceTree = "<group>"; };
+		F44A2196AA5F6271BF893660 /* libFilePickerFix.dylib */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.dylib"; name = libFilePickerFix.dylib; path = Frameworks/libFilePickerFix.dylib; sourceTree = "<group>"; };
 		F54A47159D39CB8039E9E44E /* JITCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JITCard.swift; sourceTree = "<group>"; };
 		F7FE1E9438A6B743456806DF /* husk-tl-xmem.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "husk-tl-xmem.h"; sourceTree = "<group>"; };
 		FAB8BAA1A1D0AB19EBD6F784 /* WhatsNew.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhatsNew.swift; sourceTree = "<group>"; };
@@ -371,6 +375,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				38E7D6B6947ED3CF1A82BB7D /* libqemu-aarch64-softmmu.dylib in Frameworks */,
+				17D78A0F97F0C17E617136E3 /* libFilePickerFix.dylib in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -468,6 +473,7 @@
 			isa = PBXGroup;
 			children = (
 				3B1406C4A7D0F7E50BCB365B /* libANGLE-shared.dylib */,
+				F44A2196AA5F6271BF893660 /* libFilePickerFix.dylib */,
 				1B29247002CE43A3B9DEC633 /* libqemu-aarch64-softmmu.dylib */,
 				9713186CDCF6F1188BB4ABE1 /* MoltenVK.xcframework */,
 				BBCF8D04E0CEDAB3542C5271 /* StikJIT.xcframework */,
@@ -964,6 +970,7 @@
 					"$(inherited)",
 					"\"../../build/ios-arm64/lib\"",
 					"\"../../build/ios-arm64/sysroot/lib\"",
+					"\"Frameworks\"",
 				);
 				INFOPLIST_FILE = Husk/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -973,6 +980,7 @@
 				LIBRARY_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(SRCROOT)/../../build/ios-arm64/lib",
+					"$(SRCROOT)/Frameworks",
 				);
 				OTHER_LDFLAGS = (
 					"$(inherited)",
@@ -1008,6 +1016,7 @@
 					"$(inherited)",
 					"\"../../build/ios-arm64/lib\"",
 					"\"../../build/ios-arm64/sysroot/lib\"",
+					"\"Frameworks\"",
 				);
 				INFOPLIST_FILE = Husk/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1017,6 +1026,7 @@
 				LIBRARY_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(SRCROOT)/../../build/ios-arm64/lib",
+					"$(SRCROOT)/Frameworks",
 				);
 				OTHER_LDFLAGS = (
 					"$(inherited)",
