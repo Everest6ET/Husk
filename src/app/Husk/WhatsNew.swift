@@ -13,7 +13,7 @@ enum WhatsNew {
     }
 
     /// The version whose notes these are. A build of the same version shows nothing again.
-    static let version = "0.9.5"
+    static let version = "1.0.0"
     static let items: [Item] = [
         Item(symbol: "bag.fill", title: "Google Play",
              detail: "Get games from the Store tab. Play Store downloads, with their split APKs and asset packs, run in the Translation Layer."),
@@ -59,7 +59,7 @@ struct WhatsNewSheet: View {
                 VStack(alignment: .leading, spacing: 26) {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("What's New in Husk \(WhatsNew.version)").font(.largeTitle.weight(.bold))
-                        Text("Everything since 0.9, ahead of 1.0.").foregroundStyle(.secondary)
+                        Text("The first full release.").foregroundStyle(.secondary)
                     }
                     .padding(.top, 36)
                     ForEach(WhatsNew.items) { item in
