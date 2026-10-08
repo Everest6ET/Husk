@@ -8,13 +8,21 @@ enum HuskOrientation {
     static var mask: UIInterfaceOrientationMask = standard
 
     /// Allow only `new`, and turn the screen to it if it is not already there.
-    @MainActor static func set(_ new: UIInterfaceOrientationMask) {
+    ///
+    /// A game's screen asks as it appears, while its full-screen cover is still being presented, and iOS can refuse then
+    /// ("Supported: portrait") because it has not yet asked the cover what it allows. So a refusal is retried a few times,
+    /// a moment apart, for as long as `new` is still what is wanted.
+    @MainActor static func set(_ new: UIInterfaceOrientationMask, attempt: Int = 0) {
         mask = new
         for case let scene as UIWindowScene in UIApplication.shared.connectedScenes {
             var vc = scene.keyWindow?.rootViewController
             while let v = vc { v.setNeedsUpdateOfSupportedInterfaceOrientations(); vc = v.presentedViewController }
             scene.requestGeometryUpdate(.iOS(interfaceOrientations: new)) { error in
-                HuskLog.log("ui", "orientation change refused: \(error.localizedDescription)")
+                HuskLog.log("ui", "orientation change refused (attempt \(attempt + 1)): \(error.localizedDescription)")
+                guard attempt < 5 else { return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    if mask == new { set(new, attempt: attempt + 1) }
+                }
             }
         }
     }

@@ -125,9 +125,18 @@ final class TLUnityUIView: UIView, UIKeyInput {
         if !(engine == .ue4 && launched) { (layer as? CAMetalLayer)?.drawableSize = CGSize(width: w, height: h) }
         // A landscape game is told its size once, when it starts, so it must not start while the screen is still
         // turning: wait for a surface that is wider than it is tall.
-        let ready = engine != .unity ? (portrait ? h > w : w > h) : true
+        // Unity games too: Fruit Ninja is a landscape one. If the screen has not turned after two seconds it is not going to,
+        // and the game starts as it is rather than not at all.
+        if firstLayout == nil, window != nil {
+            firstLayout = Date()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.1) { [weak self] in self?.setNeedsLayout() }
+        }
+        let waited = firstLayout.map { Date().timeIntervalSince($0) > 2 } ?? false
+        let ready = (portrait ? h > w : w > h) || waited
         if !launched, window != nil, ready { launch(width: w, height: h) }
     }
+
+    private var firstLayout: Date?
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
@@ -162,11 +171,12 @@ final class TLUnityUIView: UIView, UIKeyInput {
             try? session.setActive(true)
         }
         HuskLog.log("tl", "native: launching \(apk) at \(width)x\(height) (\(engine == .cocos ? "cocos2d-x" : engine == .minecraft ? "gameactivity" : engine == .sdl ? "sdl" : engine == .ue4 ? "ue4" : engine == .gta ? "gta" : engine == .nativeactivity ? "nativeactivity" : "unity"))")
+        // Splits and the asset pack are part of the app, whatever its engine; the game's libraries and data may be in any of
+        // them (a Google Play install keeps a Unity game's libraries in one split and its data in an asset pack).
+        for extra in extraApks.prefix(3) { husk_native_add_package(extra) }
         let started: Bool
         switch engine {
         case .sdl:
-            // Splits and the asset pack are part of the app; the game's libraries and data may be in any of them.
-            for extra in extraApks.prefix(3) { husk_native_add_package(extra) }
             // The notch and the rounded corners, in the surface's pixels: the game keeps its controls out of them.
             if let inset = window?.safeAreaInsets {
                 let k = contentScaleFactor
