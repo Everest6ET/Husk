@@ -31,8 +31,12 @@ struct StoreView: View {
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     if manager.isSignedIn {
                         Menu {
-                            if let email = manager.session?.email {
-                                Text(email).font(.caption)
+                            if let s = manager.session {
+                                Text(s.isAnonymous ? "Guest Account (Aurora)" : s.email)
+                                    .font(.caption)
+                                if s.isAnonymous {
+                                    Text(s.email).font(.caption2).foregroundStyle(.secondary)
+                                }
                                 Divider()
                             }
                             Button(role: .destructive) {
@@ -41,12 +45,24 @@ struct StoreView: View {
                                 Label("Sign Out", systemImage: "rectangle.portrait.and.arrow.right")
                             }
                         } label: {
-                            Image(systemName: "person.crop.circle")
+                            Image(systemName: manager.session?.isAnonymous == true ? "person.badge.shield.checkmark" : "person.crop.circle")
                                 .font(.system(size: 18))
                         }
                     } else {
-                        Button("Sign In") {
-                            showSignIn = true
+                        Menu {
+                            Button {
+                                Task { await manager.signInAsGuest() }
+                            } label: {
+                                Label("Use Guest Account (Aurora)", systemImage: "person.crop.circle.badge.checkmark")
+                            }
+                            Button {
+                                showSignIn = true
+                            } label: {
+                                Label("Sign In with Google", systemImage: "person.badge.key")
+                            }
+                        } label: {
+                            Text("Sign In")
+                                .font(.subheadline.weight(.semibold))
                         }
                     }
                 }
@@ -92,27 +108,57 @@ struct StoreView: View {
                     .font(.title2.weight(.bold))
                     .foregroundStyle(Theme.text)
 
-                Text("Sign in with your Google Account to browse, install free apps, and download apps you already own.")
+                Text("Browse and download apps using an anonymous Aurora guest account, or sign in with your Google account.")
                     .font(.subheadline)
                     .foregroundStyle(Theme.textDim)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 32)
             }
 
-            Button {
-                showSignIn = true
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: "person.badge.key.fill")
-                    Text("Sign In with Google")
+            if manager.isLoading {
+                VStack(spacing: 12) {
+                    ProgressView()
+                    Text(manager.statusMessage ?? "Signing in…")
+                        .font(.footnote)
+                        .foregroundStyle(Theme.textDim)
                 }
-                .font(.headline)
-                .frame(maxWidth: 240)
-                .padding(.vertical, 12)
+                .padding(.top, 12)
+            } else {
+                VStack(spacing: 12) {
+                    // Aurora Guest Button
+                    Button {
+                        Task {
+                            await manager.signInAsGuest()
+                        }
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "person.crop.circle.badge.checkmark")
+                            Text("Use Guest Account")
+                        }
+                        .font(.headline)
+                        .frame(maxWidth: 240)
+                        .padding(.vertical, 12)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .buttonBorderShape(.capsule)
+
+                    // Google Account Button
+                    Button {
+                        showSignIn = true
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "person.badge.key")
+                            Text("Sign In with Google")
+                        }
+                        .font(.subheadline.weight(.medium))
+                        .frame(maxWidth: 240)
+                        .padding(.vertical, 10)
+                    }
+                    .buttonStyle(.bordered)
+                    .buttonBorderShape(.capsule)
+                }
+                .padding(.top, 8)
             }
-            .buttonStyle(.borderedProminent)
-            .buttonBorderShape(.capsule)
-            .padding(.top, 12)
 
             Spacer()
         }

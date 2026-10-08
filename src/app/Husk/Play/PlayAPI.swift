@@ -16,19 +16,22 @@ struct PlayError: LocalizedError {
 struct PlaySession: Codable, Equatable {
     var email: String
     /// The long-lived account token (from signing in once). Never shown, kept in the Keychain.
-    var aasToken: String
+    var aasToken: String = ""
     /// This device's id with Google (hex), from checkin.
     var gsfID: String = ""
     var consistencyToken: String = ""
     var deviceConfigToken: String = ""
     /// The Play Store's own short-lived token, made from the account token.
     var bearer: String = ""
+    /// True if using Aurora Store's anonymous token dispenser server.
+    var isAnonymous: Bool = false
 }
 
 enum PlayAPI {
     static let authURL = URL(string: "https://android.clients.google.com/auth")!
     static let checkinURL = URL(string: "https://android.clients.google.com/checkin")!
     static let fdfe = "https://android.clients.google.com/fdfe/"
+    static let defaultDispenserURL = "https://auroraoss.com/api/auth"
     /// The signature of the Google app the requests speak for (Play Services' certificate digest).
     static let callerSig = "38918a453d07199354f8b19af05ec6562ced5788"
 
@@ -39,6 +42,48 @@ enum PlayAPI {
         c.urlCache = nil
         return URLSession(configuration: c)
     }()
+
+    // MARK: Aurora guest session
+
+    /// Obtains an anonymous guest token from Aurora's token dispenser server.
+    static func fetchAuroraGuestSession(dispenserURL: String = defaultDispenserURL) async throws -> PlaySession {
+        guard let url = URL(string: dispenserURL) else {
+            throw PlayError("Invalid dispenser URL: \(dispenserURL)")
+        }
+        var req = URLRequest(url: url)
+        req.setValue("com.aurora.store-4.6.1-70", forHTTPHeaderField: "User-Agent")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        let (data, response) = try await urlSession.data(for: req)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+            throw PlayError("Aurora token dispenser returned HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0).")
+        }
+
+        struct DispenserResponse: Decodable {
+            let email: String?
+            let auth: String?
+            let authToken: String?
+            let gsfId: String?
+        }
+
+        let decoded = try JSONDecoder().decode(DispenserResponse.self, from: data)
+        guard let bearer = decoded.auth ?? decoded.authToken, !bearer.isEmpty else {
+            throw PlayError("Aurora token dispenser returned an empty auth token.")
+        }
+
+        let email = decoded.email ?? "anonymous@auroraoss.com"
+        let gsf = decoded.gsfId ?? "38918a453d071993"
+
+        return PlaySession(
+            email: email,
+            aasToken: "",
+            gsfID: gsf,
+            consistencyToken: "",
+            deviceConfigToken: "",
+            bearer: bearer,
+            isAnonymous: true
+        )
+    }
 
     // MARK: sign-in tokens
 

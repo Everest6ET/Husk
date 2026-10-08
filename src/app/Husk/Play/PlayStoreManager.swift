@@ -102,9 +102,44 @@ final class PlayStoreManager: ObservableObject {
         }
     }
 
+    // MARK: - Aurora Guest Flow
+
+    /// Obtains an anonymous guest session using Aurora's token dispenser server
+    func signInAsGuest(customDispenserURL: String? = nil) async {
+        isLoading = true
+        errorMessage = nil
+        statusMessage = "Connecting to Aurora guest server…"
+
+        do {
+            let url = customDispenserURL ?? PlayAPI.defaultDispenserURL
+            let s = try await PlayAPI.fetchAuroraGuestSession(dispenserURL: url)
+            saveSession(s)
+            statusMessage = nil
+            isLoading = false
+            await loadBrowseApps()
+        } catch {
+            isLoading = false
+            statusMessage = nil
+            errorMessage = "Guest sign-in failed: \(error.localizedDescription)"
+            HuskLog.log("store", "Aurora guest sign-in error: \(error.localizedDescription)")
+        }
+    }
+
     /// Refresh Play Store bearer token if needed
     func refreshSessionIfNeeded() async {
-        guard var s = session, !s.aasToken.isEmpty else { return }
+        guard var s = session else { return }
+        if s.isAnonymous {
+            // Refresh anonymous guest token from dispenser
+            do {
+                let fresh = try await PlayAPI.fetchAuroraGuestSession()
+                saveSession(fresh)
+                await loadBrowseApps()
+            } catch {
+                HuskLog.log("store", "Failed to refresh Aurora guest token: \(error.localizedDescription)")
+            }
+            return
+        }
+        guard !s.aasToken.isEmpty else { return }
         do {
             let bearer = try await PlayAPI.playToken(s)
             s.bearer = bearer
