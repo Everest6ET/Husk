@@ -27,6 +27,9 @@ bool husk_unity_launch(const char *apk, const char *data_dir, void *metal_layer,
                        const char *angle_dylib, const char *ca_bundle);
 
 /* The same for a cocos2d-x game (Geometry Dash): a landscape surface, with sound. Status, touch and pause go through the calls below. */
+/* Load Geode (the Geometry Dash mod loader) into the next cocos2d-x game: its release zip and its Android launcher's APK.
+ * NULL turns it off. Call before husk_cocos_launch. */
+void husk_cocos_set_geode(const char *release_zip, const char *launcher_apk);
 bool husk_cocos_launch(const char *apk, const char *data_dir, void *metal_layer, int width, int height,
                        const char *angle_dylib, const char *ca_bundle);
 

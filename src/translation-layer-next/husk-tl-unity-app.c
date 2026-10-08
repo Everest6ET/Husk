@@ -24,6 +24,10 @@
 #include "husk-tl-ld.h"
 #include "husk-tl-unity.h"
 #include "husk-tl-audio.h"
+#include "husk-tl-geode.h"
+
+/* Geode for the next cocos2d-x launch: its release zip and its launcher's APK (husk-tl-geode.c). Empty: off. */
+static char g_geode_zip[1024], g_geode_launcher[1024];
 #include "husk-tl-cocos.h"
 #include "husk-tl-gameactivity.h"
 #include "husk-tl-gamepad.h"
@@ -284,6 +288,7 @@ static void *launch_thread(void *arg)
         tl_log_line("cocos: starting %s as %s, %dx%d", A.apk, A.package, A.width, A.height);
         tl_audio_install();
         tl_cocos_text_install();
+        if (g_geode_zip[0]) tl_geode_configure(g_geode_zip, g_geode_launcher, A.data, 0);
         ok = tl_cocos_start(&cfg) && tl_cocos_run();
     } else {
         tl_unity_config cfg = {
@@ -333,6 +338,12 @@ bool husk_unity_launch(const char *apk, const char *data_dir, void *metal_layer,
                        const char *angle_dylib, const char *ca_bundle)
 {
     return launch(ENGINE_UNITY, apk, data_dir, metal_layer, width, height, angle_dylib, ca_bundle);
+}
+
+void husk_cocos_set_geode(const char *release_zip, const char *launcher_apk)
+{
+    snprintf(g_geode_zip, sizeof(g_geode_zip), "%s", release_zip ? release_zip : "");
+    snprintf(g_geode_launcher, sizeof(g_geode_launcher), "%s", launcher_apk ? launcher_apk : "");
 }
 
 bool husk_cocos_launch(const char *apk, const char *data_dir, void *metal_layer, int width, int height,

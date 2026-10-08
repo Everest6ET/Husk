@@ -179,7 +179,12 @@ final class TLUnityUIView: UIView, UIKeyInput {
             // Unreal draws with Vulkan, which on this device is MoltenVK, a framework of the app's own.
             if let fw = Bundle.main.privateFrameworksPath { husk_ue4_set_vulkan(fw + "/MoltenVK.framework/MoltenVK") }
             started = husk_ue4_launch(apk, dataDir, layerPtr, Int32(width), Int32(height), angle, ca)
-        case .cocos: started = husk_cocos_launch(apk, dataDir, layerPtr, Int32(width), Int32(height), angle, ca)
+        case .cocos:
+            // Geode, when it is on for this game and downloaded: loaded into the game after its own libraries.
+            let geode = GeodeSupport.files(appDir: (dataDir as NSString).deletingLastPathComponent)
+            husk_cocos_set_geode(geode?.zip, geode?.launcher)
+            if geode != nil { HuskLog.log("geode", "loading Geode into the game") }
+            started = husk_cocos_launch(apk, dataDir, layerPtr, Int32(width), Int32(height), angle, ca)
         case .minecraft: started = husk_gameactivity_launch(apk, dataDir, layerPtr, Int32(width), Int32(height), angle, ca)
         case .unity: started = husk_unity_launch(apk, dataDir, layerPtr, Int32(width), Int32(height), angle, ca)
         }

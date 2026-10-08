@@ -10,6 +10,8 @@
 #define _DARWIN_C_SOURCE
 #include "husk-tl-bionic.h"
 #include "husk-tl-internal.h"
+#include "husk-tl-codewrite.h"
+#include "husk-tl-xmem.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -829,6 +831,16 @@ static size_t phantom_clamp(uintptr_t a, size_t l)
 
 static void *b_mmap(void *addr, size_t len, int prot, int flags, int fd, long off)
 {
+    /* A hooking library's trampolines (Geode): executable memory is a piece of the JIT region, written through the other view. */
+    if ((prot & PROT_EXEC) && (flags & 0x20) && !(flags & 0x10) && tl_codewrite_enabled()) {
+        uint8_t *rx, *rw;
+        size_t n = (len + TL_XMEM_PAGE - 1) & ~(size_t)(TL_XMEM_PAGE - 1);
+        if (tl_xmem_alloc(n, &rx, &rw)) {
+            memset(rw, 0, n);
+            tl_log_line("mm: %#zx bytes of executable memory for the guest at %p", n, (void *)rx);
+            return rx;
+        }
+    }
     int df = flags & 0x3;                                   /* MAP_SHARED / MAP_PRIVATE */
     if (flags & 0x10)   df |= MAP_FIXED;
     if (flags & 0x20)   df |= MAP_ANON;
@@ -850,6 +862,7 @@ static void *b_mmap(void *addr, size_t len, int prot, int flags, int fd, long of
 }
 static int b_munmap(void *a, size_t l)
 {
+    if (tl_xmem_contains(a)) return 0;                       /* JIT memory handed out above: kept, as the region only grows */
     size_t real = phantom_clamp((uintptr_t)a, l);
     if (real == 0) return 0;                                 /* the half of a phantom range that was never mapped */
     TL_ERRNO_BEGIN(); int r = munmap(a, real); TL_ERRNO_END(); mm_trace("munmap", a, real, r, errno); return r;
@@ -868,6 +881,9 @@ static bool anon_contains(uintptr_t addr, size_t len)
  * pretending to succeed would have it jump into data. */
 static int b_mprotect(void *a, size_t l, int prot)
 {
+    /* Code a hooking library is about to patch: its permissions stay as they are, and its stores are carried out through
+     * the writable view as they fault (husk-tl-codewrite.c). */
+    if (tl_codewrite_enabled() && tl_xmem_contains(a)) { mm_trace("mprotect", a, l, prot, 0); return 0; }
     if ((prot & PROT_EXEC) && anon_contains((uintptr_t)a, l)) {
         tl_note_once("mprotect asked to make the guest's own memory executable: refused");
         tl_set_guest_errno(13);                                                                                            /* EACCES */

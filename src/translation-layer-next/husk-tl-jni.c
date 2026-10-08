@@ -333,6 +333,13 @@ void tl_jni_set_field(jobj *o, const char *name, const char *sig, jvalue v)
     tl_jfield *f = lookup_field(o->cls, name, sig, false, true);
     *field_slot(o, f) = v;
 }
+/* A static field, set from C: what an activity's Java would have assigned before the game's code reads it. */
+void tl_jni_set_static_field(const char *cls, const char *name, const char *sig, jvalue v)
+{
+    tl_jfield *f = lookup_field(tl_jni_class(cls), name, sig, true, true);
+    if (f) *field_slot(NULL, f) = v;
+}
+
 jvalue tl_jni_get_field(jobj *o, const char *name, const char *sig)
 {
     tl_jfield *f = lookup_field(o->cls, name, sig, false, true);

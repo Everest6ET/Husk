@@ -76,6 +76,8 @@ struct TLAppSettings: Codable, Equatable {
     var padShown = true
     var padOpacity = 1.0
     var haptics = true
+    /// Geometry Dash only: load Geode, its mod loader (Geode.swift).
+    var geode = false
 
     init() {}
 
@@ -91,6 +93,7 @@ struct TLAppSettings: Codable, Equatable {
         padShown = try c.decodeIfPresent(Bool.self, forKey: .padShown) ?? true
         padOpacity = try c.decodeIfPresent(Double.self, forKey: .padOpacity) ?? 1.0
         haptics = try c.decodeIfPresent(Bool.self, forKey: .haptics) ?? true
+        geode = try c.decodeIfPresent(Bool.self, forKey: .geode) ?? false
     }
 
     private static func url(_ id: String) -> URL {
@@ -118,6 +121,7 @@ struct TLAppSettingsView: View {
     let app: TLApp
 
     @ObservedObject private var store = TranslationLayerStore.shared
+    @ObservedObject private var geode = GeodeSupport.shared
     @State private var settings: TLAppSettings
     @State private var name: String
     @State private var dataSize: String = "…"
@@ -185,6 +189,19 @@ struct TLAppSettingsView: View {
                    + "playing, but leaves the strip the bar sat in.")
             }
 
+            if app.packageName == GeodeSupport.gamePackage {
+                Section {
+                    Toggle("Geode", isOn: $settings.geode)
+                    if settings.geode { geodeStatus }
+                } header: {
+                    Text("Mods")
+                } footer: {
+                    Text("Geode is the mod loader for Geometry Dash. With it on, Husk downloads Geode for this version of the "
+                       + "game, and mods are found and installed in the game itself, from Geode's button on the main menu. "
+                       + "Applies the next time the game starts.")
+                }
+            }
+
             Section {
                 Picker("On-screen controller", selection: $settings.pad) {
                     ForEach(TLAppSettings.PadMode.allCases) { Text($0.title).tag($0) }
@@ -220,6 +237,9 @@ struct TLAppSettingsView: View {
         .navigationTitle("Settings")
         .navigationBarTitleDisplayMode(.inline)
         .onChange(of: settings) { $0.save(app.id) }
+        .onChange(of: settings.geode) { on in
+            if on { Task { await geode.prepare(app) } } else { geode.remove(app) }
+        }
         .onChange(of: nameFocused) { focused in if !focused { rename() } }
         .onDisappear { rename() }
         .task { dataSize = await Self.measure(dataDirs) }
@@ -232,6 +252,23 @@ struct TLAppSettingsView: View {
             Button("Cancel", role: .cancel) { }
         } message: {
             Text("Saves, settings and caches the game made here are deleted.")
+        }
+    }
+
+    @ViewBuilder
+    private var geodeStatus: some View {
+        switch geode.current(app) {
+        case .idle:
+            Button("Download Geode") { Task { await geode.prepare(app) } }
+        case .working(let what):
+            HStack(spacing: 10) { ProgressView(); Text(what).foregroundStyle(.secondary) }
+        case .ready(let version):
+            LabeledContent("Geode", value: "v\(version), ready")
+        case .failed(let why):
+            VStack(alignment: .leading, spacing: 6) {
+                Text(why).font(.footnote).foregroundStyle(.orange)
+                Button("Try Again") { Task { await geode.prepare(app) } }
+            }
         }
     }
 

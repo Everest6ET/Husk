@@ -62,6 +62,14 @@ enum ApkMetadata {
         return value
     }
 
+    /// The app's versionCode, from the manifest's root element (an integer attribute).
+    static func versionCode(_ manifest: Data) -> Int? {
+        guard let root = elements(manifest).first(where: { $0.name == "manifest" }),
+              let attr = root.attributes.first(where: { $0.name == "versionCode" }),
+              attr.dataType == 0x10 || attr.dataType == 0x11 else { return nil }
+        return Int(attr.data)
+    }
+
     /// A label that could plausibly be shown to someone. A mis-parse produces
     /// control characters or a hundred lines of XML, not a name.
     private static func clean(_ text: String?) -> String? {

@@ -102,7 +102,9 @@ static struct {
     bool recursive_init;
 } G = { .lock = PTHREAD_MUTEX_INITIALIZER, .verbosity = 1 };
 
-static pthread_mutex_t g_big = PTHREAD_MUTEX_INITIALIZER;   /* serialises load/init */
+/* Serialises load/init. Recursive, as a linker's lock has to be: a library's constructor may dlopen another (Geode's constructors
+ * dlopen the game they hook), on the thread that is already inside the loader. */
+static pthread_mutex_t g_big = PTHREAD_RECURSIVE_MUTEX_INITIALIZER;
 
 void tl_ld_set_verbosity(int v) { G.verbosity = v; }
 void tl_ld_set_environment(char **argv, char **envp) { G.argv = argv; G.envp = envp; }
@@ -286,12 +288,37 @@ static uint32_t dynsym_bound(const tl_lib *L, uint32_t hashed)
 
 /* ----------------------------------------------------- lookup by scope */
 
+const char *tl_path_resolve(const char *path, char *buf, size_t n);
+static const char *base_name(const char *path) { const char *b = strrchr(path, '/'); return b ? b + 1 : path; }
+
+/* By the name it was asked for, its soname, or -- for one loaded from a path (a mod's library) -- its file name. */
 static tl_lib *find_loaded(const char *name)
 {
+    const char *b = base_name(name);
     for (int i = 0; i < G.nlibs; i++) {
         if (!strcmp(G.libs[i]->name, name) || !strcmp(G.libs[i]->soname, name)) return G.libs[i];
+        if (!strcmp(base_name(G.libs[i]->name), b) || !strcmp(G.libs[i]->soname, b)) return G.libs[i];
     }
     return NULL;
+}
+
+/* A library that is a file of its own rather than an APK entry: Geode, and the mods it loads from where it unpacked them. */
+static bool fetch_from_file(const char *path, uint8_t **out, size_t *len)
+{
+    if (!strchr(path, '/')) return false;
+    char real[1024];
+    const char *p = tl_path_resolve(path, real, sizeof(real));
+    FILE *f = fopen(p, "rb");
+    if (!f) return false;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    uint8_t *data = n > 0 ? malloc((size_t)n) : NULL;
+    bool ok = data && fread(data, 1, (size_t)n, f) == (size_t)n;
+    fclose(f);
+    if (!ok) { free(data); return false; }
+    *out = data; *len = (size_t)n;
+    return true;
 }
 
 tl_lib *tl_ld_find_lib(const char *name) { return find_loaded(name); }
@@ -329,6 +356,20 @@ void tl_ld_interpose(const char *name, void *fn)
     if (g_ninterpose < MAX_INTERPOSE) { snprintf(g_interpose[g_ninterpose].name, sizeof(g_interpose[0].name), "%s", name); g_interpose[g_ninterpose++].fn = fn; }
 }
 
+/*
+ * The C++ runtime's exception machinery. Geometry Dash carries its own copy and exports it; Geode and its mods are built
+ * against libc++_shared, and an exception thrown by one runtime cannot be caught by the other. So everything but the game
+ * itself takes these from libc++_shared, as Geode's own Android launcher arranges by renaming the game's copies.
+ */
+static bool is_cxx_runtime_symbol(const char *name)
+{
+    static const char *const names[] = { "__gxx_personality_v0", "__cxa_throw", "__cxa_rethrow", "__cxa_allocate_exception",
+        "__cxa_free_exception", "__cxa_begin_catch", "__cxa_end_catch", "__cxa_guard_acquire", "__cxa_guard_release",
+        "__cxa_guard_abort", NULL };
+    for (int i = 0; names[i]; i++) if (!strcmp(name, names[i])) return true;
+    return false;
+}
+
 static void *lookup_for(tl_lib *L, const char *name, bool *weak_hit)
 {
     (void)weak_hit;
@@ -336,6 +377,13 @@ static void *lookup_for(tl_lib *L, const char *name, bool *weak_hit)
     build_scope(L);
     const elf_sym *s = lib_find(L, name);
     if (s && (s->st_info & 0xf) != STT_GNU_IFUNC_) return sym_value(L, s);
+    if (strcmp(L->soname, "libcocos2dcpp.so") != 0 && is_cxx_runtime_symbol(name)) {
+        for (int i = 0; i < L->ndeps; i++) {
+            if (strcmp(L->deps[i]->soname, "libc++_shared.so") != 0) continue;
+            s = lib_find(L->deps[i], name);
+            if (s) return sym_value(L->deps[i], s);
+        }
+    }
     for (int i = 0; i < L->ndeps; i++) {
         s = lib_find(L->deps[i], name);
         if (s && (s->st_info & 0xf) != STT_GNU_IFUNC_) return sym_value(L->deps[i], s);
@@ -355,6 +403,9 @@ void *tl_ld_sym(tl_lib *lib, const char *name)
     }
     return NULL;
 }
+
+/* Where the library's vaddr 0 lies in the executable view: what dladdr calls its base. */
+void *tl_ld_lib_base(const tl_lib *L) { return L ? (void *)(L->rx - L->base_vaddr) : NULL; }
 
 tl_lib *tl_ld_lib_of(const void *addr)
 {
@@ -1682,7 +1733,7 @@ static tl_lib *load_locked(const char *name, int depth)
     if (depth > 32) { tl_log_line("ld: dependency chain too deep at %s", name); return NULL; }
 
     uint8_t *file; size_t flen;
-    if (!fetch_from_apks(name, &file, &flen)) {
+    if (!fetch_from_apks(base_name(name), &file, &flen) && !fetch_from_file(name, &file, &flen)) {
         tl_log_line("ld: %s is not in the APK and is not a system library", name);
         return NULL;
     }
