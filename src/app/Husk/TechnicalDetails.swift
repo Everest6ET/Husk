@@ -25,6 +25,7 @@ extension TLApp {
         case .sdl?: name = "sdl-data"
         case .ue4?: name = "ue4-data"
         case .gta?: name = "gta-data"
+        case .godot?: name = "godot-data"
         case .nativeactivity?: name = "na-data"
         case .cocos?: name = "cocos-data"
         case nil: name = "classic-data"
