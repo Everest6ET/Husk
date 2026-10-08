@@ -94,6 +94,7 @@ enum HuskAppIcon: String, CaseIterable, Identifiable {
 enum HuskTab: String, CaseIterable, Identifiable {
     case home
     case library
+    case store
     case settings
 
     var id: String { rawValue }

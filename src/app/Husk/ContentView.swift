@@ -52,6 +52,10 @@ struct ContentView: View {
                     .tabItem { Label("Library", systemImage: "square.grid.2x2.fill") }
                     .tag(HuskTab.library)
 
+                StoreView()
+                    .tabItem { Label("Store", systemImage: "cart.fill") }
+                    .tag(HuskTab.store)
+
                 SettingsTab()
                     .tabItem { Label("Settings", systemImage: "gearshape.fill") }
                     .tag(HuskTab.settings)
