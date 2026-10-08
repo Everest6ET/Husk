@@ -377,7 +377,10 @@ bool husk_ue4_launch(const char *apk, const char *data_dir, void *metal_layer, i
 void husk_ue4_set_vulkan(const char *dylib) { snprintf(A.vulkan, sizeof(A.vulkan), "%s", dylib ? dylib : ""); }
 void husk_native_add_package(const char *apk)
 {
-    if (apk && A.nextra < 3 && atomic_load(&A.state) == HUSK_UNITY_IDLE) snprintf(A.extra[A.nextra++], sizeof(A.extra[0]), "%s", apk);
+    if (apk && A.nextra < 3 && atomic_load(&A.state) == HUSK_UNITY_IDLE) {
+        snprintf(A.extra[A.nextra++], sizeof(A.extra[0]), "%s", apk);
+        tl_ld_queue_split(apk);
+    }
 }
 void husk_sdl_set_safe_insets(int left, int top, int right, int bottom) { tl_sdl_set_safe_insets(left, top, right, bottom); }
 int husk_sdl_apk_is_portrait(const char *apk) { return tl_sdl_manifest_portrait(apk) ? 1 : 0; }

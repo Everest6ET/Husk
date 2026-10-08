@@ -93,7 +93,7 @@ static struct {
     pthread_mutex_t lock;
     tl_lib *libs[MAX_LIBS];
     int nlibs;
-    tl_zip apks[4];
+    tl_zip apks[TL_LD_MAX_APKS];
     int napks;
     int verbosity;
     size_t unresolved;
@@ -114,15 +114,41 @@ static inline const void *at(const tl_lib *L, uint64_t vaddr) { return L->rw + (
 
 /* ------------------------------------------------------------- the APKs */
 
-bool tl_ld_add_apk(const char *path)
+/* The app's split APKs (its 64-bit libraries, its asset packs), given before the engine starts: they are added right after
+ * the base, whichever engine adds that, as Android puts a split's libraries and assets beside the base's. */
+static char g_splits[4][1024];
+static int g_nsplits;
+static char g_apk_paths[TL_LD_MAX_APKS][1024];
+
+void tl_ld_queue_split(const char *path)
 {
-    if (G.napks >= 4) return false;
+    if (path && path[0] && g_nsplits < 4) snprintf(g_splits[g_nsplits++], sizeof(g_splits[0]), "%s", path);
+}
+
+const char *tl_ld_queued_split(int i) { return i >= 0 && i < g_nsplits ? g_splits[i] : NULL; }
+
+static bool add_one(const char *path)
+{
+    for (int i = 0; i < G.napks; i++) if (!strcmp(g_apk_paths[i], path)) return true;     /* already there */
+    if (G.napks >= TL_LD_MAX_APKS) return false;
     char err[160];
     if (!tl_zip_open(&G.apks[G.napks], path, err, sizeof(err))) {
         tl_log_line("ld: cannot open %s: %s", path, err);
         return false;
     }
+    snprintf(g_apk_paths[G.napks], sizeof(g_apk_paths[0]), "%s", path);
     G.napks++;
+    return true;
+}
+
+bool tl_ld_add_apk(const char *path)
+{
+    bool first = G.napks == 0;
+    if (!add_one(path)) return false;
+    if (first)
+        for (int i = 0; i < g_nsplits; i++) {
+            if (add_one(g_splits[i])) tl_log_line("ld: split %s", strrchr(g_splits[i], '/') ? strrchr(g_splits[i], '/') + 1 : g_splits[i]);
+        }
     return true;
 }
 

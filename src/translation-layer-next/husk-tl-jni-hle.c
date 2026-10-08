@@ -1108,6 +1108,15 @@ void tl_jni_hle_install(void)
     set_str(H.appinfo, "nativeLibraryDir", H.native_lib); set_str(H.appinfo, "dataDir", H.data);
     set_str(H.appinfo, "packageName", H.pkg); set_int(H.appinfo, "flags", 0x8000 /* FLAG_HAS_CODE */);
     set_int(H.appinfo, "targetSdkVersion", 36); set_int(H.appinfo, "minSdkVersion", 24);
+    /* A Google Play install's split APKs (64-bit libraries, asset packs): where Unity finds its data when it is in a pack. */
+    int nsplit = 0;
+    while (tl_ld_queued_split(nsplit)) nsplit++;
+    if (nsplit) {
+        jobj *dirs = tl_jni_new_obj_array(tl_jni_class("java/lang/String"), (uint32_t)nsplit);
+        for (int i = 0; i < nsplit; i++) dirs->oarr.v[i] = STR(tl_ld_queued_split(i));
+        tl_jni_set_field(H.appinfo, "splitSourceDirs", "[Ljava/lang/String;", vl(dirs));
+        tl_jni_set_field(H.appinfo, "splitPublicSourceDirs", "[Ljava/lang/String;", vl(tl_jni_ref(dirs)));
+    }
     H.pm = make("android/content/pm/PackageManager");
     H.display = make("android/view/Display");
     H.wm = make("android/view/WindowManager");

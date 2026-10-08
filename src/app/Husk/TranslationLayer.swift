@@ -287,10 +287,11 @@ final class TranslationLayerStore: ObservableObject {
     nonisolated private static func load(_ dir: URL) -> TLApp? {
         let fm = FileManager.default
         guard let files = try? fm.contentsOfDirectory(atPath: dir.path) else { return nil }
-        let apks = files.filter { $0.lowercased().hasSuffix(".apk") }
+        let names = files.filter { $0.lowercased().hasSuffix(".apk") }
+        let apks = names
             .sorted { a, b in
                 // The base first: it is the one a game is started from, and the others are its splits and packs.
-                let ra = BundleUnpacker.rank(a), rb = BundleUnpacker.rank(b)
+                let ra = BundleUnpacker.rank(a, siblings: names), rb = BundleUnpacker.rank(b, siblings: names)
                 return ra != rb ? ra < rb : a < b
             }
             .map { dir.appendingPathComponent($0).path }
