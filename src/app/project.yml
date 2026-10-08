@@ -81,6 +81,7 @@ targets:
         LIBRARY_SEARCH_PATHS:
           - "$(inherited)"
           - "$(SRCROOT)/../../build/ios-arm64/lib"
+          - "$(SRCROOT)/Frameworks"
         # zlib, for the translation layer's APK reader. Part of the iOS SDK. AudioToolbox is the sound a
         # cocos2d-x game's mixer plays through; CoreText and CoreGraphics draw its text labels.
         OTHER_LDFLAGS:
@@ -104,6 +105,11 @@ targets:
       - target: HuskJITHelper
       # Built by scripts/build_ios.sh. Embedded and signed into the bundle.
       - framework: ../../build/ios-arm64/lib/libqemu-aarch64-softmmu.dylib
+        embed: true
+        codeSign: true
+      # The file picker's Open button does nothing on certificate-signed installs; this tweak (from issue #60) hooks
+      # UIDocumentPickerViewController so the picker hands over copies. Linked so it loads at launch.
+      - framework: Frameworks/libFilePickerFix.dylib
         embed: true
         codeSign: true
       # ANGLE, which the QEMU dylib dlopens by @rpath at GL start-up. Embedded
