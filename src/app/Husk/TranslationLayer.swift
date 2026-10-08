@@ -791,9 +791,11 @@ struct TLClassicAttemptView: View {
             HuskOrientation.set(portrait ? .portrait : .landscape)
             UIApplication.shared.isIdleTimerDisabled = settings.keepAwake
             if cleanLayout { showHint() }
+            CrashReport.gameStarted(app)
             runner.start(apks: app.apks)
         }
         .onDisappear {
+            CrashReport.gameEnded()
             runner.stop()
             UIApplication.shared.isIdleTimerDisabled = false
             HuskOrientation.set(HuskOrientation.standard)

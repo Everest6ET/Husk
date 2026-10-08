@@ -31,6 +31,7 @@ struct ContentView: View {
     @ObservedObject private var incoming = IncomingFiles.shared
     @ObservedObject private var showcase = ShowcaseStore.shared
     @ObservedObject private var tlStore = TranslationLayerStore.shared
+    @ObservedObject private var crash = CrashReport.shared
 
     var body: some View {
         ZStack {
@@ -118,6 +119,10 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $showLogs) { LogView() }
+        // A game that ended Husk last time: say so, with its report.
+        .sheet(item: Binding(get: { showOnboarding ? nil : crash.pending }, set: { crash.pending = $0 })) { r in
+            CrashReportSheet(report: r)
+        }
         .sheet(isPresented: $router.showFiles) { FilesTab() }
         // Pictures for the apps here: read the index on launch and whenever the set of apps changes.
         .task(id: showcasePackages) { showcase.refresh(for: showcasePackages) }
@@ -161,6 +166,7 @@ struct ContentView: View {
             Text(guest.update.detail)
         }
         .onAppear {
+            crash.checkPreviousRun()
             router.openGuest = { showGuestScreen = true }
             router.startAndroid = { startFromLibrary() }
             evaluate()

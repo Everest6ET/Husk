@@ -553,9 +553,11 @@ struct TLCocosAttemptView: View {
             HuskOrientation.set(portrait ? .portrait : .landscape)
             UIApplication.shared.isIdleTimerDisabled = settings.keepAwake
             if cleanLayout { showHint() }
+            CrashReport.gameStarted(app)
             model.start()
         }
         .onDisappear {
+            CrashReport.gameEnded()
             model.stop()
             UIApplication.shared.isIdleTimerDisabled = false
             HuskOrientation.set(HuskOrientation.standard)

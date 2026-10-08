@@ -95,6 +95,10 @@ struct GamePage: View {
     @Environment(\.dismiss) private var dismiss
     @State private var playing = false
     @State private var confirmRemove = false
+    @State private var backupFile: URL?
+    @State private var savesBusy = false
+    @State private var savesMessage: String?
+    @State private var confirmRestore: URL?
 
     private var runs: Bool { app.report?.canRun == true }
 
@@ -145,6 +149,21 @@ struct GamePage: View {
                 }
             }
 
+            if !isGeodeLauncher {
+                Section {
+                    Button { backUp() } label: { Label("Back Up Saves", systemImage: "square.and.arrow.up") }
+                        .disabled(savesBusy || !SaveBackup.hasData(app))
+                    Button { pickRestore() } label: { Label("Restore Saves", systemImage: "clock.arrow.circlepath") }
+                        .disabled(savesBusy || loadedNow)
+                } header: {
+                    Text("Saves")
+                } footer: {
+                    if let savesMessage { Text(savesMessage) }
+                    else if loadedNow { Text("\(app.label) has been started in this run of Husk. Close Husk and open it again to restore saves.") }
+                    else { Text("A backup is a .zip of everything \(app.label) has saved in Husk, to keep in Files or move to another device.") }
+                }
+            }
+
             Section("About") {
                 LabeledContent("Runs With", value: app.report?.runnerName ?? "Unknown")
                 LabeledContent("Last Played", value: app.lastPlayed.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "Never")
@@ -161,6 +180,15 @@ struct GamePage: View {
         .navigationTitle(app.label)
         .navigationBarTitleDisplayMode(.inline)
         .fullScreenCover(isPresented: $playing) { TLAttemptView(app: app) }
+        .sheet(item: Binding(get: { backupFile.map(IdentifiedURL.init) }, set: { backupFile = $0?.url })) { f in
+            ShareSheet(items: [f.url])
+        }
+        .confirmationDialog("Replace \(app.label)'s saves?", isPresented: Binding(get: { confirmRestore != nil }, set: { if !$0 { confirmRestore = nil } }),
+                            titleVisibility: .visible) {
+            Button("Replace", role: .destructive) { if let url = confirmRestore { restore(url) } }
+        } message: {
+            Text("What \(app.label) has saved now is replaced by the backup. Back up first if you want to keep it.")
+        }
         .confirmationDialog("Remove \(app.label)?", isPresented: $confirmRemove, titleVisibility: .visible) {
             Button("Remove", role: .destructive) {
                 dismiss()
@@ -170,6 +198,48 @@ struct GamePage: View {
             Text("The game and everything it saved here are deleted from Husk.")
         }
         .id(jit.attachGeneration)
+    }
+
+    /// This game's engine is loaded in this run of Husk, so its files may be open: no restoring under it.
+    private var loadedNow: Bool {
+        guard let loaded = husk_native_loaded_apk().map({ String(cString: $0) }) else { return false }
+        return loaded == app.apks.first
+    }
+
+    private func backUp() {
+        savesBusy = true; savesMessage = nil
+        let app = self.app
+        Task.detached {
+            let result = Result { try SaveBackup.export(app) }
+            await MainActor.run {
+                savesBusy = false
+                switch result {
+                case .success(let url): backupFile = url
+                case .failure(let e): savesMessage = e.localizedDescription
+                }
+            }
+        }
+    }
+
+    private func pickRestore() {
+        HuskFilePicker.present(types: [.zip], multiple: false) { urls in
+            if let url = urls.first { confirmRestore = url }
+        } onFail: { savesMessage = $0 }
+    }
+
+    private func restore(_ url: URL) {
+        savesBusy = true; savesMessage = nil
+        let app = self.app
+        Task.detached {
+            let result = Result { try SaveBackup.restore(app, from: url) }
+            await MainActor.run {
+                savesBusy = false
+                switch result {
+                case .success(let n): savesMessage = "Restored \(n) file\(n == 1 ? "" : "s") from \(url.lastPathComponent)."
+                case .failure(let e): savesMessage = e.localizedDescription
+                }
+            }
+        }
     }
 
     /// Geode's Android launcher, added as if it were a game: it is a whole Android app, which Husk does not run. On Husk Geode
@@ -454,4 +524,10 @@ struct AndroidSystemPage: View {
     }
 
     private func bytes(_ n: Int64) -> String { ByteCountFormatter.string(fromByteCount: n, countStyle: .file) }
+}
+
+/// A URL that a sheet can be presented for.
+struct IdentifiedURL: Identifiable {
+    let url: URL
+    var id: String { url.path }
 }
