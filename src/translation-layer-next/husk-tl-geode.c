@@ -204,7 +204,12 @@ bool tl_geode_load(jobj *activity)
     tl_jni_set_static_field("org/fmod/FMOD", "INSTANCE", "Lorg/fmod/FMOD;", vl(tl_jni_new_object(tl_jni_class("org/fmod/FMOD"))));
 
     if (G.launcher_apk[0] && !tl_ld_add_apk(G.launcher_apk)) tl_log_line("geode: cannot read the launcher APK %s", G.launcher_apk);
-    if (!tl_ld_load("libc++_shared.so")) tl_log_line("geode: no libc++_shared.so (it comes from the Geode launcher APK)");
+    /* Without the launcher's C++ runtime Geode would load with hundreds of its imports missing and fall over at the first; the
+     * game is better off starting without it. */
+    if (!tl_ld_load("libc++_shared.so")) {
+        tl_log_line("geode: no 64-bit libc++_shared.so in %s; starting the game without Geode", G.launcher_apk[0] ? G.launcher_apk : "(no launcher APK)");
+        return false;
+    }
 
     tl_codewrite_enable();
     tl_log_line("geode: loading %s (game versionCode %d)", G.so, G.version_code);

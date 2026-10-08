@@ -29,6 +29,13 @@ final class GeodeSupport: ObservableObject {
     nonisolated private static func releaseZip(_ appID: String) -> URL { folder(appID).appendingPathComponent("geode-android64.zip") }
     nonisolated private static func launcherAPK(_ appID: String) -> URL { folder(appID).appendingPathComponent("geode-launcher.apk") }
     nonisolated private static func versionFile(_ appID: String) -> URL { folder(appID).appendingPathComponent("version.txt") }
+    /// Written once the downloaded launcher has been seen to carry the 64-bit C++ runtime (the 32-bit build does not).
+    nonisolated private static func launcherChecked(_ appID: String) -> URL { folder(appID).appendingPathComponent("launcher-arm64.ok") }
+
+    /// Whether an APK carries what Geode needs from the launcher: the 64-bit libc++_shared.so.
+    nonisolated static func launcherUsable(_ apk: String) -> Bool {
+        TranslationLayerStore.entry(apk, "lib/arm64-v8a/libc++_shared.so", limit: 16 << 20) != nil
+    }
 
     /// What a launch hands the game: both files, when Geode is on for this game and has been downloaded. `appDir` is the
     /// game's folder (Documents/TranslationLayer/<id>).
@@ -43,7 +50,7 @@ final class GeodeSupport: ObservableObject {
     /// The launcher APK: the one downloaded for this game, or one added to the library as an app of its own.
     nonisolated private static func launcherOnDisk(_ appID: String) -> String? {
         let mine = launcherAPK(appID).path
-        if FileManager.default.fileExists(atPath: mine) { return mine }
+        if FileManager.default.fileExists(atPath: mine), FileManager.default.fileExists(atPath: launcherChecked(appID).path) { return mine }
         let root = TranslationLayer.root
         for dir in (try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? [] {
             let pkg = (try? String(contentsOf: dir.appendingPathComponent("package.txt"), encoding: .utf8))?
@@ -51,7 +58,8 @@ final class GeodeSupport: ObservableObject {
             guard pkg == launcherPackage,
                   let apk = (try? FileManager.default.contentsOfDirectory(atPath: dir.path))?.first(where: { $0.hasSuffix(".apk") })
             else { continue }
-            return dir.appendingPathComponent(apk).path
+            let path = dir.appendingPathComponent(apk).path
+            if launcherUsable(path) { return path }
         }
         return nil
     }
@@ -90,7 +98,12 @@ final class GeodeSupport: ObservableObject {
 
             if Self.launcherOnDisk(app.id) == nil {
                 status[app.id] = .working("Downloading Geode's launcher…")
+                try? FileManager.default.removeItem(at: Self.launcherChecked(app.id))
                 try await Self.download(try await Self.launcherURL(), to: Self.launcherAPK(app.id))
+                guard Self.launcherUsable(Self.launcherAPK(app.id).path) else {
+                    throw GeodeError("Geode's launcher download has no 64-bit C++ runtime.")
+                }
+                try Data().write(to: Self.launcherChecked(app.id))
             }
             status[app.id] = .ready(release)
             HuskLog.log("geode", "Geode \(release) ready for \(app.label) (versionCode \(versionCode))")
@@ -142,9 +155,13 @@ final class GeodeSupport: ObservableObject {
 
     private static func launcherURL() async throws -> URL {
         let obj = try await json(URL(string: "https://api.github.com/repos/geode-sdk/android-launcher/releases/latest")!)
+        // The release has a 32-bit build (…-android32.apk) beside the 64-bit one, and lists it first: only the 64-bit one has
+        // the arm64 C++ runtime Geode needs.
         let assets = obj["assets"] as? [[String: Any]] ?? []
-        guard let link = assets.compactMap({ $0["browser_download_url"] as? String }).first(where: { $0.hasSuffix(".apk") }),
-              let url = URL(string: link) else { throw GeodeError("Geode's launcher release has no APK.") }
+        let apks = assets.compactMap { $0["browser_download_url"] as? String }.filter { $0.hasSuffix(".apk") }
+        guard let link = apks.first(where: { !$0.contains("android32") && !$0.contains("armeabi") }), let url = URL(string: link) else {
+            throw GeodeError("Geode's launcher release has no 64-bit APK.")
+        }
         return url
     }
 
