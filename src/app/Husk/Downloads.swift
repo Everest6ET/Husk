@@ -279,9 +279,11 @@ final class Downloads: ObservableObject {
         awake = true
         keepRunning()
         background.getAllTasks { tasks in
-            let idle = tasks.filter { $0.countOfBytesReceived == 0 && $0.state == .running }
+            // Ones it has barely started on as well: Husk refetches 64 MB in seconds, where a file left to the background service
+            // stays slow until it is done.
+            let idle = tasks.filter { $0.countOfBytesReceived < 64 << 20 && $0.state == .running }
             for t in idle { t.cancel() }
-            let busy = Set(tasks.filter { $0.countOfBytesReceived > 0 }.compactMap { TaskTag($0.taskDescription) }.map { "\($0.job.uuidString)|\($0.path)" })
+            let busy = Set(tasks.filter { $0.countOfBytesReceived >= 64 << 20 }.compactMap { TaskTag($0.taskDescription) }.map { "\($0.job.uuidString)|\($0.path)" })
             Task { @MainActor in
                 self.handedOff = busy
                 if !idle.isEmpty || !busy.isEmpty { HuskLog.log("downloads", "back on screen: \(idle.count) file(s) taken back, \(busy.count) finishing in the background") }
@@ -297,6 +299,10 @@ final class Downloads: ObservableObject {
     /// After a relaunch: background tasks still running are noted, so they are not fetched twice.
     private func adoptBackgroundTasks() {
         background.getAllTasks { tasks in
+            // Tasks this build cannot place (no tag it understands) would download for nothing: stop them.
+            for t in tasks where TaskTag(t.taskDescription) == nil { t.cancel() }
+            // Tasks from a build that wrote the whole file to iOS's own temporary file and moved it into place (offset unknown, no
+            // .part) still finish correctly: their response starts at byte 0.
             let running = Set(tasks.compactMap { TaskTag($0.taskDescription) }.map { "\($0.job.uuidString)|\($0.path)" })
             Task { @MainActor in
                 self.handedOff = running
@@ -338,7 +344,16 @@ final class Downloads: ObservableObject {
         guard let dest = Self.destination(tag.kind, f.path) else { return }
         let part = Self.partURL(dest), have = Self.size(part)
         jobs[j].files[i].received = have
-        if error == nil, f.size == 0 || have >= f.size {
+        if f.size > 0, have > f.size {
+            // Longer than the file: something wrote twice. Start that file again rather than keep it.
+            HuskLog.log("downloads", "\(f.path): \(Self.bytes(have)) on disk for a \(Self.bytes(f.size)) file; fetching it again")
+            try? FileManager.default.removeItem(at: part)
+            jobs[j].files[i].received = 0
+            save()
+            pump()
+            return
+        }
+        if error == nil, f.size == 0 || have == f.size {
             // All of it: into place.
             let fm = FileManager.default
             try? fm.removeItem(at: dest)
@@ -502,6 +517,14 @@ struct TaskTag: Codable {
     var offset: Int64 = 0
 
     init(job: UUID, path: String, kind: Downloads.Job.Kind, offset: Int64 = 0) { self.job = job; self.path = path; self.kind = kind; self.offset = offset }
+    enum CodingKeys: String, CodingKey { case job, path, kind, offset }
+    init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        job = try c.decode(UUID.self, forKey: .job)
+        path = try c.decode(String.self, forKey: .path)
+        kind = try c.decode(Downloads.Job.Kind.self, forKey: .kind)
+        offset = (try? c.decodeIfPresent(Int64.self, forKey: .offset)) ?? 0     // tasks from before offsets were kept: from the start
+    }
     init?(_ s: String?) {
         guard let s, let d = s.data(using: .utf8), let t = try? JSONDecoder().decode(TaskTag.self, from: d) else { return nil }
         self = t
@@ -605,9 +628,13 @@ final class BackgroundDownloadDelegate: NSObject, URLSessionDownloadDelegate {
         let fm = FileManager.default
         do {
             try fm.createDirectory(at: part.deletingLastPathComponent(), withIntermediateDirectories: true)
-            if status == 206, tag.offset > 0, Downloads.size(part) == tag.offset {
-                // Append the rest to what was there.
+            if status == 416 {
+                // Nothing was left to send: the .part is already whole.
+            } else if status == 206, tag.offset > 0, Downloads.size(part) >= tag.offset {
+                // Append the rest to what was there. The .part can be a little longer than when the request was made (Husk's own
+                // transfer was still writing as it was stopped); the response is exactly the bytes from the offset, so cut it back first.
                 guard let out = try? FileHandle(forWritingTo: part), let inp = try? FileHandle(forReadingFrom: location) else { throw CocoaError(.fileWriteUnknown) }
+                try out.truncate(atOffset: UInt64(tag.offset))
                 try out.seekToEnd()
                 while let chunk = try inp.read(upToCount: 8 << 20), !chunk.isEmpty { try out.write(contentsOf: chunk) }
                 try out.close(); try inp.close()
