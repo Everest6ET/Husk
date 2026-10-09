@@ -8,9 +8,17 @@ import ActivityKit
 
 /// Downloads from a link: one file, or a whole folder served from a computer (tools/serve-folder.py).
 ///
-/// They run in a background URLSession, so they carry on while Husk is in the background or closed, and each file resumes where it
-/// stopped. A finished APK is added to the library; anything else goes into Shared Storage, at the path it had in the served folder,
-/// which is where games that keep their data on /sdcard look for it.
+/// Every file is written into a `.part` beside where it goes and continued with a Range request from what is already on disk, so
+/// nothing is fetched twice -- after a crash, an update, a server restart or a dropped connection. A file already in place at its
+/// full size is not fetched at all. A finished APK is added to the library; anything else goes into Shared Storage at the path it had
+/// in the served folder, which is where games that keep their data on /sdcard look for it.
+///
+/// Two ways to move the bytes:
+///   - while Husk runs (in front, or kept running in the background by an iOS 26 continued processing task) it downloads itself,
+///     several files at once, which is much faster than iOS's download service gives a background session;
+///   - when Husk leaves the screen without that task, what is left of each file is handed to a background URLSession, which iOS
+///     carries on with while Husk is suspended or closed. Those tasks are made while Husk is still active, or iOS would treat them as
+///     work to do whenever it suits it.
 @MainActor
 final class Downloads: ObservableObject {
     static let shared = Downloads()
@@ -50,24 +58,54 @@ final class Downloads: ObservableObject {
     @Published var liveActivitiesOff = false
 
     nonisolated static let sessionID = "com.husk.downloads"
-    private let session: URLSession
-    private let delegate = LinkDownloadDelegate()
-    /// From the app delegate, when iOS woke Husk for this session's events: call it once they are handled.
+    /// How many files at once.
+    private static let parallel = 4
+
+    private let background: URLSession
+    private let backgroundDelegate = BackgroundDownloadDelegate()
+    private let direct: URLSession
+    private let directDelegate = DirectDownloadDelegate()
+    /// Files being fetched by Husk itself, and files handed to the background session ("job|path").
+    private var directRunning: [String: URLSessionDataTask] = [:]
+    private var handedOff: Set<String> = []
+    /// Husk can download itself: it is on screen, or a continued processing task keeps it running.
+    private var awake = true
+    private var grace: UIBackgroundTaskIdentifier = .invalid
+    private var retries: [String: Int] = [:]
+    /// From the app delegate, when iOS woke Husk for the background session's events: call it once they are handled.
     var backgroundCompletion: (() -> Void)?
 
     private init() {
-        let config = URLSessionConfiguration.background(withIdentifier: Self.sessionID)
-        config.isDiscretionary = false
-        config.sessionSendsLaunchEvents = true
-        config.allowsCellularAccess = true
-        // Several files at once: one stream is all iOS gives a background download over Wi-Fi, and it was about 10 MB/s. Four keep a
-        // computer's hard drive reading mostly in long runs (the server reads big pieces), and fill the link.
-        config.httpMaximumConnectionsPerHost = 4
-        config.timeoutIntervalForRequest = 120
-        config.timeoutIntervalForResource = 7 * 24 * 3600
-        session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
+        let bg = URLSessionConfiguration.background(withIdentifier: Self.sessionID)
+        bg.isDiscretionary = false
+        bg.sessionSendsLaunchEvents = true
+        bg.allowsCellularAccess = true
+        bg.httpMaximumConnectionsPerHost = Self.parallel
+        bg.timeoutIntervalForRequest = 120
+        bg.timeoutIntervalForResource = 7 * 24 * 3600
+        background = URLSession(configuration: bg, delegate: backgroundDelegate, delegateQueue: nil)
+
+        let fg = URLSessionConfiguration.default
+        fg.httpMaximumConnectionsPerHost = Self.parallel
+        fg.timeoutIntervalForRequest = 60
+        fg.requestCachePolicy = .reloadIgnoringLocalCacheData
+        fg.urlCache = nil
+        let q = OperationQueue()
+        q.maxConcurrentOperationCount = 1
+        q.name = "husk.downloads.direct"
+        direct = URLSession(configuration: fg, delegate: directDelegate, delegateQueue: q)
+
         jobs = Self.loadJobs()
-        reconcile()
+        awake = UIApplication.shared.applicationState != .background
+        let nc = NotificationCenter.default
+        nc.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated { Downloads.shared.leaving() }
+        }
+        nc.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated { Downloads.shared.returned() }
+        }
+        settleFromDisk()
+        adoptBackgroundTasks()
     }
 
     // MARK: adding
@@ -83,57 +121,52 @@ final class Downloads: ObservableObject {
         HuskLog.log("downloads", "adding \(url.absoluteString)")
         // A served folder answers its root with a manifest; so may any link that returns JSON listing files.
         if let manifest = await Self.fetchManifest(url) {
-            if url.path.isEmpty || !url.absoluteString.hasSuffix("/") { url = url.appendingPathComponent("") }
+            if !url.absoluteString.hasSuffix("/") { url = url.appendingPathComponent("") }
             let files = manifest.files.map { f -> File in
                 let path = f.path.split(separator: "/").map { $0.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? String($0) }.joined(separator: "/")
                 return File(path: f.path, url: URL(string: "f/" + path, relativeTo: url)!.absoluteString, size: f.size)
             }
             guard !files.isEmpty else { problem = "That folder is empty."; return }
-            let need = files.reduce(0) { $0 + $1.size }
-            if let free = Self.freeSpace(), free < need {
-                problem = "This needs \(Self.bytes(need)) and the device has \(Self.bytes(free)) free."
-                return
-            }
             start(Job(title: manifest.name.isEmpty ? (url.host ?? "Folder") : manifest.name, source: url.absoluteString, kind: .folder, files: files))
             return
         }
         let (name, size) = await Self.probe(url)
         let kind: Job.Kind = name.lowercased().hasSuffix(".apk") ? .apk : .file
-        if size > 0, let free = Self.freeSpace(), free < size {
-            problem = "This needs \(Self.bytes(size)) and the device has \(Self.bytes(free)) free."
-            return
-        }
         start(Job(title: name, source: url.absoluteString, kind: kind, files: [File(path: name, url: url.absoluteString, size: size)]))
     }
 
-    private func start(_ job: Job) {
-        // The same link again, while it is still downloading: carry on with that one rather than fetch everything twice.
-        if let existing = jobs.first(where: { $0.source == job.source && !$0.complete }) {
-            HuskLog.log("downloads", "\(job.title) is already downloading; resuming it")
+    private func start(_ new: Job) {
+        // The same link again: carry on with the one already there, rather than fetch anything twice.
+        if let existing = jobs.first(where: { $0.source == new.source }) {
+            HuskLog.log("downloads", "\(new.title) is already in the list; continuing it")
+            if let i = jobs.firstIndex(where: { $0.id == existing.id }) {
+                // The folder may have changed on the computer: take the new list, keeping what is known about each file.
+                var merged = new
+                merged.id = existing.id
+                merged.added = existing.added
+                for k in merged.files.indices {
+                    if let old = existing.files.first(where: { $0.path == merged.files[k].path }), old.size == merged.files[k].size {
+                        merged.files[k].done = old.done
+                    }
+                }
+                jobs[i] = merged
+            }
             resume(existing.id)
             return
         }
+        var job = new
+        let need = job.files.filter { !$0.done }.reduce(Int64(0)) { $0 + max(0, $1.size - Self.onDisk(job.kind, $1.path)) }
+        if let free = Self.freeSpace(), need > free {
+            problem = "This needs \(Self.bytes(need)) more and the device has \(Self.bytes(free)) free."
+            return
+        }
+        Self.settle(&job)
         jobs.insert(job, at: 0)
         save()
-        for f in job.files where !f.done { begin(job.id, f, kind: job.kind) }
+        HuskLog.log("downloads", "started \(job.title): \(job.files.count) file(s), \(Self.bytes(job.total)), \(job.filesDone) already here")
         keepRunning()
-        HuskLog.log("downloads", "started \(job.title): \(job.files.count) file(s), \(Self.bytes(job.total))")
+        pump()
         LiveDownload.update(jobs: jobs, speed: speed)
-    }
-
-    private func begin(_ job: UUID, _ f: File, kind: Job.Kind) {
-        guard let url = URL(string: f.url) else { return }
-        let task: URLSessionDownloadTask
-        if let resume = Self.resumeData(job, f.path) {
-            task = session.downloadTask(withResumeData: resume)
-            Self.dropResumeData(job, f.path)
-        } else {
-            task = session.downloadTask(with: url)
-        }
-        task.taskDescription = TaskTag(job: job, path: f.path, kind: kind).encoded
-        task.priority = URLSessionTask.highPriority
-        if f.size > 0 { task.countOfBytesClientExpectsToReceive = f.size }
-        task.resume()
     }
 
     // MARK: controls
@@ -142,30 +175,26 @@ final class Downloads: ObservableObject {
         guard let i = jobs.firstIndex(where: { $0.id == id }) else { return }
         jobs[i].paused = true
         save()
-        session.getAllTasks { tasks in
-            for case let t as URLSessionDownloadTask in tasks where TaskTag(t.taskDescription)?.job == id {
-                t.cancel { data in if let data, let tag = TaskTag(t.taskDescription) { Downloads.storeResumeData(data, tag.job, tag.path) } }
-            }
-        }
+        for (key, task) in directRunning where key.hasPrefix(id.uuidString) { task.cancel() }
+        background.getAllTasks { tasks in for t in tasks where TaskTag(t.taskDescription)?.job == id { t.cancel() } }
+        handedOff = handedOff.filter { !$0.hasPrefix(id.uuidString) }
         LiveDownload.update(jobs: jobs, speed: speed)
     }
 
     func resume(_ id: UUID) {
         guard let i = jobs.firstIndex(where: { $0.id == id }) else { return }
         jobs[i].paused = false
-        defer { keepRunning() }
-        for k in jobs[i].files.indices { jobs[i].files[k].error = nil }
+        for k in jobs[i].files.indices { jobs[i].files[k].error = nil; retries[key(id, jobs[i].files[k].path)] = nil }
+        Self.settle(&jobs[i])
         save()
-        let job = jobs[i]
-        session.getAllTasks { tasks in
-            let running = Set(tasks.compactMap { TaskTag($0.taskDescription) }.filter { $0.job == id }.map(\.path))
-            Task { @MainActor in for f in job.files where !f.done && !running.contains(f.path) { self.begin(job.id, f, kind: job.kind) } }
-        }
+        keepRunning()
+        pump()
+        LiveDownload.update(jobs: jobs, speed: speed)
     }
 
     func remove(_ id: UUID) {
-        session.getAllTasks { tasks in for t in tasks where TaskTag(t.taskDescription)?.job == id { t.cancel() } }
-        if let job = jobs.first(where: { $0.id == id }) { for f in job.files { Self.dropResumeData(id, f.path) } }
+        for (key, task) in directRunning where key.hasPrefix(id.uuidString) { task.cancel() }
+        background.getAllTasks { tasks in for t in tasks where TaskTag(t.taskDescription)?.job == id { t.cancel() } }
         jobs.removeAll { $0.id == id }
         save()
         LiveDownload.update(jobs: jobs, speed: speed)
@@ -176,17 +205,110 @@ final class Downloads: ObservableObject {
         save()
     }
 
-    /// iOS 26: ask to keep running after Husk leaves the screen (a continued processing task). The system shows its progress in the
-    /// Dynamic Island and on the Lock Screen, and Husk keeps receiving progress, so the numbers there stay live. Only from something
-    /// the person did -- adding or resuming a download -- which is what the system allows.
-    private func keepRunning() {
-        guard jobs.contains(where: { !$0.complete && !$0.paused }) else { return }
-        if #available(iOS 26.0, *) { ContinuedDownload.begin(title: jobs.first { !$0.complete && !$0.paused }?.title ?? "Downloads") }
+    // MARK: moving bytes
+
+    private func key(_ job: UUID, _ path: String) -> String { "\(job.uuidString)|\(path)" }
+
+    /// Start files until `parallel` are running: Husk's own requests while it is awake, nothing new while it is not (what was handed
+    /// to the background session carries on there).
+    private func pump() {
+        guard awake else { return }
+        for job in jobs where !job.paused {
+            for f in job.files where !f.done && f.error == nil {
+                guard directRunning.count < Self.parallel else { return }
+                let k = key(job.id, f.path)
+                if directRunning[k] != nil || handedOff.contains(k) { continue }
+                fetch(job, f)
+            }
+        }
     }
 
-    // MARK: from the session (main actor)
+    private func fetch(_ job: Job, _ f: File) {
+        guard let url = URL(string: f.url), let dest = Self.destination(job.kind, f.path) else { return }
+        let part = Self.partURL(dest)
+        let offset = Self.size(part)
+        var req = URLRequest(url: url)
+        if offset > 0 { req.setValue("bytes=\(offset)-", forHTTPHeaderField: "Range") }
+        let task = direct.dataTask(with: req)
+        let tag = TaskTag(job: job.id, path: f.path, kind: job.kind, offset: offset)
+        task.taskDescription = tag.encoded
+        directDelegate.begin(task: task, tag: tag, part: part, offset: offset)
+        directRunning[key(job.id, f.path)] = task
+        task.resume()
+    }
 
-    private var retries: [String: Int] = [:]
+    /// Husk is leaving the screen. With a continued processing task running it carries on as it is; without one, each file's
+    /// remaining bytes go to the background session now, while Husk is still active.
+    private func leaving() {
+        if #available(iOS 26.0, *), ContinuedDownload.active { return }
+        guard jobs.contains(where: { !$0.complete && !$0.paused }) else { return }
+        awake = false
+        if grace == .invalid {
+            grace = UIApplication.shared.beginBackgroundTask(withName: "Husk downloads") {
+                MainActor.assumeIsolated { Downloads.shared.endGrace() }
+            }
+        }
+        // Stop Husk's own requests: what they wrote is on disk, and the background session continues from there.
+        for task in directRunning.values { task.cancel() }
+        directRunning.removeAll()
+        var n = 0
+        for job in jobs where !job.paused {
+            for f in job.files where !f.done {
+                let k = key(job.id, f.path)
+                guard !handedOff.contains(k), let url = URL(string: f.url), let dest = Self.destination(job.kind, f.path) else { continue }
+                let offset = Self.size(Self.partURL(dest))
+                var req = URLRequest(url: url)
+                if offset > 0 { req.setValue("bytes=\(offset)-", forHTTPHeaderField: "Range") }
+                let task = background.downloadTask(with: req)
+                task.taskDescription = TaskTag(job: job.id, path: f.path, kind: job.kind, offset: offset).encoded
+                if f.size > 0 { task.countOfBytesClientExpectsToReceive = f.size - offset }
+                task.priority = URLSessionTask.highPriority
+                task.resume()
+                handedOff.insert(k)
+                n += 1
+            }
+        }
+        HuskLog.log("downloads", "Husk is leaving the screen: \(n) file(s) handed to iOS's background downloads")
+        save()
+    }
+
+    /// Back on screen: files the background session has not started are taken back and fetched by Husk again; ones it is part-way
+    /// through are left to finish there.
+    private func returned() {
+        endGrace()
+        awake = true
+        keepRunning()
+        background.getAllTasks { tasks in
+            let idle = tasks.filter { $0.countOfBytesReceived == 0 && $0.state == .running }
+            for t in idle { t.cancel() }
+            let busy = Set(tasks.filter { $0.countOfBytesReceived > 0 }.compactMap { TaskTag($0.taskDescription) }.map { "\($0.job.uuidString)|\($0.path)" })
+            Task { @MainActor in
+                self.handedOff = busy
+                if !idle.isEmpty || !busy.isEmpty { HuskLog.log("downloads", "back on screen: \(idle.count) file(s) taken back, \(busy.count) finishing in the background") }
+                self.pump()
+            }
+        }
+    }
+
+    private func endGrace() {
+        if grace != .invalid { UIApplication.shared.endBackgroundTask(grace); grace = .invalid }
+    }
+
+    /// After a relaunch: background tasks still running are noted, so they are not fetched twice.
+    private func adoptBackgroundTasks() {
+        background.getAllTasks { tasks in
+            let running = Set(tasks.compactMap { TaskTag($0.taskDescription) }.map { "\($0.job.uuidString)|\($0.path)" })
+            Task { @MainActor in
+                self.handedOff = running
+                if !running.isEmpty { HuskLog.log("downloads", "\(running.count) file(s) still downloading in the background") }
+                self.pump()
+                LiveDownload.update(jobs: self.jobs, speed: self.speed)
+            }
+        }
+    }
+
+    // MARK: progress (main actor)
+
     private var lastSample = (time: Date(), bytes: Int64(0))
     private var lastLive = Date.distantPast
     private var lastSave = Date.distantPast
@@ -199,54 +321,63 @@ final class Downloads: ObservableObject {
         let dt = now.timeIntervalSince(lastSample.time)
         if dt >= 1 {
             let rate = Double(all - lastSample.bytes) / dt
-            if rate >= 0 { speed = speed == 0 ? rate : speed * 0.7 + rate * 0.3 }
+            if rate >= 0 { speed = speed == 0 ? rate : speed * 0.6 + rate * 0.4 }
             lastSample = (now, all)
         }
-        if now.timeIntervalSince(lastLive) > 3 { lastLive = now; LiveDownload.update(jobs: jobs, speed: speed) }
+        if now.timeIntervalSince(lastLive) > 2 { lastLive = now; LiveDownload.update(jobs: jobs, speed: speed) }
         if now.timeIntervalSince(lastSave) > 10 { lastSave = now; save() }
     }
 
-    fileprivate func finished(_ tag: TaskTag, placedAt: URL?, error: String?) {
-        guard let j = jobs.firstIndex(where: { $0.id == tag.job }), let k = jobs[j].files.firstIndex(where: { $0.path == tag.path }) else { return }
-        if let error {
-            jobs[j].files[k].error = error
-            HuskLog.log("downloads", "\(tag.path): \(error)")
-        } else {
-            jobs[j].files[k].done = true
-            jobs[j].files[k].error = nil
-            if jobs[j].files[k].size > 0 { jobs[j].files[k].received = jobs[j].files[k].size }
-            HuskLog.log("downloads", "\(tag.path) done (\(jobs[j].filesDone)/\(jobs[j].files.count))")
-            if tag.kind == .apk, let placedAt { TranslationLayerStore.shared.add([placedAt], move: true) }
+    /// One file's transfer ended: complete, or stopped part-way (its bytes stay in the .part for next time).
+    fileprivate func ended(_ tag: TaskTag, error: String?, cancelled: Bool = false, background: Bool = false) {
+        let k = key(tag.job, tag.path)
+        if background { handedOff.remove(k) } else { directRunning[k] = nil }
+        guard let j = jobs.firstIndex(where: { $0.id == tag.job }), let i = jobs[j].files.firstIndex(where: { $0.path == tag.path }) else { pump(); return }
+        let f = jobs[j].files[i]
+        if f.done { pump(); return }      // a second transfer of a file that is already in place
+        guard let dest = Self.destination(tag.kind, f.path) else { return }
+        let part = Self.partURL(dest), have = Self.size(part)
+        jobs[j].files[i].received = have
+        if error == nil, f.size == 0 || have >= f.size {
+            // All of it: into place.
+            let fm = FileManager.default
+            try? fm.removeItem(at: dest)
+            do {
+                try fm.moveItem(at: part, to: dest)
+                jobs[j].files[i].done = true
+                jobs[j].files[i].error = nil
+                jobs[j].files[i].received = Self.size(dest)
+                if f.size == 0 { jobs[j].files[i].size = jobs[j].files[i].received }
+                retries[k] = nil
+                HuskLog.log("downloads", "\(f.path) done (\(jobs[j].filesDone)/\(jobs[j].files.count))")
+                if tag.kind == .apk { TranslationLayerStore.shared.add([dest], move: true) }
+            } catch {
+                jobs[j].files[i].error = error.localizedDescription
+            }
+        } else if !cancelled, !jobs[j].paused {
+            // Stopped early (a dropped connection, the server went away, the background service gave up): again from where it is,
+            // after a pause that grows, a few times; then it waits for Retry.
+            let n = retries[k, default: 0] + 1
+            retries[k] = n
+            if n <= 5 {
+                let wait: UInt64 = [2, 5, 15, 30, 60][n - 1]
+                HuskLog.log("downloads", "\(f.path): \(error ?? "incomplete") at \(Self.bytes(have)); again in \(wait) s")
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: wait * 1_000_000_000)
+                    self.pump()
+                }
+            } else {
+                jobs[j].files[i].error = error ?? "the transfer kept stopping"
+                HuskLog.log("downloads", "\(f.path): giving up after \(n - 1) tries")
+            }
         }
         if jobs[j].complete, jobs[j].finished == nil {
             jobs[j].finished = Date()
             HuskLog.log("downloads", "\(jobs[j].title) finished")
         }
         save()
+        pump()
         LiveDownload.update(jobs: jobs, speed: speed)
-    }
-
-    fileprivate func failedToStart(_ tag: TaskTag, error: String, resumeData: Data?) {
-        if let resumeData { Self.storeResumeData(resumeData, tag.job, tag.path) }
-        // A dropped connection or a server that went away for a moment: try again from where it stopped, a few times, then leave it to Retry.
-        let key = "\(tag.job)|\(tag.path)"
-        if let j = jobs.firstIndex(where: { $0.id == tag.job }), !jobs[j].paused,
-           let k = jobs[j].files.firstIndex(where: { $0.path == tag.path }), retries[key, default: 0] < 3 {
-            retries[key, default: 0] += 1
-            // Waiting first, longer each time: a computer whose server is restarting, or a phone moving between networks, needs a moment.
-            let n = retries[key]!, wait: UInt64 = n == 1 ? 5 : n == 2 ? 30 : 120
-            HuskLog.log("downloads", "\(tag.path): \(error); trying again in \(wait) s (\(n))")
-            let file = jobs[j].files[k]
-            Task { @MainActor in
-                try? await Task.sleep(nanoseconds: wait * 1_000_000_000)
-                guard let job = self.jobs.first(where: { $0.id == tag.job }), !job.paused,
-                      let f = job.files.first(where: { $0.path == file.path }), !f.done else { return }
-                self.begin(tag.job, f, kind: tag.kind)
-            }
-            return
-        }
-        retries[key] = nil
-        finished(tag, placedAt: nil, error: error)
     }
 
     func sessionEventsDone() {
@@ -256,23 +387,35 @@ final class Downloads: ObservableObject {
         backgroundCompletion = nil
     }
 
-    /// After a relaunch: files whose task is gone (the app was closed while it ran, or the device restarted) start again, from their
-    /// resume data when there is some.
-    private func reconcile() {
-        session.getAllTasks { tasks in
-            let running = Set(tasks.compactMap { TaskTag($0.taskDescription) }.map { "\($0.job)|\($0.path)" })
-            Task { @MainActor in
-                for job in self.jobs where !job.paused {
-                    for f in job.files where !f.done && f.error == nil && !running.contains("\(job.id)|\(f.path)") {
-                        self.begin(job.id, f, kind: job.kind)
-                    }
-                }
-                LiveDownload.update(jobs: self.jobs, speed: self.speed)
+    // MARK: on disk
+
+    /// Files already in place at their full size are done; partly fetched ones count what their .part holds.
+    private static func settle(_ job: inout Job) {
+        for i in job.files.indices where !job.files[i].done {
+            guard let dest = destination(job.kind, job.files[i].path) else { continue }
+            let full = size(dest)
+            if full > 0, job.files[i].size > 0, full == job.files[i].size, !FileManager.default.fileExists(atPath: partURL(dest).path) {
+                job.files[i].done = true
+                job.files[i].received = full
+            } else {
+                job.files[i].received = size(partURL(dest))
             }
         }
     }
 
-    // MARK: storage
+    private func settleFromDisk() {
+        for j in jobs.indices { Self.settle(&jobs[j]) }
+        save()
+    }
+
+    nonisolated static func size(_ url: URL) -> Int64 {
+        ((try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? NSNumber)?.int64Value ?? 0
+    }
+    nonisolated static func partURL(_ dest: URL) -> URL { dest.deletingLastPathComponent().appendingPathComponent(dest.lastPathComponent + ".part") }
+    private static func onDisk(_ kind: Job.Kind, _ path: String) -> Int64 {
+        guard let dest = destination(kind, path) else { return 0 }
+        return max(size(dest), size(partURL(dest)))
+    }
 
     nonisolated static var stateDir: URL {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Downloads", isDirectory: true)
@@ -283,19 +426,12 @@ final class Downloads: ObservableObject {
     private static func loadJobs() -> [Job] { (try? JSONDecoder().decode([Job].self, from: Data(contentsOf: jobsFile))) ?? [] }
     private func save() { try? JSONEncoder().encode(jobs).write(to: Self.jobsFile, options: .atomic) }
 
-    nonisolated private static func resumeFile(_ job: UUID, _ path: String) -> URL {
-        stateDir.appendingPathComponent("resume-\(job.uuidString)-\(path.replacingOccurrences(of: "/", with: "_")).data")
-    }
-    nonisolated static func storeResumeData(_ d: Data, _ job: UUID, _ path: String) { try? d.write(to: resumeFile(job, path)) }
-    nonisolated private static func resumeData(_ job: UUID, _ path: String) -> Data? { try? Data(contentsOf: resumeFile(job, path)) }
-    nonisolated private static func dropResumeData(_ job: UUID, _ path: String) { try? FileManager.default.removeItem(at: resumeFile(job, path)) }
-
     /// Where a finished file goes. A folder's files keep their paths under Shared Storage; a single file goes to its top; an APK waits
     /// in Husk's own space until the library takes it.
-    nonisolated static func destination(_ tag: TaskTag) -> URL? {
-        let parts = tag.path.split(separator: "/").map(String.init)
+    nonisolated static func destination(_ kind: Job.Kind, _ path: String) -> URL? {
+        let parts = path.split(separator: "/").map(String.init)
         guard !parts.isEmpty, !parts.contains(".."), !parts.contains(".") else { return nil }
-        if tag.kind == .apk { return stateDir.appendingPathComponent("incoming", isDirectory: true).appendingPathComponent(parts.last!) }
+        if kind == .apk { return stateDir.appendingPathComponent("incoming", isDirectory: true).appendingPathComponent(parts.last!) }
         return parts.reduce(TranslationLayer.sharedStorage) { $0.appendingPathComponent($1) }
     }
 
@@ -341,15 +477,31 @@ final class Downloads: ObservableObject {
     }
 
     static func bytes(_ n: Int64) -> String { ByteCountFormatter.string(fromByteCount: n, countStyle: .file) }
+
+    // MARK: iOS 26
+
+    /// Ask to keep running after Husk leaves the screen (a continued processing task). The system shows its progress in the Dynamic
+    /// Island and on the Lock Screen, and Husk keeps downloading itself. Only from something the person did -- adding or resuming a
+    /// download -- which is what the system allows.
+    private func keepRunning() {
+        guard let active = jobs.first(where: { !$0.complete && !$0.paused }) else { return }
+        if #available(iOS 26.0, *) { ContinuedDownload.begin(title: active.title) }
+    }
+
+    /// The continued processing task ended (finished, or stopped by the system): if Husk is not on screen, hand off now.
+    fileprivate func continuedEnded() {
+        if UIApplication.shared.applicationState != .active { leaving() }
+    }
 }
 
-/// Which job and file a session task is for, kept in its taskDescription so it survives a relaunch.
+/// Which job and file a task is for, kept in its taskDescription so it survives a relaunch, with the byte the request started at.
 struct TaskTag: Codable {
     let job: UUID
     let path: String
     let kind: Downloads.Job.Kind
+    var offset: Int64 = 0
 
-    init(job: UUID, path: String, kind: Downloads.Job.Kind) { self.job = job; self.path = path; self.kind = kind }
+    init(job: UUID, path: String, kind: Downloads.Job.Kind, offset: Int64 = 0) { self.job = job; self.path = path; self.kind = kind; self.offset = offset }
     init?(_ s: String?) {
         guard let s, let d = s.data(using: .utf8), let t = try? JSONDecoder().decode(TaskTag.self, from: d) else { return nil }
         self = t
@@ -357,46 +509,129 @@ struct TaskTag: Codable {
     var encoded: String { (try? JSONEncoder().encode(self)).flatMap { String(data: $0, encoding: .utf8) } ?? "" }
 }
 
-/// The session's delegate, on its own queue. A finished file has to be moved before this callback returns (iOS deletes it after),
-/// so that happens here; everything else goes to the main actor.
-final class LinkDownloadDelegate: NSObject, URLSessionDownloadDelegate {
+/// Husk's own transfers: each response is written straight into its file's .part as it arrives. Runs on one serial queue.
+final class DirectDownloadDelegate: NSObject, URLSessionDataDelegate {
+    private final class Transfer {
+        let tag: TaskTag
+        let part: URL
+        var handle: FileHandle?
+        var written: Int64
+        var expected: Int64 = 0
+        var lastReport = Date.distantPast
+        var error: String?
+        init(tag: TaskTag, part: URL, offset: Int64) { self.tag = tag; self.part = part; written = offset }
+    }
+    private var transfers: [Int: Transfer] = [:]
+    private let lock = NSLock()
+
+    func begin(task: URLSessionDataTask, tag: TaskTag, part: URL, offset: Int64) {
+        lock.lock(); transfers[task.taskIdentifier] = Transfer(tag: tag, part: part, offset: offset); lock.unlock()
+    }
+    private func transfer(_ task: URLSessionTask) -> Transfer? { lock.lock(); defer { lock.unlock() }; return transfers[task.taskIdentifier] }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse, completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        guard let t = transfer(dataTask), let http = response as? HTTPURLResponse else { completionHandler(.cancel); return }
+        let fm = FileManager.default
+        try? fm.createDirectory(at: t.part.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if !fm.fileExists(atPath: t.part.path) { fm.createFile(atPath: t.part.path, contents: nil) }
+        guard let h = try? FileHandle(forWritingTo: t.part) else { t.error = "cannot write the file"; completionHandler(.cancel); return }
+        switch http.statusCode {
+        case 206:
+            // The rest, from where the .part ends.
+            try? h.truncate(atOffset: UInt64(t.tag.offset))
+            t.written = t.tag.offset
+            t.expected = t.tag.offset + max(0, http.expectedContentLength)
+        case 200:
+            // The whole file (no Range asked, or the server ignores it): from the start.
+            try? h.truncate(atOffset: 0)
+            t.written = 0
+            t.expected = max(0, http.expectedContentLength)
+        case 416:
+            // Nothing left to send: the .part is already whole.
+            t.expected = t.written
+            try? h.close()
+            completionHandler(.cancel)
+            return
+        default:
+            t.error = "the server answered \(http.statusCode)"
+            try? h.close()
+            completionHandler(.cancel)
+            return
+        }
+        try? h.seekToEnd()
+        t.handle = h
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        guard let t = transfer(dataTask), let h = t.handle else { return }
+        do { try h.write(contentsOf: data) } catch { t.error = "cannot write: \(error.localizedDescription)"; dataTask.cancel(); return }
+        t.written += Int64(data.count)
+        let now = Date()
+        if now.timeIntervalSince(t.lastReport) > 0.5 {
+            t.lastReport = now
+            let tag = t.tag, written = t.written, expected = t.expected
+            Task { @MainActor in Downloads.shared.progressed(tag, received: written, expected: expected) }
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        lock.lock(); let t = transfers.removeValue(forKey: task.taskIdentifier); lock.unlock()
+        guard let t else { return }
+        try? t.handle?.synchronize()
+        try? t.handle?.close()
+        let ns = error as NSError?
+        let cancelled = ns?.code == NSURLErrorCancelled && t.error == nil
+        let message = t.error ?? (cancelled ? nil : error?.localizedDescription)
+        let incomplete = t.expected > 0 && t.written < t.expected
+        let tag = t.tag
+        Task { @MainActor in Downloads.shared.ended(tag, error: message ?? (incomplete && !cancelled ? "the connection ended early" : nil), cancelled: cancelled) }
+    }
+}
+
+/// The background session's delegate. A finished task's file has to be dealt with before this callback returns (iOS deletes it
+/// after): it is the rest of the file from the tag's offset, so it is appended to the .part (or becomes it, from the start).
+final class BackgroundDownloadDelegate: NSObject, URLSessionDownloadDelegate {
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData _: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
         guard let tag = TaskTag(downloadTask.taskDescription) else { return }
-        Task { @MainActor in Downloads.shared.progressed(tag, received: totalBytesWritten, expected: totalBytesExpectedToWrite) }
+        let received = tag.offset + totalBytesWritten, expected = totalBytesExpectedToWrite > 0 ? tag.offset + totalBytesExpectedToWrite : 0
+        Task { @MainActor in Downloads.shared.progressed(tag, received: received, expected: expected) }
     }
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
-        guard let tag = TaskTag(downloadTask.taskDescription) else { return }
-        if let http = downloadTask.response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-            Task { @MainActor in Downloads.shared.finished(tag, placedAt: nil, error: "the server answered \(http.statusCode)") }
-            return
-        }
-        guard let dest = Downloads.destination(tag) else {
-            Task { @MainActor in Downloads.shared.finished(tag, placedAt: nil, error: "not a usable path") }
-            return
-        }
+        guard let tag = TaskTag(downloadTask.taskDescription), let dest = Downloads.destination(tag.kind, tag.path) else { return }
+        let part = Downloads.partURL(dest)
+        let status = (downloadTask.response as? HTTPURLResponse)?.statusCode ?? 0
         let fm = FileManager.default
         do {
-            try fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
-            if fm.fileExists(atPath: dest.path) { try fm.removeItem(at: dest) }
-            try fm.moveItem(at: location, to: dest)
-            Task { @MainActor in Downloads.shared.finished(tag, placedAt: dest, error: nil) }
+            try fm.createDirectory(at: part.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if status == 206, tag.offset > 0, Downloads.size(part) == tag.offset {
+                // Append the rest to what was there.
+                guard let out = try? FileHandle(forWritingTo: part), let inp = try? FileHandle(forReadingFrom: location) else { throw CocoaError(.fileWriteUnknown) }
+                try out.seekToEnd()
+                while let chunk = try inp.read(upToCount: 8 << 20), !chunk.isEmpty { try out.write(contentsOf: chunk) }
+                try out.close(); try inp.close()
+            } else if status == 200 || (status == 206 && tag.offset == 0) {
+                try? fm.removeItem(at: part)
+                try fm.moveItem(at: location, to: part)
+            } else {
+                throw NSError(domain: "HuskDownloads", code: status, userInfo: [NSLocalizedDescriptionKey: "the server answered \(status)"])
+            }
         } catch {
             let message = error.localizedDescription
-            Task { @MainActor in Downloads.shared.finished(tag, placedAt: nil, error: message) }
+            Task { @MainActor in Downloads.shared.ended(tag, error: message, background: true) }
+            return
         }
+        Task { @MainActor in Downloads.shared.ended(tag, error: nil, background: true) }
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         guard let error, let tag = TaskTag(task.taskDescription) else { return }
         let ns = error as NSError
-        if ns.code == NSURLErrorCancelled, ns.userInfo[NSURLSessionDownloadTaskResumeData] == nil { return }   // removed or paused
-        let resume = ns.userInfo[NSURLSessionDownloadTaskResumeData] as? Data
+        let cancelled = ns.code == NSURLErrorCancelled
+        // The bytes it had are lost with it (they are in iOS's own file, not the .part); the next try starts where the .part ends.
         let message = error.localizedDescription
-        Task { @MainActor in
-            if ns.code == NSURLErrorCancelled { if let resume { Downloads.storeResumeData(resume, tag.job, tag.path) }; return }
-            Downloads.shared.failedToStart(tag, error: message, resumeData: resume)
-        }
+        Task { @MainActor in Downloads.shared.ended(tag, error: message, cancelled: cancelled, background: true) }
     }
 
     func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
@@ -487,37 +722,40 @@ private enum Live {
 enum ContinuedDownload {
     private static var task: BGContinuedProcessingTask?
     private static var pending: String?
+    private static var registered: String?
     private static var lastSubtitle = Date.distantPast
 
     static var running: Bool { task != nil || pending != nil }
+    /// The system started it: Husk is being kept running.
+    static var active: Bool { task != nil }
 
     static func begin(title: String) {
-        guard !running else { return }
-        // The identifier has to start with the app's bundle ID and match a pattern in Info.plist. A sideloader renames the bundle
-        // (com.husk.app.<team>) but not Info.plist, so two forms are tried: one from the bundle ID as it is now, which Info.plist's
-        // com.husk.app.* covers, and Info.plist's own downloads pattern, as Husk was built.
-        let suffix = UUID().uuidString.prefix(8)
-        var candidates: [String] = []
-        if let bundle = Bundle.main.bundleIdentifier { candidates.append("\(bundle).downloads.\(suffix)") }
+        guard !running, let bundle = Bundle.main.bundleIdentifier else { return }
+        // The launch handler is registered for a wildcard pattern from Info.plist, and the submitted identifier has to start with the
+        // app's bundle ID. A sideloader renames the bundle (com.husk.app.<team>) but not Info.plist: then the broad com.husk.app.* is
+        // the pattern, and the identifier is made from the bundle ID as it is now.
         let permitted = Bundle.main.object(forInfoDictionaryKey: "BGTaskSchedulerPermittedIdentifiers") as? [String] ?? []
-        if let pattern = permitted.first(where: { $0.hasSuffix(".downloads.*") }) { candidates.append(String(pattern.dropLast()) + suffix) }
-        for id in Array(NSOrderedSet(array: candidates)) as? [String] ?? candidates {
-            let registered = BGTaskScheduler.shared.register(forTaskWithIdentifier: id, using: .main) { t in
+        guard let downloads = permitted.first(where: { $0.hasSuffix(".downloads.*") }) else { return }
+        let built = String(downloads.dropLast(".downloads.*".count))      // the bundle ID Husk was built with
+        let pattern: String? = bundle == built ? downloads : (bundle.hasPrefix(built + ".") ? permitted.first { $0 == built + ".*" } : nil)
+        guard let pattern else { HuskLog.log("downloads", "background task: no permitted pattern"); return }
+        if registered != pattern {
+            let ok = BGTaskScheduler.shared.register(forTaskWithIdentifier: pattern, using: .main) { t in
                 MainActor.assumeIsolated { started(t) }
             }
-            guard registered else { HuskLog.log("downloads", "background task: \(id) not permitted"); continue }
-            let request = BGContinuedProcessingTaskRequest(identifier: id, title: "Downloading \(title)", subtitle: "Starting…")
-            request.strategy = .fail
-            do {
-                try BGTaskScheduler.shared.submit(request)
-                pending = id
-                HuskLog.log("downloads", "background task submitted (\(id))")
-                return
-            } catch {
-                HuskLog.log("downloads", "background task \(id) refused: \(error.localizedDescription)")
-            }
+            guard ok else { HuskLog.log("downloads", "background task: \(pattern) not permitted; using Husk's Live Activity instead"); return }
+            registered = pattern
         }
-        HuskLog.log("downloads", "no background task; using Husk's Live Activity instead")
+        let id = "\(bundle).downloads.\(UUID().uuidString.prefix(8))"
+        let request = BGContinuedProcessingTaskRequest(identifier: id, title: "Downloading \(title)", subtitle: "Starting…")
+        request.strategy = .fail
+        do {
+            try BGTaskScheduler.shared.submit(request)
+            pending = id
+            HuskLog.log("downloads", "background task submitted (\(id), handler \(pattern))")
+        } catch {
+            HuskLog.log("downloads", "background task \(id) refused: \(error.localizedDescription); using Husk's Live Activity instead")
+        }
     }
 
     private static func started(_ t: BGTask) {
@@ -527,8 +765,9 @@ enum ContinuedDownload {
         HuskLog.log("downloads", "background task running")
         t.expirationHandler = {
             MainActor.assumeIsolated {
-                HuskLog.log("downloads", "background task ended by the system; the downloads carry on in iOS's download service")
+                HuskLog.log("downloads", "background task ended by the system")
                 task = nil
+                Downloads.shared.continuedEnded()
             }
         }
         _ = update(jobs: Downloads.shared.jobs, speed: Downloads.shared.speed)
@@ -537,7 +776,7 @@ enum ContinuedDownload {
     /// Progress into the task. True while the system's progress is the one showing.
     @discardableResult
     static func update(jobs: [Downloads.Job], speed: Double) -> Bool {
-        guard let t = task else { return pending != nil }
+        guard let t = task else { return false }
         let active = jobs.filter { !$0.complete && !$0.paused }
         if active.isEmpty {
             let failed = jobs.contains { $0.failed }
