@@ -1,0 +1,71 @@
+name: Build Husk IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Select Xcode version
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app
+
+      - name: Install build dependencies
+        run: |
+          brew install meson ninja pkg-config cmake glib pixman
+          rustup target add aarch64-apple-ios
+
+      - name: Build native dependencies
+        run: |
+          if [ -f ./scripts/ci_build.sh ]; then
+            chmod +x ./scripts/ci_build.sh
+            bash ./scripts/ci_build.sh
+          else
+            echo "No ci_build.sh found, skipping"
+          fi
+
+      - name: Generate Xcode project
+        run: |
+          if command -v xcodegen >/dev/null 2>&1; then
+            xcodegen generate
+          fi
+          ls -la
+          ls -la Husk 2>/dev/null || true
+
+      - name: Build Husk app
+        run: |
+          cd Husk
+          xcodebuild -project Husk.xcodeproj \
+            -scheme Husk \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath ../build_dd \
+            -arch arm64 \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            build
+
+      - name: Package into IPA
+        run: |
+          mkdir -p Payload
+          cp -R build_dd/Build/Products/Release-iphoneos/Husk.app Payload/
+          zip -r Husk-unsigned.ipa Payload
+          ls -lh Husk-unsigned.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Husk-unsigned-ipa
+          path: Husk-unsigned.ipa
+          retention-days: 30
