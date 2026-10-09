@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+import AVFoundation
 import BackgroundTasks
 import Foundation
 import UIKit
@@ -175,6 +176,7 @@ final class Downloads: ObservableObject {
         guard let i = jobs.firstIndex(where: { $0.id == id }) else { return }
         jobs[i].paused = true
         save()
+        DownloadKeepAlive.shared.set(jobs.contains { !$0.complete && !$0.paused })
         for (key, task) in directRunning where key.hasPrefix(id.uuidString) { task.cancel() }
         background.getAllTasks { tasks in for t in tasks where TaskTag(t.taskDescription)?.job == id { t.cancel() } }
         handedOff = handedOff.filter { !$0.hasPrefix(id.uuidString) }
@@ -192,11 +194,17 @@ final class Downloads: ObservableObject {
         LiveDownload.update(jobs: jobs, speed: speed)
     }
 
+    /// The keep-alive stopped while Husk was in the background (a call took the audio): hand off, as if leaving now.
+    fileprivate func keepAliveLost() {
+        if UIApplication.shared.applicationState != .active { leaving() }
+    }
+
     func remove(_ id: UUID) {
         for (key, task) in directRunning where key.hasPrefix(id.uuidString) { task.cancel() }
         background.getAllTasks { tasks in for t in tasks where TaskTag(t.taskDescription)?.job == id { t.cancel() } }
         jobs.removeAll { $0.id == id }
         save()
+        DownloadKeepAlive.shared.set(jobs.contains { !$0.complete && !$0.paused })
         LiveDownload.update(jobs: jobs, speed: speed)
     }
 
@@ -212,6 +220,7 @@ final class Downloads: ObservableObject {
     /// Start files until `parallel` are running: Husk's own requests while it is awake, nothing new while it is not (what was handed
     /// to the background session carries on there).
     private func pump() {
+        DownloadKeepAlive.shared.set(jobs.contains { !$0.complete && !$0.paused })
         guard awake else { return }
         for job in jobs where !job.paused {
             for f in job.files where !f.done && f.error == nil {
@@ -242,6 +251,8 @@ final class Downloads: ObservableObject {
     private func leaving() {
         if #available(iOS 26.0, *), ContinuedDownload.active { return }
         guard jobs.contains(where: { !$0.complete && !$0.paused }) else { return }
+        // Kept running by its silent audio: carry on downloading as if on screen.
+        if DownloadKeepAlive.shared.running { HuskLog.log("downloads", "leaving the screen; kept running, downloads carry on"); return }
         awake = false
         if grace == .invalid {
             grace = UIApplication.shared.beginBackgroundTask(withName: "Husk downloads") {
@@ -756,8 +767,10 @@ enum ContinuedDownload {
     /// The system started it: Husk is being kept running.
     static var active: Bool { task != nil }
 
+    private static var refused = false
+
     static func begin(title: String) {
-        guard !running, let bundle = Bundle.main.bundleIdentifier else { return }
+        guard !running, !refused, let bundle = Bundle.main.bundleIdentifier else { return }
         // The launch handler is registered for a wildcard pattern from Info.plist, and the submitted identifier has to start with the
         // app's bundle ID. A sideloader renames the bundle (com.husk.app.<team>) but not Info.plist: then the broad com.husk.app.* is
         // the pattern, and the identifier is made from the bundle ID as it is now.
@@ -765,12 +778,12 @@ enum ContinuedDownload {
         guard let downloads = permitted.first(where: { $0.hasSuffix(".downloads.*") }) else { return }
         let built = String(downloads.dropLast(".downloads.*".count))      // the bundle ID Husk was built with
         let pattern: String? = bundle == built ? downloads : (bundle.hasPrefix(built + ".") ? permitted.first { $0 == built + ".*" } : nil)
-        guard let pattern else { HuskLog.log("downloads", "background task: no permitted pattern"); return }
+        guard let pattern else { refused = true; HuskLog.log("downloads", "background task: no permitted pattern"); return }
         if registered != pattern {
             let ok = BGTaskScheduler.shared.register(forTaskWithIdentifier: pattern, using: .main) { t in
                 MainActor.assumeIsolated { started(t) }
             }
-            guard ok else { HuskLog.log("downloads", "background task: \(pattern) not permitted; using Husk's Live Activity instead"); return }
+            guard ok else { refused = true; HuskLog.log("downloads", "background task: \(pattern) not permitted; Husk keeps itself running instead"); return }
             registered = pattern
         }
         let id = "\(bundle).downloads.\(UUID().uuidString.prefix(8))"
@@ -832,5 +845,77 @@ enum ContinuedDownload {
             t.updateTitle(active.count == 1 ? "Downloading \(active[0].title)" : "Downloading \(active.count) items", subtitle: sub)
         }
         return true
+    }
+}
+
+/// Keeps Husk running in the background while downloads are active, by playing silence: iOS lets an app that is playing audio keep
+/// running, so Husk goes on downloading at full speed and its Live Activity stays current. It mixes with other audio (music keeps
+/// playing) and stops as soon as nothing is downloading. The way an App Store app would do this is a continued processing task, which
+/// iOS refuses a sideloaded copy (its bundle ID no longer matches the identifiers in Info.plist).
+@MainActor
+final class DownloadKeepAlive {
+    static let shared = DownloadKeepAlive()
+    private var engine: AVAudioEngine?
+    private var player: AVAudioPlayerNode?
+    private(set) var running = false
+
+    private init() {
+        NotificationCenter.default.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { note in
+            let type = (note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt).flatMap(AVAudioSession.InterruptionType.init)
+            MainActor.assumeIsolated {
+                let k = DownloadKeepAlive.shared
+                guard k.running || k.wanted else { return }
+                if type == .began {
+                    HuskLog.log("downloads", "keep-alive interrupted (a call, or another app took the audio)")
+                    k.stopEngine()
+                    Downloads.shared.keepAliveLost()
+                } else if type == .ended {
+                    k.startEngine()
+                }
+            }
+        }
+    }
+
+    private var wanted = false
+
+    func set(_ on: Bool) {
+        guard on != wanted else { return }
+        wanted = on
+        if on { startEngine() } else { stopEngine() }
+    }
+
+    private func startEngine() {
+        guard wanted, !running else { return }
+        // A game's screen sets up its own audio and is in front anyway; nothing to do while one is playing.
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+            try session.setActive(true)
+            let engine = AVAudioEngine(), player = AVAudioPlayerNode()
+            engine.attach(player)
+            let format = AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 1)!
+            engine.connect(player, to: engine.mainMixerNode, format: format)
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 44100) else { return }
+            buffer.frameLength = 44100                  // one second of zeros, looped
+            try engine.start()
+            player.scheduleBuffer(buffer, at: nil, options: .loops)
+            player.play()
+            self.engine = engine
+            self.player = player
+            running = true
+            HuskLog.log("downloads", "keep-alive on: Husk keeps running in the background while downloading")
+        } catch {
+            HuskLog.log("downloads", "keep-alive failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func stopEngine() {
+        guard running else { return }
+        player?.stop()
+        engine?.stop()
+        player = nil
+        engine = nil
+        running = false
+        HuskLog.log("downloads", "keep-alive off")
     }
 }
