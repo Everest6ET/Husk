@@ -220,6 +220,7 @@ static void *control_thread(void *arg)
             else if (sscanf(line, "hold %f %f %ld", &a, &b, &ms) == 3) { tl_sdl_touch(0, 0, a, b); sleep_ms(ms); tl_sdl_touch(2, 0, a, b); }
             else if (sscanf(line, "swipe %f %f %f %f %ld", &a, &b, &c, &d, &ms) == 5) do_swipe(a, b, c, d, ms);
             else if (sscanf(line, "wait %ld", &ms) == 1) sleep_ms(ms);
+            else if (sscanf(line, "keyhold %f %ld", &a, &ms) == 2) { tl_sdl_key((int)a, true); sleep_ms(ms); tl_sdl_key((int)a, false); }   /* held for ms */
             else if (sscanf(line, "key %f", &a) == 1) { tl_sdl_key((int)a, true); sleep_ms(50); tl_sdl_key((int)a, false); }          /* an Android key code */
             else if (sscanf(line, "mouse %f %f", &a, &b) == 2) { tl_sdl_mouse(1, a, b); sleep_ms(50); tl_sdl_mouse(0, a, b); sleep_ms(80); tl_sdl_mouse(2, a, b); }
             else if (!strncmp(line, "pause", 5)) tl_sdl_set_paused(true);
