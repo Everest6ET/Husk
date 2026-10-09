@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+import BackgroundTasks
 import Foundation
 import UIKit
 #if canImport(ActivityKit)
@@ -115,6 +116,7 @@ final class Downloads: ObservableObject {
         jobs.insert(job, at: 0)
         save()
         for f in job.files where !f.done { begin(job.id, f, kind: job.kind) }
+        keepRunning()
         HuskLog.log("downloads", "started \(job.title): \(job.files.count) file(s), \(Self.bytes(job.total))")
         LiveDownload.update(jobs: jobs, speed: speed)
     }
@@ -151,6 +153,7 @@ final class Downloads: ObservableObject {
     func resume(_ id: UUID) {
         guard let i = jobs.firstIndex(where: { $0.id == id }) else { return }
         jobs[i].paused = false
+        defer { keepRunning() }
         for k in jobs[i].files.indices { jobs[i].files[k].error = nil }
         save()
         let job = jobs[i]
@@ -171,6 +174,14 @@ final class Downloads: ObservableObject {
     func clearFinished() {
         jobs.removeAll { $0.complete }
         save()
+    }
+
+    /// iOS 26: ask to keep running after Husk leaves the screen (a continued processing task). The system shows its progress in the
+    /// Dynamic Island and on the Lock Screen, and Husk keeps receiving progress, so the numbers there stay live. Only from something
+    /// the person did -- adding or resuming a download -- which is what the system allows.
+    private func keepRunning() {
+        guard jobs.contains(where: { !$0.complete && !$0.paused }) else { return }
+        if #available(iOS 26.0, *) { ContinuedDownload.begin(title: jobs.first { !$0.complete && !$0.paused }?.title ?? "Downloads") }
     }
 
     // MARK: from the session (main actor)
@@ -397,6 +408,13 @@ final class LinkDownloadDelegate: NSObject, URLSessionDownloadDelegate {
 @MainActor
 enum LiveDownload {
     static func update(jobs: [Downloads.Job], speed: Double) {
+        if #available(iOS 26.0, *), ContinuedDownload.update(jobs: jobs, speed: speed) {
+            // The system's own progress is showing; Husk's Live Activity would only repeat it.
+            #if canImport(ActivityKit)
+            if #available(iOS 16.1, *) { Live.end() }
+            #endif
+            return
+        }
         #if canImport(ActivityKit)
         if #available(iOS 16.1, *) { Live.update(jobs: jobs, speed: speed) }
         #endif
@@ -410,6 +428,13 @@ private enum Live {
     static var activity: Activity<HuskDownloadAttributes>?
     static var started = Date()
     static var logged = false
+
+    static func end() {
+        if let a = activity ?? Activity<HuskDownloadAttributes>.activities.first {
+            Task { await a.end(dismissalPolicy: .immediate) }
+            activity = nil
+        }
+    }
 
     static func update(jobs: [Downloads.Job], speed: Double) {
         let active = jobs.filter { !$0.complete && !$0.paused }
@@ -454,3 +479,92 @@ private enum Live {
     }
 }
 #endif
+
+/// The download as a continued processing task (iOS 26): the system keeps Husk running in the background for it and shows its
+/// progress in the Dynamic Island and on the Lock Screen.
+@available(iOS 26.0, *)
+@MainActor
+enum ContinuedDownload {
+    private static var task: BGContinuedProcessingTask?
+    private static var pending: String?
+    private static var lastSubtitle = Date.distantPast
+
+    static var running: Bool { task != nil || pending != nil }
+
+    static func begin(title: String) {
+        guard !running else { return }
+        // The identifier has to start with the app's bundle ID and match a pattern in Info.plist. A sideloader renames the bundle
+        // (com.husk.app.<team>) but not Info.plist, so two forms are tried: one from the bundle ID as it is now, which Info.plist's
+        // com.husk.app.* covers, and Info.plist's own downloads pattern, as Husk was built.
+        let suffix = UUID().uuidString.prefix(8)
+        var candidates: [String] = []
+        if let bundle = Bundle.main.bundleIdentifier { candidates.append("\(bundle).downloads.\(suffix)") }
+        let permitted = Bundle.main.object(forInfoDictionaryKey: "BGTaskSchedulerPermittedIdentifiers") as? [String] ?? []
+        if let pattern = permitted.first(where: { $0.hasSuffix(".downloads.*") }) { candidates.append(String(pattern.dropLast()) + suffix) }
+        for id in Array(NSOrderedSet(array: candidates)) as? [String] ?? candidates {
+            let registered = BGTaskScheduler.shared.register(forTaskWithIdentifier: id, using: .main) { t in
+                MainActor.assumeIsolated { started(t) }
+            }
+            guard registered else { HuskLog.log("downloads", "background task: \(id) not permitted"); continue }
+            let request = BGContinuedProcessingTaskRequest(identifier: id, title: "Downloading \(title)", subtitle: "Starting…")
+            request.strategy = .fail
+            do {
+                try BGTaskScheduler.shared.submit(request)
+                pending = id
+                HuskLog.log("downloads", "background task submitted (\(id))")
+                return
+            } catch {
+                HuskLog.log("downloads", "background task \(id) refused: \(error.localizedDescription)")
+            }
+        }
+        HuskLog.log("downloads", "no background task; using Husk's Live Activity instead")
+    }
+
+    private static func started(_ t: BGTask) {
+        guard let t = t as? BGContinuedProcessingTask else { t.setTaskCompleted(success: false); return }
+        task = t
+        pending = nil
+        HuskLog.log("downloads", "background task running")
+        t.expirationHandler = {
+            MainActor.assumeIsolated {
+                HuskLog.log("downloads", "background task ended by the system; the downloads carry on in iOS's download service")
+                task = nil
+            }
+        }
+        _ = update(jobs: Downloads.shared.jobs, speed: Downloads.shared.speed)
+    }
+
+    /// Progress into the task. True while the system's progress is the one showing.
+    @discardableResult
+    static func update(jobs: [Downloads.Job], speed: Double) -> Bool {
+        guard let t = task else { return pending != nil }
+        let active = jobs.filter { !$0.complete && !$0.paused }
+        if active.isEmpty {
+            let failed = jobs.contains { $0.failed }
+            t.progress.completedUnitCount = t.progress.totalUnitCount
+            t.updateTitle(failed ? "Download stopped" : "Download finished", subtitle: failed ? "Open Husk to retry" : (jobs.first?.title ?? ""))
+            t.setTaskCompleted(success: !failed)
+            task = nil
+            HuskLog.log("downloads", "background task completed")
+            return false
+        }
+        let received = active.reduce(0) { $0 + $1.received }, total = active.reduce(0) { $0 + $1.total }
+        // In megabytes: Progress counts in Int64 and the system shows a fraction, so the unit only has to be fine enough.
+        t.progress.totalUnitCount = max(1, total / 1_000_000)
+        t.progress.completedUnitCount = min(t.progress.totalUnitCount, received / 1_000_000)
+        if Date().timeIntervalSince(lastSubtitle) > 2 {
+            lastSubtitle = Date()
+            var sub = "\(Downloads.bytes(received)) of \(Downloads.bytes(total))"
+            if speed > 1 { sub += " · \(Downloads.bytes(Int64(speed)))/s" }
+            let files = active.reduce(0) { $0 + $1.files.count }
+            if files > 1 { sub += " · \(active.reduce(0) { $0 + $1.filesDone })/\(files) files" }
+            if speed > 1, total > received {
+                let left = Double(total - received) / speed
+                let f = DateComponentsFormatter(); f.allowedUnits = left > 3600 ? [.hour, .minute] : [.minute, .second]; f.unitsStyle = .abbreviated
+                if let tl = f.string(from: left) { sub += " · \(tl) left" }
+            }
+            t.updateTitle(active.count == 1 ? "Downloading \(active[0].title)" : "Downloading \(active.count) items", subtitle: sub)
+        }
+        return true
+    }
+}
