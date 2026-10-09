@@ -130,9 +130,11 @@ for f in vmlinuz-virt initramfs-virt husk-jit.js \
     fi
 done
 
-# Built-in StikJIT's helper. Without it the app still installs and runs with
-# StikDebug, but its JIT setup would offer a method that can only fail.
+# Built-in StikJIT's helper (without it the app still installs and runs with
+# StikDebug, but its JIT setup would offer a method that can only fail), and the
+# widget that draws the download Live Activity.
 for f in "$APP/PlugIns/HuskJITHelper.appex/HuskJITHelper" \
+         "$APP/PlugIns/HuskDownloadsWidget.appex/HuskDownloadsWidget" \
          "$APP/Frameworks/StikJIT.framework/StikJIT" \
          "$APP/Frameworks/StikJIT.framework/Info.plist"; do
     if [ ! -f "$f" ]; then

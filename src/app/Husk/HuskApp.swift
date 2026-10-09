@@ -34,6 +34,19 @@ final class HuskAppDelegate: NSObject, UIApplicationDelegate {
     func application(_ application: UIApplication, supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
         HuskOrientation.mask
     }
+
+    func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        // The download session reconnects to whatever was running before Husk was closed or relaunched in the background.
+        _ = Downloads.shared
+        return true
+    }
+
+    /// iOS woke Husk because background downloads finished or need attention: handle them, then say so.
+    func application(_ application: UIApplication, handleEventsForBackgroundURLSession identifier: String, completionHandler: @escaping () -> Void) {
+        guard identifier == Downloads.sessionID else { completionHandler(); return }
+        HuskLog.log("downloads", "woken for background download events")
+        Downloads.shared.backgroundCompletion = completionHandler
+    }
 }
 
 @main

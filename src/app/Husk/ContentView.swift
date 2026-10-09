@@ -59,6 +59,10 @@ struct ContentView: View {
                     .tabItem { Label("Store", systemImage: "cart.fill") }
                     .tag(HuskTab.store)
 
+                DownloadsTab()
+                    .tabItem { Label("Downloads", systemImage: "arrow.down.circle.fill") }
+                    .tag(HuskTab.downloads)
+
                 SettingsTab()
                     .tabItem { Label("Settings", systemImage: "gearshape.fill") }
                     .tag(HuskTab.settings)

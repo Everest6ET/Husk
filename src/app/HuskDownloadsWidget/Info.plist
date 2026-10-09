@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Husk JIT Helper</string>
+	<string>Husk Downloads</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -22,28 +22,8 @@
 	<string>53</string>
 	<key>NSExtension</key>
 	<dict>
-		<key>NSExtensionAttributes</key>
-		<dict>
-			<key>NSExtensionActivationRule</key>
-			<string>FALSEPREDICATE</string>
-		</dict>
-		<key>NSExtensionContextClass</key>
-		<string>NSExtensionContext</string>
-		<key>NSExtensionContextHostClass</key>
-		<string>NSExtensionContext</string>
 		<key>NSExtensionPointIdentifier</key>
-		<string>com.apple.ar.viewer</string>
-		<key>NSExtensionPrincipalClass</key>
-		<string>HuskJITHelperHandler</string>
-	</dict>
-	<key>XPCService</key>
-	<dict>
-		<key>ServiceType</key>
-		<string>Application</string>
-		<key>_MultipleInstances</key>
-		<true/>
-		<key>_ProcessType</key>
-		<string>App</string>
+		<string>com.apple.widgetkit-extension</string>
 	</dict>
 </dict>
 </plist>

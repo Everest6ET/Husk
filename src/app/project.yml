@@ -50,6 +50,8 @@ targets:
           - "husk-tl-unity-app.h"
       # The messages the app and its JIT helper exchange.
       - path: HuskJITHelper/HuskJITMessages.swift
+      # The download Live Activity's attributes, shared with the widget that draws it.
+      - path: Shared
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(HUSK_BUNDLE_IDENTIFIER)
@@ -101,6 +103,8 @@ targets:
     dependencies:
       # Built-in StikJIT's debugger process. Embedded into PlugIns/.
       - target: HuskJITHelper
+      # The download Live Activity (Lock Screen and Dynamic Island). Embedded into PlugIns/.
+      - target: HuskDownloadsWidget
       # Built by scripts/build_ios.sh. Embedded and signed into the bundle.
       - framework: ../../build/ios-arm64/lib/libqemu-aarch64-softmmu.dylib
         embed: true
@@ -244,3 +248,20 @@ targets:
       # here and embedded by the app target's Embed StikJIT.
       - framework: Frameworks/StikJIT.xcframework
         embed: false
+
+  # Draws the Live Activity a download shows (Downloads.swift starts and updates it). Live Activities are iOS 16.1.
+  HuskDownloadsWidget:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "16.1"
+    sources:
+      - path: HuskDownloadsWidget
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(HUSK_BUNDLE_IDENTIFIER).Downloads
+        INFOPLIST_FILE: HuskDownloadsWidget/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        APPLICATION_EXTENSION_API_ONLY: YES
+        CODE_SIGN_STYLE: Automatic
+        TARGETED_DEVICE_FAMILY: "1"
