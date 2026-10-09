@@ -13,12 +13,12 @@ import json
 import os
 import socket
 import sys
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = os.path.realpath(sys.argv[1] if len(sys.argv) > 1 else ".")
 PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 8642
-CHUNK = 4 << 20
 
 
 def manifest():
@@ -87,18 +87,24 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         if head:
             return
+        self.wfile.flush()
+        t0, sent = time.time(), 0
         with open(full, "rb") as f:
-            f.seek(start)
-            left = end - start + 1
-            while left > 0:
-                data = f.read(min(CHUNK, left))
-                if not data:
-                    break
-                try:
-                    self.wfile.write(data)
-                except (BrokenPipeError, ConnectionResetError):
-                    return
-                left -= len(data)
+            # sendfile: the kernel copies from the file to the socket, without the data passing through Python.
+            sock = self.connection
+            offset, left = start, end - start + 1
+            try:
+                while left > 0:
+                    n = os.sendfile(sock.fileno(), f.fileno(), offset, min(left, 64 << 20))
+                    if n == 0:
+                        break
+                    offset += n
+                    left -= n
+                    sent += n
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+        dt = max(time.time() - t0, 0.001)
+        sys.stderr.write("  %s: %.0f MB in %.0f s, %.1f MB/s\n" % (path[3:], sent / 1e6, dt, sent / 1e6 / dt))
 
 
 def lan_address():
@@ -117,4 +123,9 @@ if __name__ == "__main__":
     total = sum(f["size"] for f in m["files"])
     print("Serving %s: %d files, %.1f GB" % (ROOT, len(m["files"]), total / 1e9))
     print("In Husk, Downloads > Add, enter:  http://%s:%d/" % (lan_address(), PORT))
-    ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
+    class Server(ThreadingHTTPServer):
+        daemon_threads = True
+        def server_bind(self):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 8 << 20)
+            super().server_bind()
+    Server(("0.0.0.0", PORT), Handler).serve_forever()

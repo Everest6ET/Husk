@@ -57,8 +57,9 @@ final class Downloads: ObservableObject {
         config.isDiscretionary = false
         config.sessionSendsLaunchEvents = true
         config.allowsCellularAccess = true
-        // One file at a time from a host: a computer serving a folder off a hard drive slows down a lot when asked for several at once.
-        config.httpMaximumConnectionsPerHost = 1
+        // Several files at once: one stream is all iOS gives a background download over Wi-Fi, and it was about 10 MB/s. Four keep a
+        // computer's hard drive reading mostly in long runs (the server reads big pieces), and fill the link.
+        config.httpMaximumConnectionsPerHost = 4
         config.timeoutIntervalForRequest = 120
         config.timeoutIntervalForResource = 7 * 24 * 3600
         session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
@@ -120,6 +121,7 @@ final class Downloads: ObservableObject {
             task = session.downloadTask(with: url)
         }
         task.taskDescription = TaskTag(job: job, path: f.path, kind: kind).encoded
+        task.priority = URLSessionTask.highPriority
         if f.size > 0 { task.countOfBytesClientExpectsToReceive = f.size }
         task.resume()
     }
@@ -212,8 +214,16 @@ final class Downloads: ObservableObject {
         if let j = jobs.firstIndex(where: { $0.id == tag.job }), !jobs[j].paused,
            let k = jobs[j].files.firstIndex(where: { $0.path == tag.path }), retries[key, default: 0] < 3 {
             retries[key, default: 0] += 1
-            HuskLog.log("downloads", "\(tag.path): \(error); trying again (\(retries[key]!))")
-            begin(tag.job, jobs[j].files[k], kind: tag.kind)
+            // Waiting first, longer each time: a computer whose server is restarting, or a phone moving between networks, needs a moment.
+            let n = retries[key]!, wait: UInt64 = n == 1 ? 5 : n == 2 ? 30 : 120
+            HuskLog.log("downloads", "\(tag.path): \(error); trying again in \(wait) s (\(n))")
+            let file = jobs[j].files[k]
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: wait * 1_000_000_000)
+                guard let job = self.jobs.first(where: { $0.id == tag.job }), !job.paused,
+                      let f = job.files.first(where: { $0.path == file.path }), !f.done else { return }
+                self.begin(tag.job, f, kind: tag.kind)
+            }
             return
         }
         retries[key] = nil
