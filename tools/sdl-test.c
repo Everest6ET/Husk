@@ -29,6 +29,8 @@
 #include "husk-tl-xmem.h"
 #include "husk-tl-jni.h"
 #include "husk-tl-ld.h"
+#include "husk-tl-vulkan.h"
+#include "husk-tl-vulkan.h"
 
 void tl_log_line(const char *fmt, ...)
 {
@@ -432,8 +434,8 @@ int main(int argc, char **argv)
 
     tl_ld_set_verbosity(getenv("TL_VERBOSE") ? atoi(getenv("TL_VERBOSE")) : 1);
     tl_jni_set_trace(getenv("TL_JNI_TRACE") ? atoi(getenv("TL_JNI_TRACE")) : 1);
-    char tmp[] = "/tmp/husk-sdl-XXXXXX";
-    mkdtemp(tmp);
+    char tmp[600] = "/tmp/husk-sdl-XXXXXX";
+    if (getenv("TL_DATA")) snprintf(tmp, sizeof(tmp), "%s", getenv("TL_DATA")); else mkdtemp(tmp);   /* TL_DATA: keep the data dir between runs */
     const char *cef = "/Users/davi/Library/Application Support/Steam/Steam.AppBundle/Steam/Contents/MacOS/Frameworks/Chromium Embedded Framework.framework/Versions/A/Libraries";
     char egl[600], gles[600]; snprintf(egl, sizeof(egl), "%s/libEGL.dylib", cef); snprintf(gles, sizeof(gles), "%s/libGLESv2.dylib", cef);
     char frames[] = "/tmp/husk-sdlframes-XXXXXX"; mkdtemp(frames);
@@ -443,6 +445,10 @@ int main(int argc, char **argv)
                          .angle_egl = getenv("TL_ANGLE_EGL") ? getenv("TL_ANGLE_EGL") : egl, .angle_gles = getenv("TL_ANGLE_GLES") ? getenv("TL_ANGLE_GLES") : gles,
                          .frame_dir = frames, .frame_every = getenv("TL_FRAMES") ? atoi(getenv("TL_FRAMES")) : -6 };
     g_frame_dir = frames;
+    /* TL_VK: give the game Vulkan over this MoltenVK (1 = Homebrew's); presented frames go to the frames dir */
+    if (getenv("TL_VK")) tl_vk_configure(strcmp(getenv("TL_VK"), "1") ? getenv("TL_VK") : "/opt/homebrew/lib/libMoltenVK.dylib", frames, getenv("TL_FRAMES") ? atoi(getenv("TL_FRAMES")) : 6);
+    /* TL_VK: give the game Vulkan over this MoltenVK (1 = Homebrew's); presented frames go to the frames dir */
+    if (getenv("TL_VK")) tl_vk_configure(strcmp(getenv("TL_VK"), "1") ? getenv("TL_VK") : "/opt/homebrew/lib/libMoltenVK.dylib", frames, getenv("TL_FRAMES") ? atoi(getenv("TL_FRAMES")) : 6);
     if (getenv("TL_STRESS_ENV")) for (int i = 0; i < 400; i++) { char k[32], v[8]; snprintf(k, sizeof(k), "HUSK_STRESS_%d", i); snprintf(v, sizeof(v), "%d", i); setenv(k, v, 1); }   /* reallocates the process environment, as the app's own setenv calls do */
     if (getenv("TL_EXTRA_APKS")) { char ex[2000]; snprintf(ex, sizeof(ex), "%s", getenv("TL_EXTRA_APKS")); for (char *p = strtok(ex, ":"); p; p = strtok(NULL, ":")) if (!tl_sdl_add_package(p)) fprintf(stderr, "cannot add %s\n", p); }
     if (getenv("TL_AUDIO")) tl_audio_install();

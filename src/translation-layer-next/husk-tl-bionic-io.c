@@ -442,6 +442,8 @@ static long b_write(int fd, const void *p, size_t n)
     if (net_trace_fd(fd)) tl_log_line("net: write(fd %d, %zu) -> %ld errno %d", fd, n, r, r < 0 ? e : 0);
     return r;
 }
+/* write() with the buffer's size checked first, as bionic's FORTIFY does */
+static long b___write_chk(int fd, const void *p, size_t n, size_t bufsize) { if (n > bufsize) abort(); return b_write(fd, p, n); }
 static long b_writev(int fd, const struct iovec *v, int n) { TL_ERRNO_BEGIN(); long r = writev(fd, v, n); TL_ERRNO_END(); return r; }
 static long b_pread64(int fd, void *p, size_t n, long off)
 {
@@ -503,7 +505,18 @@ static int b_chmod(const char *p, unsigned m) { char b[1024]; TL_ERRNO_BEGIN(); 
 static int b_fchmod(int fd, unsigned m) { TL_ERRNO_BEGIN(); int r = fchmod(fd, (mode_t)m); TL_ERRNO_END(); return r; }
 static int b_link(const char *a, const char *b2) { char x[1024], y[1024]; TL_ERRNO_BEGIN(); int r = link(tl_path_resolve(a, x, sizeof(x)), tl_path_resolve(b2, y, sizeof(y))); TL_ERRNO_END(); return r; }
 static int b_symlink(const char *a, const char *b2) { char y[1024]; TL_ERRNO_BEGIN(); int r = symlink(a, tl_path_resolve(b2, y, sizeof(y))); TL_ERRNO_END(); return r; }
-static long b_readlink(const char *p, char *buf, size_t n) { char b[1024]; TL_ERRNO_BEGIN(); long r = readlink(tl_path_resolve(p, b, sizeof(b)), buf, n); TL_ERRNO_END(); return r; }
+static long b_readlink(const char *p, char *buf, size_t n)
+{
+    /* An Android app's executable is the zygote's app_process. The host has no /proc, and code that sizes a string with the result (DXVK's
+     * exe-name lookup) throws when it gets -1. */
+    if (p && (!strcmp(p, "/proc/self/exe") || !strncmp(p, "/proc/", 6) && strstr(p, "/exe") && strlen(strstr(p, "/exe")) == 4)) {
+        static const char exe[] = "/system/bin/app_process64";
+        size_t l = strlen(exe) < n ? strlen(exe) : n;
+        memcpy(buf, exe, l);
+        return (long)l;
+    }
+    char b[1024]; TL_ERRNO_BEGIN(); long r = readlink(tl_path_resolve(p, b, sizeof(b)), buf, n); TL_ERRNO_END(); return r;
+}
 static char *b_realpath(const char *p, char *out) { char b[1024]; TL_ERRNO_BEGIN(); char *r = realpath(tl_path_resolve(p, b, sizeof(b)), out); TL_ERRNO_END(); return r; }
 static char *b_getcwd(char *buf, size_t n) { TL_ERRNO_BEGIN(); char *r = getcwd(buf, n); TL_ERRNO_END(); return r; }
 static int b_utimes(const char *p, const struct timeval tv[2]) { char b[1024]; TL_ERRNO_BEGIN(); int r = utimes(tl_path_resolve(p, b, sizeof(b)), tv); TL_ERRNO_END(); return r; }
@@ -1238,7 +1251,7 @@ static int b_inotify_add_watch(int a, const char *b, unsigned c) { (void)a; (voi
 
 const tl_bionic_entry tl_tab_io[] = {
     TL_WRAP("open", b_open), TL_WRAP("__open_2", b___open_2), TL_WRAP("close", b_close), TL_WRAP("read", b_read),
-    TL_WRAP("__read_chk", b___read_chk), TL_WRAP("write", b_write), TL_WRAP("writev", b_writev),
+    TL_WRAP("__read_chk", b___read_chk), TL_WRAP("write", b_write), TL_WRAP("__write_chk", b___write_chk), TL_WRAP("writev", b_writev),
     TL_WRAP("pread64", b_pread64), TL_WRAP("pwrite64", b_pwrite64), TL_WRAP("__pread64_chk", b___pread64_chk), TL_WRAP("__pwrite64_chk", b___pwrite64_chk), TL_WRAP("__pwrite_chk", b___pwrite64_chk), TL_WRAP("__pread_chk", b___pread64_chk), TL_WRAP("lseek", b_lseek), TL_WRAP("lseek64", b_lseek),
     TL_WRAP("dup", b_dup), TL_WRAP("dup2", b_dup2), TL_WRAP("pipe", b_pipe), TL_WRAP("fsync", b_fsync), TL_WRAP("fdatasync", b_fsync),
     TL_WRAP("ftruncate", b_ftruncate), TL_WRAP("truncate", b_truncate), TL_WRAP("isatty", b_isatty), TL_WRAP("flock", b_flock),
