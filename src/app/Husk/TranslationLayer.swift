@@ -21,6 +21,15 @@ enum TranslationLayer {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("TranslationLayer", isDirectory: true)
     }
+
+    /// What games see as Android's shared storage (/sdcard, outside their own Android/data). In Documents, so it shows in Files and
+    /// Finder: a game that wants its data in a folder of its own there (a PC port's game files, say) is given it by copying it in.
+    static var sharedStorage: URL {
+        let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Shared Storage", isDirectory: true)
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
 }
 
 // MARK: - What the C side reports

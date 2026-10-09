@@ -261,7 +261,9 @@ static void *launch_thread(void *arg)
             return NULL;
         }
         for (int i = 0; i < A.nextra; i++) if (!tl_sdl_add_package(A.extra[i])) tl_log_line("sdl: cannot add %s", A.extra[i]);
-        tl_log_line("sdl: starting %s (%s) as %s, %dx%d", A.apk, activity, A.package, A.width, A.height);
+        /* SDL games may draw with Vulkan (SDL_WINDOW_VULKAN, or DXVK under a Direct3D port): MoltenVK, when the app named it */
+        if (A.vulkan[0]) tl_vk_configure(A.vulkan, NULL, 0);
+        tl_log_line("sdl: starting %s (%s) as %s, %dx%d (Vulkan: %s)", A.apk, activity, A.package, A.width, A.height, A.vulkan[0] ? "yes" : "no");
         tl_audio_install();
         ok = tl_sdl_start(&cfg, activity) && tl_sdl_run();
     } else if (A.engine == ENGINE_GODOT) {
@@ -395,6 +397,9 @@ bool husk_ue4_launch(const char *apk, const char *data_dir, void *metal_layer, i
 }
 /* Where MoltenVK is: Unreal's Vulkan renderer runs on it. Before the launch call. */
 void husk_ue4_set_vulkan(const char *dylib) { snprintf(A.vulkan, sizeof(A.vulkan), "%s", dylib ? dylib : ""); }
+void tl_set_shared_storage(const char *dir);
+void husk_native_set_shared_storage(const char *dir) { tl_set_shared_storage(dir); }
+
 void husk_native_add_package(const char *apk)
 {
     if (apk && A.nextra < 3 && atomic_load(&A.state) == HUSK_UNITY_IDLE) {

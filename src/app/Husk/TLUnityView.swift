@@ -178,6 +178,9 @@ final class TLUnityUIView: UIView, UIKeyInput {
         // Splits and the asset pack are part of the app, whatever its engine; the game's libraries and data may be in any of
         // them (a Google Play install keeps a Unity game's libraries in one split and its data in an asset pack).
         for extra in extraApks.prefix(3) { husk_native_add_package(extra) }
+        // Android's shared storage, one folder for every game: a game that keeps its data in a folder of its own on /sdcard finds it
+        // in Husk's "Shared Storage", which can be filled from Files or Finder.
+        husk_native_set_shared_storage(TranslationLayer.sharedStorage.path)
         let started: Bool
         switch engine {
         case .sdl:
@@ -186,6 +189,8 @@ final class TLUnityUIView: UIView, UIKeyInput {
                 let k = contentScaleFactor
                 husk_sdl_set_safe_insets(Int32(inset.left * k), Int32(inset.top * k), Int32(inset.right * k), Int32(inset.bottom * k))
             }
+            // Vulkan for the SDL games that draw with it (directly, or through DXVK): MoltenVK, as for Unreal.
+            if let fw = Bundle.main.privateFrameworksPath { husk_ue4_set_vulkan(fw + "/MoltenVK.framework/MoltenVK") }
             started = husk_sdl_launch(apk, dataDir, layerPtr, Int32(width), Int32(height), angle, ca)
         case .gta: started = husk_gta_launch(apk, dataDir, layerPtr, Int32(width), Int32(height), angle, ca)
         case .godot: started = husk_godot_launch(apk, dataDir, layerPtr, Int32(width), Int32(height), angle, ca)

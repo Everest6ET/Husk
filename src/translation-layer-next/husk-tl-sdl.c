@@ -258,7 +258,18 @@ static void A_pollInputDevices(tl_jcall *c)
     void (*remove)(void *, void *, int) = native_of(SDLCTRL, "nativeRemoveJoystick", "(I)V");
     for (int slot = 0; slot < TL_PADS; slot++) {
         bool connected = tl_pad_connected(slot), announced = (atomic_load(&g_pads_announced) >> slot) & 1;
-        if (connected && !announced && add) {
+        if (connected && !announced && S.sdl2) {
+            /* SDL 2: nativeAddJoystick(id, name, desc, vendor, product, is_accelerometer, button_mask, naxes, [axis_mask,] nhats, nballs) -> int. 2.24 added the
+             * axis mask. Past the eighth argument they go on the stack, where Android gives every one a slot of 8 bytes: passed as 64-bit values here. */
+            void *fn = native_of(SDLCTRL, "nativeAddJoystick", "(ILjava/lang/String;Ljava/lang/String;IIZIIIII)I");
+            bool st, mask = tl_dexidx_declares_method(SDLCTRL, "nativeAddJoystick", "(ILjava/lang/String;Ljava/lang/String;IIZIIIII)I", &st);
+            char desc[40]; snprintf(desc, sizeof(desc), "husk-xbox-%d", slot);
+            void *env = tl_jni_env(), *cls = tl_jni_class_object(SDLCTRL), *name = tl_jni_new_string("Xbox Wireless Controller"), *d = tl_jni_new_string(desc);
+            if (fn && mask) ((int (*)(void *, void *, int, void *, void *, int, int, int, int64_t, int64_t, int64_t, int64_t, int64_t))fn)(env, cls, PAD_ID(slot), name, d, 0x045e, 0x02fd, 0, 0x7fff, 6, 0x003f, 0, 0);
+            else if (fn) ((int (*)(void *, void *, int, void *, void *, int, int, int, int64_t, int64_t, int64_t, int64_t))fn)(env, cls, PAD_ID(slot), name, d, 0x045e, 0x02fd, 0, 0x7fff, 6, 0, 0);
+            if (fn) tl_log_line("sdl: controller %d announced to SDL 2%s", slot, mask ? "" : " (no axis mask)");
+            atomic_fetch_or(&g_pads_announced, 1 << slot);
+        } else if (connected && !announced && add) {
             char desc[40]; snprintf(desc, sizeof(desc), "husk-xbox-%d", slot);
             /* 0x045e:0x02fd, an Xbox One S over Bluetooth; buttons A B X Y Back Guide Start Lstick Rstick L1 R1 and the D-pad; six axes (two sticks and two triggers), no hat -- the D-pad is buttons. */
             add(tl_jni_env(), tl_jni_class_object(SDLCTRL), PAD_ID(slot), tl_jni_new_string("Xbox Wireless Controller"), tl_jni_new_string(desc), 0x045e, 0x02fd, 0x7fff, 6, 0x003f, 0, 0);
@@ -717,7 +728,8 @@ bool tl_sdl_start(const tl_ga_config *cfg, const char *activity_class)
     /* The D-pad as buttons (DPAD_UP...), the way SDL maps them, rather than as the hat the gamepad layer sends by default. Read by the layer at the first controller update. */
     setenv("TL_PAD_DPAD", "keys", 0);
     static const tl_pad_sink sink = { pad_key, pad_motion };
-    if (!S.sdl2) tl_pad_set_sink(&sink);
+    /* SDL 2 since 2.0.14 takes pad buttons as onNativePadDown(device, keycode), as SDL 3 does; an older one (SuperTuxKart's) has another arity, and is left without. */
+    { bool st; if (!S.sdl2 || tl_dexidx_declares_method(SDLCTRL, "onNativePadDown", "(II)I", &st)) tl_pad_set_sink(&sink); }
     S.started = true;
     return true;
 }

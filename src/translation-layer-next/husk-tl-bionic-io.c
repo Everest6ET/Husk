@@ -127,6 +127,9 @@ int tl_synth_open(const char *path)
     return s ? synth_file(s) : -1;
 }
 
+static char g_shared_storage[1024];
+void tl_set_shared_storage(const char *dir) { snprintf(g_shared_storage, sizeof(g_shared_storage), "%s", dir ? dir : ""); }
+
 const char *tl_path_resolve(const char *path, char *buf, size_t n)
 {
     if (!path) return path;
@@ -143,6 +146,16 @@ const char *tl_path_resolve(const char *path, char *buf, size_t n)
     }
     if (!strncmp(path, "/sdcard", 7) || !strncmp(path, "/storage/emulated/0", 19)) {
         const char *rest = !strncmp(path, "/sdcard", 7) ? path + 7 : path + 19;
+        /* Shared storage (anything but an app's own Android/data and Android/obb) is one folder for every game when the app gave one,
+         * which the player can fill from Files: a game whose data lives in a folder of its own on /sdcard finds it there. What a game
+         * already keeps in its private copy stays found. */
+        if (g_shared_storage[0] && strncmp(rest, "/Android/data", 13) && strncmp(rest, "/Android/obb", 12)) {
+            char own[1024]; struct stat st;
+            snprintf(own, sizeof(own), "%s/sdcard%s", tl_data_dir(), rest);
+            if (rest[0] && rest[1] && stat(own, &st) == 0) { snprintf(buf, n, "%s", own); return buf; }
+            snprintf(buf, n, "%s%s", g_shared_storage, rest);
+            return buf;
+        }
         snprintf(buf, n, "%s/sdcard%s", tl_data_dir(), rest);
         return buf;
     }

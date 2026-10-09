@@ -58,6 +58,8 @@ bool husk_gta_launch(const char *apk, const char *data_dir, void *metal_layer, i
 void husk_ue4_set_vulkan(const char *dylib);
 /* Another APK of the app about to be launched (a split, an asset pack). Before the launch call; at most three. */
 void husk_native_add_package(const char *apk);
+/* The folder games see as Android's shared storage (/sdcard outside their own Android/data), or NULL for each game's own. */
+void husk_native_set_shared_storage(const char *dir);
 /* The screen's safe-area insets in pixels, for a game that keeps its controls out of a notch (SDL games ask). Before the launch call, or any time. */
 void husk_sdl_set_safe_insets(int left, int top, int right, int bottom);
 /* Whether an SDL game's manifest asks for a portrait screen (the others are landscape). */
