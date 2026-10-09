@@ -203,9 +203,11 @@ final class PadView: UIView {
     private func layout(in bounds: CGRect) -> [Control] {
         let w = bounds.width, h = bounds.height
         guard w > 0, h > 0 else { return [] }
-        let k = max(0.7, min(1.15, h / 372))
+        let isPad = UIDevice.current.userInterfaceIdiom == .pad
+        // On iPad, clamp k to a comfortable hand reach size rather than scaling indefinitely with height
+        let k = isPad ? 1.15 : max(0.7, min(1.15, h / 372))
         let insets = window?.safeAreaInsets ?? safeAreaInsets
-        let left = max(insets.left, 8), right = max(insets.right, 8), bottom = max(insets.bottom, 8)
+        let left = max(insets.left, isPad ? 20 : 8), right = max(insets.right, isPad ? 20 : 8), bottom = max(insets.bottom, isPad ? 20 : 8)
         let m = 16 * k
         var list: [Control] = []
 

@@ -13,7 +13,7 @@ enum WhatsNew {
     }
 
     /// The version whose notes these are. A build of the same version shows nothing again.
-    static let version = "1.0.0"
+    static let version = "1.0.1"
     static let items: [Item] = [
         Item(symbol: "bag.fill", title: "Google Play",
              detail: "Get games from the Store tab. Play Store downloads, with their split APKs and asset packs, run in the Translation Layer."),

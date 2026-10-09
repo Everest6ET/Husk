@@ -198,9 +198,9 @@ struct HomeView: View {
                         let apps = items.filter { !$0.isGame && $0 != lead }
                         if !apps.isEmpty {
                             ShelfHeader(title: "Apps") { router.showLibrary(.apps) }
-                            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8, alignment: .top), count: 4),
+                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 64, maximum: 90), spacing: 8, alignment: .top)],
                                       spacing: 14) {
-                                ForEach(apps.prefix(8)) { item in
+                                ForEach(apps.prefix(UIDevice.current.userInterfaceIdiom == .pad ? 16 : 8)) { item in
                                     NavigationLink(value: item.route) {
                                         LauncherTile(title: item.title, iconPath: item.iconPath, size: 50)
                                     }

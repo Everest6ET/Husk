@@ -4,7 +4,9 @@ import SwiftUI
 /// Which way the app may turn. The app follows the device, except while a landscape game is on screen:
 /// Geometry Dash is a landscape game, and a fixed-size surface cannot follow a rotation.
 enum HuskOrientation {
-    static let standard: UIInterfaceOrientationMask = [.portrait, .landscapeLeft, .landscapeRight]
+    static var standard: UIInterfaceOrientationMask {
+        UIDevice.current.userInterfaceIdiom == .pad ? .all : [.portrait, .landscapeLeft, .landscapeRight]
+    }
     static var mask: UIInterfaceOrientationMask = standard
 
     /// Allow only `new`, and turn the screen to it if it is not already there.

@@ -72,8 +72,8 @@ targets:
         LD_RUNPATH_SEARCH_PATHS:
           - "$(inherited)"
           - "@executable_path/Frameworks"
-        # Husk targets recent iPhones only; a real Android guest needs the RAM.
-        TARGETED_DEVICE_FAMILY: "1"
+        # Husk targets iPhones and iPads (iPadOS).
+        TARGETED_DEVICE_FAMILY: "1,2"
         # XcodeGen links the dylib by -l, so the linker needs a library search
         # path (not just the framework search path it infers from the file).
         LIBRARY_SEARCH_PATHS:
@@ -233,7 +233,7 @@ targets:
         GENERATE_INFOPLIST_FILE: NO
         APPLICATION_EXTENSION_API_ONLY: YES
         CODE_SIGN_STYLE: Automatic
-        TARGETED_DEVICE_FAMILY: "1"
+        TARGETED_DEVICE_FAMILY: "1,2"
         # StikJIT.framework, in the app's Frameworks (the app target's Embed StikJIT).
         LD_RUNPATH_SEARCH_PATHS:
           - "$(inherited)"
