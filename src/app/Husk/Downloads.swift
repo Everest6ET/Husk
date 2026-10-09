@@ -45,6 +45,8 @@ final class Downloads: ObservableObject {
     /// Bytes per second across everything running, smoothed.
     @Published private(set) var speed: Double = 0
     @Published var problem: String?
+    /// Live Activities are turned off for Husk in Settings, so a download cannot show on the Lock Screen or in the Dynamic Island.
+    @Published var liveActivitiesOff = false
 
     nonisolated static let sessionID = "com.husk.downloads"
     private let session: URLSession
@@ -104,6 +106,12 @@ final class Downloads: ObservableObject {
     }
 
     private func start(_ job: Job) {
+        // The same link again, while it is still downloading: carry on with that one rather than fetch everything twice.
+        if let existing = jobs.first(where: { $0.source == job.source && !$0.complete }) {
+            HuskLog.log("downloads", "\(job.title) is already downloading; resuming it")
+            resume(existing.id)
+            return
+        }
         jobs.insert(job, at: 0)
         save()
         for f in job.files where !f.done { begin(job.id, f, kind: job.kind) }
@@ -401,6 +409,7 @@ enum LiveDownload {
 private enum Live {
     static var activity: Activity<HuskDownloadAttributes>?
     static var started = Date()
+    static var logged = false
 
     static func update(jobs: [Downloads.Job], speed: Double) {
         let active = jobs.filter { !$0.complete && !$0.paused }
@@ -418,15 +427,29 @@ private enum Live {
         let received = active.reduce(0) { $0 + $1.received }, total = active.reduce(0) { $0 + $1.total }
         let finishBy = speed > 1 && total > received ? Date().addingTimeInterval(Double(total - received) / speed) : nil
         let title = active.count == 1 ? active[0].title : "\(active.count) downloads"
-        let state = HuskDownloadAttributes.ContentState(title: title, received: received, total: total, finishBy: finishBy, started: started,
+        var state = HuskDownloadAttributes.ContentState(title: title, received: received, total: total, finishBy: finishBy, started: started,
                                                         finished: false, failed: active.contains { $0.failed })
-        if let a = activity {
+        state.speed = speed
+        state.filesDone = active.reduce(0) { $0 + $1.filesDone }
+        state.filesTotal = active.reduce(0) { $0 + $1.files.count }
+        if let a = activity, a.activityState == .active {
             Task { await a.update(using: state) }
         } else {
+            activity = nil
             started = Date()
-            guard ActivityAuthorizationInfo().areActivitiesEnabled else { return }
-            do { activity = try Activity.request(attributes: HuskDownloadAttributes(), contentState: state, pushType: nil) }
-            catch { HuskLog.log("downloads", "no Live Activity: \(error.localizedDescription)") }
+            state.started = started
+            let auth = ActivityAuthorizationInfo().areActivitiesEnabled
+            let widget = Bundle.main.builtInPlugInsURL.map { FileManager.default.fileExists(atPath: $0.appendingPathComponent("HuskDownloadsWidget.appex").path) } ?? false
+            if !logged { logged = true; HuskLog.log("downloads", "Live Activity: allowed \(auth), widget extension installed \(widget)") }
+            Downloads.shared.liveActivitiesOff = !auth
+            guard auth else { return }
+            do {
+                let a = try Activity.request(attributes: HuskDownloadAttributes(), contentState: state, pushType: nil)
+                activity = a
+                HuskLog.log("downloads", "Live Activity started (\(a.id))")
+            } catch {
+                HuskLog.log("downloads", "no Live Activity: \(error.localizedDescription)")
+            }
         }
     }
 }

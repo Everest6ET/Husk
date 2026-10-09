@@ -36,7 +36,13 @@ struct DownloadsTab: View {
                         }
                     }
                 } footer: {
-                    if let free = Downloads.freeSpace() { Text("\(Downloads.bytes(free)) free on this device.") }
+                    VStack(alignment: .leading, spacing: 6) {
+                        if downloads.liveActivitiesOff {
+                            Text("Live Activities are off for Husk, so downloads don't show on the Lock Screen or in the Dynamic Island. Turn them on in Settings › Husk › Live Activities.")
+                                .foregroundStyle(.orange)
+                        }
+                        if let free = Downloads.freeSpace() { Text("\(Downloads.bytes(free)) free on this device.") }
+                    }
                 }
             }
             .navigationTitle("Downloads")

@@ -31,7 +31,11 @@ struct DownloadActivityWidget: Widget {
                     VStack(alignment: .leading, spacing: 6) {
                         Text(context.state.title).font(.subheadline.weight(.semibold)).lineLimit(1)
                         Bar(state: context.state)
-                        Text(stateDetail(context.state)).font(.caption).foregroundStyle(.secondary)
+                        HStack {
+                            Text(stateDetail(context.state)).font(.caption).foregroundStyle(.secondary)
+                            Spacer()
+                            TimeLeft(state: context.state)
+                        }
                     }
                 }
             } compactLeading: {
@@ -57,7 +61,11 @@ private struct LockScreenView: View {
                 Text(statePercent(state)).font(.headline.monospacedDigit())
             }
             Bar(state: state)
-            Text(stateDetail(state)).font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Text(stateDetail(state)).font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                TimeLeft(state: state)
+            }
         }
         .foregroundStyle(.white)
     }
@@ -78,6 +86,18 @@ private struct Bar: View {
     }
 }
 
+/// Time left, counting down by itself between updates.
+@available(iOS 16.1, *)
+private struct TimeLeft: View {
+    let state: HuskDownloadAttributes.ContentState
+    var body: some View {
+        if !state.finished, !state.failed, let end = state.finishBy, end > Date() {
+            Text(timerInterval: Date()...end, countsDown: true).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                .multilineTextAlignment(.trailing).frame(maxWidth: 70, alignment: .trailing)
+        }
+    }
+}
+
 @available(iOS 16.1, *)
 private func statePercent(_ s: HuskDownloadAttributes.ContentState) -> String {
     if s.finished { return "Done" }
@@ -91,11 +111,8 @@ private func stateDetail(_ s: HuskDownloadAttributes.ContentState) -> String {
     if s.failed { return "Stopped. Open Husk to retry." }
     if s.finished { return "\(f.string(fromByteCount: s.total)) downloaded" }
     var text = "\(f.string(fromByteCount: s.received)) of \(f.string(fromByteCount: s.total))"
-    if let end = s.finishBy, end > Date() {
-        let r = RelativeDateTimeFormatter()
-        r.unitsStyle = .short
-        text += " · done \(r.localizedString(for: end, relativeTo: Date()))"
-    }
+    if s.speed > 1 { text += " · \(f.string(fromByteCount: Int64(s.speed)))/s" }
+    if s.filesTotal > 1 { text += " · \(s.filesDone)/\(s.filesTotal) files" }
     return text
 }
 

@@ -18,6 +18,10 @@ struct HuskDownloadAttributes: ActivityAttributes {
         var started: Date
         var finished: Bool
         var failed: Bool
+        /// Bytes per second when the app last saw it, and files done of all, for the stats line.
+        var speed: Double = 0
+        var filesDone: Int = 0
+        var filesTotal: Int = 0
     }
 }
 #endif
