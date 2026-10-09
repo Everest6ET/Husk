@@ -82,10 +82,22 @@ what happened, with a report you can share.
 
 ## Installing
 
-Download `Husk.ipa` from [Releases](https://github.com/leviidev/husk/releases)
-and install it with SideStore, AltStore or TrollStore. It is one IPA for all
-of them: it carries Husk's entitlements, which TrollStore keeps, and a
-sideloader re-signs it with your own. Husk needs iOS 16.4 or later.
+**SideStore, AltStore and other sideloaders:** add Husk's source, and the
+sideloader installs Husk and offers each update as it comes out.
+
+```
+https://raw.githubusercontent.com/Leviidev/Husk/main/altsource.json
+```
+
+In SideStore or AltStore: Sources › + › paste the address above.
+
+**Or by hand:** download `Husk.ipa` from
+[Releases](https://github.com/leviidev/husk/releases) and install it with
+SideStore, AltStore or TrollStore. It is one IPA for all of them: it carries
+Husk's entitlements, which TrollStore keeps, and a sideloader re-signs it with
+your own.
+
+Husk needs iOS 16.0 or later.
 
 ## JIT
 
