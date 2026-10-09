@@ -451,6 +451,7 @@ int main(int argc, char **argv)
     if (getenv("TL_VK")) tl_vk_configure(strcmp(getenv("TL_VK"), "1") ? getenv("TL_VK") : "/opt/homebrew/lib/libMoltenVK.dylib", frames, getenv("TL_FRAMES") ? atoi(getenv("TL_FRAMES")) : 6);
     if (getenv("TL_STRESS_ENV")) for (int i = 0; i < 400; i++) { char k[32], v[8]; snprintf(k, sizeof(k), "HUSK_STRESS_%d", i); snprintf(v, sizeof(v), "%d", i); setenv(k, v, 1); }   /* reallocates the process environment, as the app's own setenv calls do */
     if (getenv("TL_EXTRA_APKS")) { char ex[2000]; snprintf(ex, sizeof(ex), "%s", getenv("TL_EXTRA_APKS")); for (char *p = strtok(ex, ":"); p; p = strtok(NULL, ":")) if (!tl_sdl_add_package(p)) fprintf(stderr, "cannot add %s\n", p); }
+    if (getenv("TL_ARGS")) tl_sdl_set_arguments(getenv("TL_ARGS"));
     if (getenv("TL_AUDIO")) tl_audio_install();
     if (getenv("TL_PAD")) tl_pad_connect(0, "Xbox Wireless Controller");
     if (!tl_sdl_start(&cfg, getenv("TL_ACTIVITY") ? getenv("TL_ACTIVITY") : getenv("TL_PKG") ? NULL : "com/vectorunit/cobalt/MainActivity")) { fprintf(stderr, "ue4: start failed\n"); return 1; }

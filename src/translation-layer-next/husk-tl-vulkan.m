@@ -494,6 +494,84 @@ static void reclaim(uint32_t *f, const uint32_t *saved)
     for (size_t i = 0; i < sizeof(k_d3d_features) / sizeof(k_d3d_features[0]); i++) f[k_d3d_features[i]] = saved[i];
 }
 
+
+/* ------------------------------------------------------------ null descriptors */
+/*
+ * DXVK leaves unused vertex-buffer slots bound to VK_NULL_HANDLE, which robustness2's nullDescriptor allows and MoltenVK does not
+ * implement (it dereferences the buffer). For DXVK games each device gets one small buffer of zeros, bound in place of a null one:
+ * reads from it return zero, which is what a null binding reads.
+ */
+typedef struct { uint32_t sType; const void *pNext; uint32_t flags; uint64_t size; uint32_t usage; uint32_t sharing; uint32_t nq; const uint32_t *q; } vk_buffer_ci;
+typedef struct { uint64_t size, alignment; uint32_t typeBits; } vk_mem_req;
+typedef struct { uint32_t sType; const void *pNext; uint64_t size; uint32_t type; } vk_mem_ai;
+typedef struct { uint32_t flags, heap; } vk_mem_type;
+typedef struct { uint32_t typeCount; vk_mem_type types[32]; uint32_t heapCount; struct { uint64_t size; uint32_t flags; } heaps[16]; } vk_mem_props;
+#define NULL_BUF_SIZE (64 * 1024)
+
+static uint64_t g_null_buf;
+
+static void make_null_buffer(void *pd, void *dev)
+{
+    int (*create)(void *, const vk_buffer_ci *, const void *, uint64_t *) = dlsym(V.lib, "vkCreateBuffer");
+    void (*req)(void *, uint64_t, vk_mem_req *) = dlsym(V.lib, "vkGetBufferMemoryRequirements");
+    void (*props)(void *, vk_mem_props *) = dlsym(V.lib, "vkGetPhysicalDeviceMemoryProperties");
+    int (*alloc)(void *, const vk_mem_ai *, const void *, uint64_t *) = dlsym(V.lib, "vkAllocateMemory");
+    int (*bind)(void *, uint64_t, uint64_t, uint64_t) = dlsym(V.lib, "vkBindBufferMemory");
+    int (*map)(void *, uint64_t, uint64_t, uint64_t, uint32_t, void **) = dlsym(V.lib, "vkMapMemory");
+    if (!create || !req || !props || !alloc || !bind || !map) return;
+    vk_buffer_ci ci = { 12, NULL, 0, NULL_BUF_SIZE, 0x80 | 0x40 | 0x20 | 0x10 | 0x8 | 0x4 | 0x2 | 0x1, 0, 0, NULL };
+    uint64_t buf = 0, mem = 0;
+    if (create(dev, &ci, NULL, &buf) != VK_SUCCESS) return;
+    vk_mem_req r; req(dev, buf, &r);
+    vk_mem_props mp; memset(&mp, 0, sizeof(mp)); props(pd, &mp);
+    uint32_t type = UINT32_MAX;
+    for (uint32_t i = 0; i < mp.typeCount && i < 32; i++) if ((r.typeBits & (1u << i)) && (mp.types[i].flags & 0x6) == 0x6) { type = i; break; }
+    if (type == UINT32_MAX) return;
+    vk_mem_ai ai = { 5, NULL, r.size, type };
+    void *ptr = NULL;
+    if (alloc(dev, &ai, NULL, &mem) != VK_SUCCESS || bind(dev, buf, mem, 0) != VK_SUCCESS || map(dev, mem, 0, r.size, 0, &ptr) != VK_SUCCESS) return;
+    memset(ptr, 0, (size_t)r.size);
+    g_null_buf = buf;
+    tl_log_line("vulkan: DXVK game: a %d KiB buffer of zeros stands in for null vertex buffers", NULL_BUF_SIZE / 1024);
+}
+
+typedef void (*pfn_bind_vb)(void *, uint32_t, uint32_t, const uint64_t *, const uint64_t *);
+typedef void (*pfn_bind_vb2)(void *, uint32_t, uint32_t, const uint64_t *, const uint64_t *, const uint64_t *, const uint64_t *);
+static pfn_bind_vb g_real_bind_vb;
+static pfn_bind_vb2 g_real_bind_vb2, g_real_bind_vb2ext;
+
+static void resolve_binds(void)
+{
+    if (g_real_bind_vb) return;
+    g_real_bind_vb2 = (pfn_bind_vb2)dlsym(V.lib, "vkCmdBindVertexBuffers2");
+    g_real_bind_vb2ext = (pfn_bind_vb2)dlsym(V.lib, "vkCmdBindVertexBuffers2EXT");
+    g_real_bind_vb = (pfn_bind_vb)dlsym(V.lib, "vkCmdBindVertexBuffers");
+}
+
+static bool has_null(uint32_t n, const uint64_t *b) { if (!g_null_buf || !b) return false; for (uint32_t i = 0; i < n; i++) if (!b[i]) return true; return false; }
+
+static void w_vkCmdBindVertexBuffers(void *cmd, uint32_t first, uint32_t n, const uint64_t *bufs, const uint64_t *offs)
+{
+    resolve_binds();
+    if (!has_null(n, bufs) || n > 64) { g_real_bind_vb(cmd, first, n, bufs, offs); return; }
+    uint64_t b[64], o[64];
+    for (uint32_t i = 0; i < n; i++) { b[i] = bufs[i] ? bufs[i] : g_null_buf; o[i] = bufs[i] ? offs[i] : 0; }
+    g_real_bind_vb(cmd, first, n, b, o);
+}
+
+static void bind_vb2(pfn_bind_vb2 real, void *cmd, uint32_t first, uint32_t n, const uint64_t *bufs, const uint64_t *offs, const uint64_t *sizes, const uint64_t *strides)
+{
+    if (!has_null(n, bufs) || n > 64) { real(cmd, first, n, bufs, offs, sizes, strides); return; }
+    uint64_t b[64], o[64], z[64];
+    for (uint32_t i = 0; i < n; i++) {
+        b[i] = bufs[i] ? bufs[i] : g_null_buf; o[i] = bufs[i] ? offs[i] : 0;
+        if (sizes) z[i] = bufs[i] ? sizes[i] : NULL_BUF_SIZE;
+    }
+    real(cmd, first, n, b, o, sizes ? z : NULL, strides);
+}
+static void w_vkCmdBindVertexBuffers2(void *cmd, uint32_t first, uint32_t n, const uint64_t *b, const uint64_t *o, const uint64_t *z, const uint64_t *s) { resolve_binds(); bind_vb2(g_real_bind_vb2, cmd, first, n, b, o, z, s); }
+static void w_vkCmdBindVertexBuffers2EXT(void *cmd, uint32_t first, uint32_t n, const uint64_t *b, const uint64_t *o, const uint64_t *z, const uint64_t *s) { resolve_binds(); bind_vb2(g_real_bind_vb2ext ? g_real_bind_vb2ext : g_real_bind_vb2, cmd, first, n, b, o, z, s); }
+
 static pfn_create_device g_real_create_device;
 static int w_vkCreateDevice(void *pd, const vk_device_ci *ci, const void *alloc, void **out)
 {
@@ -537,6 +615,9 @@ static int w_vkCreateDevice(void *pd, const vk_device_ci *ci, const void *alloc,
     free(ext);
     if (f2) reclaim(f2->f, saved2);
     tl_log_line("vulkan: vkCreateDevice(%u extensions) -> %d", ci->extCount, r);
+    if (r == VK_SUCCESS && out && *out) {
+        make_null_buffer(pd, *out);
+    }
     return r;
 }
 
@@ -566,6 +647,9 @@ static const struct { const char *name; void *fn; } k_over[] = {
     { "vkGetPhysicalDeviceFeatures2KHR", w_vkGetPhysicalDeviceFeatures2KHR },
     { "vkCreateDevice", w_vkCreateDevice },
     { "vkEnumerateDeviceExtensionProperties", w_vkEnumerateDeviceExtensionProperties },
+    { "vkCmdBindVertexBuffers", w_vkCmdBindVertexBuffers },
+    { "vkCmdBindVertexBuffers2", w_vkCmdBindVertexBuffers2 },
+    { "vkCmdBindVertexBuffers2EXT", w_vkCmdBindVertexBuffers2EXT },
 };
 
 static void *overridden(const char *name)

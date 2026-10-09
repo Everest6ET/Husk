@@ -722,6 +722,9 @@ bool tl_sdl_start(const tl_ga_config *cfg, const char *activity_class)
     return true;
 }
 
+static char g_sdl_args[1024];
+void tl_sdl_set_arguments(const char *args) { snprintf(g_sdl_args, sizeof(g_sdl_args), "%s", args ? args : ""); }
+
 /* SDLMain: SDL_main runs on a thread of its own, started once the surface is ready. */
 static void *sdl_main_thread(void *arg)
 {
@@ -735,7 +738,14 @@ static void *sdl_main_thread(void *arg)
     if (!run_main) return NULL;
     if (init_main) init_main(env, cls);
     tl_log_line("sdl: SDL_main starting");
-    int r = run_main(env, cls, tl_jni_new_string(S.main_lib[0] ? S.main_lib : "libmain.so"), tl_jni_new_string(S.main_fn[0] ? S.main_fn : "SDL_main"), tl_jni_new_obj_array(tl_jni_class("java/lang/String"), 0));
+    /* SDLActivity.getArguments(): what the player set as the game's launch arguments, split at spaces */
+    char args[sizeof(g_sdl_args)]; snprintf(args, sizeof(args), "%s", g_sdl_args);
+    const char *argv[64]; int argc = 0;
+    for (char *t = strtok(args, " "); t && argc < 64; t = strtok(NULL, " ")) argv[argc++] = t;
+    jobj *jargs = tl_jni_new_obj_array(tl_jni_class("java/lang/String"), (uint32_t)argc);
+    for (int i = 0; i < argc; i++) jargs->oarr.v[i] = tl_jni_new_string(argv[i]);
+    if (argc) tl_log_line("sdl: launch arguments: %s", g_sdl_args);
+    int r = run_main(env, cls, tl_jni_new_string(S.main_lib[0] ? S.main_lib : "libmain.so"), tl_jni_new_string(S.main_fn[0] ? S.main_fn : "SDL_main"), jargs);
     tl_log_line("sdl: SDL_main returned %d", r);
     if (cleanup) cleanup(env, cls);
     return NULL;
